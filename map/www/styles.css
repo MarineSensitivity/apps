@@ -1,0 +1,8 @@
+/* allow selectInput() to show above leaflet map controls (z-index: 1000) */
+.leaflet-top {
+  z-index:999!important;
+}
+
+#map {
+  height: calc(100vh - 80px) !important;
+}
