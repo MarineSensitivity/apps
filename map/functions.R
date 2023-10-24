@@ -1,6 +1,6 @@
 # TODO: migrate reusable functions into msens R package
 
-ms_basemap <- function(base_opacity = 0.7){
+ms_basemap <- function(base_opacity = 0.5){
 
   m <- leaflet() |>
     # add base: blue bathymetry and light brown/green topography
