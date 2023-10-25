@@ -3,6 +3,9 @@ shinyServer(function(input, output, session) {
   output$map <-  renderLeaflet({
 
     pal <- colorFactor("Spectral", ply_rgns_s05$rgn_key)
+    # ply_rgns_s05$rgn_key = factor(ply_rgns_s05$rgn_key)
+    # pal <- colorRampPalette(brewer.pal(11,name = 'Spectral'))(length(unique(ply_rgns_s05$rgn_key)))
+    # previewColors(pal, ply_rgns_s05$rgn_key)
 
     ms_basemap() |>
       addPolygons(

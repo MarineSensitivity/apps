@@ -2,7 +2,7 @@
 librarian::shelf(
   dplyr, glue, here, leaflet,
   MarineSensitivities/msens,
-  shiny, shinydashboard, sf, tibble)
+  RColorBrewer, shiny, shinydashboard, sf, tibble)
 #source("functions.R")
 
 lst_rgns <- ply_rgns_s05 |>
@@ -14,6 +14,5 @@ lst_rgns <- ply_rgns_s05 |>
   deframe()
 lst_rgns <- c(list(Overview = setNames(NA, "Overview")),
   lst_rgns)
-lst_rgns
 
 
