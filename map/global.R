@@ -1,7 +1,7 @@
 # libraries ----
 librarian::shelf(
   dplyr, glue, here, leaflet,
-  MarineSensitivities/msens,
+  MarineSensitivity/msens,
   RColorBrewer, shiny, shinydashboard, sf, tibble)
 #source("functions.R")
 
