@@ -22,7 +22,13 @@ shinyServer(function(input, output, session) {
           color        = "black",
           fillOpacity  = 0.8,
           opacity      = 0.9,
-          bringToFront = T))
+          bringToFront = T)) |>
+      addDrawToolbar(
+        targetGroup         = 'draw',
+        polylineOptions     = F,
+        circleMarkerOptions = F,
+        editOptions         = editToolbarOptions(
+          selectedPathOptions = selectedPathOptions()))
 
   })
 
@@ -40,7 +46,6 @@ shinyServer(function(input, output, session) {
       flyToBounds(b[['xmin']], b[['ymin']], b[['xmax']], b[['ymax']])
   })
 
-
   # * map zoom to clicked region ----
   observe({
     # require click on region in map
@@ -53,6 +58,17 @@ shinyServer(function(input, output, session) {
       st_bbox()
     leafletProxy("map") |>
       flyToBounds(b[['xmin']], b[['ymin']], b[['xmax']], b[['ymax']])
+  })
+
+  # * react to drawn region ----
+  observeEvent(input$map_draw_new_feature, {
+    feature <- input$map_draw_new_feature
+    if(feature$geometry$type == "Polygon") {
+      ply <- st_read(as.json(feature$geometry), quiet=T)
+      output$polygon_data <- renderPrint({
+        ply
+      })
+    }
   })
 
 })

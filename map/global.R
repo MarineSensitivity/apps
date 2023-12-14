@@ -1,9 +1,8 @@
 # libraries ----
 librarian::shelf(
-  dplyr, glue, here, leaflet,
+  dplyr, geojsonio, glue, here, leaflet,
   MarineSensitivity/msens,
   RColorBrewer, shiny, shinydashboard, sf, tibble)
-#source("functions.R")
 
 lst_rgns <- ply_rgns_s05 |>
   st_drop_geometry() |>
