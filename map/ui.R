@@ -1,6 +1,6 @@
 dashboardPage(
   dashboardHeader(
-    title = "Marine Sensitivities Map"),
+    title = "MarineSensitivity Map"),
   dashboardSidebar(
     selectInput(
       "sel_rgn", "Region",
