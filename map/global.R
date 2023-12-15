@@ -9,6 +9,10 @@ librarian::shelf(
   yogevherz/plotme,            # count_to_treemap()
   plotly, shiny, shinydashboard, sf, tibble)
 
+# TODO:
+#  - [ ] copy duckdb to server
+#  - [ ] migrate functions.R to aquamapsduckdb R package
+
 source(here("functions.R"))
 
 # con_am start/stop ----
