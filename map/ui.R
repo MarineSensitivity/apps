@@ -5,8 +5,9 @@ dashboardPage(
     selectInput(
       "sel_rgn", "Region",
       lst_rgns),
-    "polygon_data:",
-    verbatimTextOutput("polygon_data"),
+    actionButton(
+      "btn_spp",
+      glue("Show species (n={format(nrow(d_spp_g), big.mark = ',')})")),
     collapsed = F),
   dashboardBody(
     tags$head(tags$link(rel="stylesheet", type="text/css", href="styles.css")),
