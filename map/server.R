@@ -19,12 +19,12 @@ shinyServer(function(input, output, session) {
       na.color = "transparent",
       reverse = T)
 
-    ms_basemap() |>
+    ms_basemap(base_opacity = 0.7) |>
       addRasterImage(
         r_nspp_3857,
         project = F,
         colors  = pal,
-        opacity = 0.7) |>
+        opacity = 0.9) |>
       addPolygons(
         data        = ply_rgns_s05,
         layerId     = ~rgn_key,

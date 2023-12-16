@@ -3,8 +3,10 @@ dashboardPage(
     title = "MarineSensitivity Map"),
   dashboardSidebar(
     selectInput(
-      "sel_rgn", "Region",
+      "sel_rgn", "Zoom to Region:",
       lst_rgns),
+    hr(),
+    helpText("Draw polygon (toolbar on left of map) to find species there. Defaults to global."),
     actionButton(
       "btn_spp",
       glue("Show species (n={format(nrow(d_spp_g), big.mark = ',')})")),
