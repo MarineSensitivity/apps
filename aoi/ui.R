@@ -1,20 +1,12 @@
 page_sidebar(
-  title = "AoI Explorer",
-  # theme = bs_theme(
-  #   version               = 5,
-  #   bootswatch            = "darkly",
-  #   "font-size-base"      = "0.8rem",
-  #   "navbar-padding-y"    = "0",
-  #   "navbar-padding-x"    = "0",
-  #   "container-padding-x" = "0"),
+  title = "Area Explorer",
 
   sidebar = sidebar(
-    # title = "Selection",
     selectInput(
       "sel_aois", "Areas of Interest",
       lst_aois,
       "public.ply_rgns"),
-    textOutput("txt_status")
+    uiOutput("htm_status")
     # helpText(
     #   "Select an existing Shape or Draw a polygon (toolbar at top of Map)
     # to filter to species and view as interactive Table or treemap Plot. All

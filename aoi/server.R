@@ -1,6 +1,10 @@
 shinyServer(function(input, output, session) {
 
+  # rx: reactive values ----
+  rx <- reactiveValues(
+    status = NULL)
 
+  # map ----
   output$map <- renderRdeck({
 
     req(input$sel_aois)
@@ -68,51 +72,52 @@ shinyServer(function(input, output, session) {
 
   })
 
+  # txt_status ----
+  output$htm_status <- renderUI({
+    req(rx$status)
+    h6(code(rx$status))
+  })
+
+  # * get clicked ----
   observe({
     d_c <- rdeck_proxy("map") |>
       get_clicked_object(session)  # default: NULL
 
     req(d_c)
-    # message(str(d_c))
+    schema_tbl <- isolate(input$sel_aois)
+    tbl        <- str_split(schema_tbl, "\\.")[[1]][2]
+
+    key <- case_match(
+      schema_tbl,
+      "public.ply_shlfs" ~ "shlf_key",
+      "public.ply_rgns"  ~ "rgn_key",
+      .default = "ms_key")
+    val <- d_c[key][1]
+    url <- glue("https://tile.marinesensitivity.org/{schema_tbl}.html?filter={key}='{val}'")
+    txt <- glue("{tbl}: {key}='{val}'")
+    # message(glue("get_clicked(): [{txt}]({url})"))
+
+    rx$status <- a(txt, href=url, target='_blank')
   })
 
-  # observe({
-  #   req(input$sel_aois)
-  #
-  #   # get extent of features in db  # input = list(sel_aois = "public.ply_shlfs_s05")
-  #   schema_tbl <- input$sel_aois
-  #   pts        <- str_split(schema_tbl, "\\.")[[1]]
-  #   schema     <- pts[1]
-  #   tbl        <- pts[2]
-  #   fld_geom   <- ifelse(schema == "public", "geometry", "geom")
-  #
-  #   # * get fields to display ----
-  #   flds <<- dbGetQuery(con, glue(
-  #     "SELECT column_name FROM information_schema.columns
-  #     WHERE
-  #       table_schema = '{schema}' AND
-  #       table_name   = '{tbl}';")) |>
-  #     pull(column_name)
-  #   message(glue("retry flds: {paste(flds, collapse=', ')}"))
-  #
-  #   rdeck_proxy("map") |>
-  #     update_mvt_layer(
-  #       id      = "aoi",
-  #       tooltip = all_of(flds)) # c(mms_region, opd_name, prot_aprv, prot_numbe),
-  #
-  # })
-
-  # observe({
-  #   b <- rdeck_proxy("map") |>
-  #     get_view_bounds(session)
-  #   message(glue("extent: {paste(b, collapse=', ')}"))
-  # })
-
+  # * get edited ----
   observe({
     # spatial data frame of edited (and uploaded) feature
     s_e <- rdeck_proxy("map") |>
       get_edited_features(session)  # default: Simple feature collection with 0 features and 0 fields
     # d_edited |> st_geometry() |> st_as_text()
+    req(nrow(s_e) > 0)
+    txt <- paste("WKT:", st_geometry(s_e) %>% st_as_text())
+    # message(glue("get_edited(): {txt}"))
+
+    rx$status <- txt
   })
+
+  # * get bounds ----
+  # observe({
+  #   b <- rdeck_proxy("map") |>
+  #     get_view_bounds(session)
+  #   message(glue("extent: {paste(b, collapse=', ')}"))
+  # })
 
 })
