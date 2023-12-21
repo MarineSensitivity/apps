@@ -1,10 +1,13 @@
 # libraries ----
 librarian::shelf(
-  dplyr, DT, geojsonio, glue, here, leaflet,
-  micahwilhelm/leaflet.extras, # addDrawToolbar()
+  dplyr, DT, geojsonio, glue, here,
+  #  leaflet,
+  # micahwilhelm/leaflet.extras, # addDrawToolbar()
   MarineSensitivity/msens,
-  yogevherz/plotme,            # count_to_treemap()
-  plotly, shiny, shinydashboard, sf, tibble)
+  yogevherz/plotme,  # count_to_treemap()
+  plotly,
+  rdeck,
+  shiny, shinydashboard, sf, tibble)
 
 # TODO:
 #  - [ ] copy duckdb to server
@@ -12,7 +15,7 @@ librarian::shelf(
 #  - [ ] swap out shinydashboard for bslib
 #        https://rstudio.github.io/bslib/articles/dashboards/
 
-source(here("functions.R"))
+source(here("map/functions.R"))
 
 # con_am start/stop ----
 message("connecting to AquaMaps database")
