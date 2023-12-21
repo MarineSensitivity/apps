@@ -16,7 +16,7 @@ dir_private <- switch(
 
 mb_token_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 plys_csv     <- here("../workflows/data/ingest_blocks_spatial-paths.csv")
-db_r         <- here("../workflows/libs/db.r")
+db_r         <- here("../workflows/libs/db.R")
 
 stopifnot(all(file.exists(c(mb_token_txt, plys_csv, db_r))))
 

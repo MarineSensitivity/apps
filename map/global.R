@@ -1,8 +1,6 @@
 # libraries ----
 librarian::shelf(
-  dplyr, DT, geojsonio, glue, here,
-  #  leaflet,
-  # micahwilhelm/leaflet.extras, # addDrawToolbar()
+  dplyr, DT, geojsonio, glue, here, leaflet,
   MarineSensitivity/msens,
   yogevherz/plotme,  # count_to_treemap()
   plotly,

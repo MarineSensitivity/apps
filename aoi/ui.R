@@ -1,5 +1,5 @@
 page_sidebar(
-  title = "AoIs Explorer",
+  title = "AoI Explorer",
   # theme = bs_theme(
   #   version               = 5,
   #   bootswatch            = "darkly",
