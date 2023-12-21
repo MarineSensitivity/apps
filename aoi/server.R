@@ -94,10 +94,10 @@ shinyServer(function(input, output, session) {
       .default = "ms_key")
     val <- d_c[key][1]
     url <- glue("https://tile.marinesensitivity.org/{schema_tbl}.html?filter={key}='{val}'")
-    txt <- glue("{tbl}: {key}='{val}'")
+    txt <- glue("{tbl}.{key} = '{val}'")
     # message(glue("get_clicked(): [{txt}]({url})"))
 
-    rx$status <- a(txt, href=url, target='_blank')
+    rx$status <- div("last clicked:", a(txt, href=url, target='_blank'))
   })
 
   # * get edited ----
@@ -107,7 +107,7 @@ shinyServer(function(input, output, session) {
       get_edited_features(session)  # default: Simple feature collection with 0 features and 0 fields
     # d_edited |> st_geometry() |> st_as_text()
     req(nrow(s_e) > 0)
-    txt <- paste("WKT:", st_geometry(s_e) %>% st_as_text())
+    txt <- div("last edited:", st_geometry(s_e) %>% st_as_text())
     # message(glue("get_edited(): {txt}"))
 
     rx$status <- txt
