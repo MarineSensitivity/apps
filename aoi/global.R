@@ -3,7 +3,9 @@ if (!require("librarian"))
   install.packages("librarian")
 
 librarian::shelf(
-  bslib, dplyr, glue, here, httr2, purrr, qfes/rdeck, readr, sf,
+  bslib, dplyr, DT, glue, here, httr2,
+  MarineSensitivity/msens,  # remotes::install_github("MarineSensitivity/msens")
+  purrr, qfes/rdeck, readr, sf,
   shiny, shinyWidgets, stringr, tibble, tidyr, tidyselect, viridis)
 options(readr.show_col_types = F)
 

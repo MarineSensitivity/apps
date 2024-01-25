@@ -2,7 +2,8 @@ shinyServer(function(input, output, session) {
 
   # rx: reactive values ----
   rx <- reactiveValues(
-    status = NULL)
+    clicked = NULL,
+    status  = NULL)
 
   # map ----
   output$map <- renderRdeck({
@@ -94,10 +95,28 @@ shinyServer(function(input, output, session) {
       .default = "ms_key")
     val <- d_c[key][1]
     url <- glue("https://tile.marinesensitivity.org/{schema_tbl}.html?filter={key}='{val}'")
-    txt <- glue("{tbl}.{key} = '{val}'")
+    # txt <- glue("SCHEMA.TABLE: {schema_tbl}<br> WHERE: {key} = '{val}'")
     # message(glue("get_clicked(): [{txt}]({url})"))
 
-    rx$status <- div("last clicked:", a(txt, href=url, target='_blank'))
+    rx$clicked <- list(
+      schema.table = schema_tbl,
+      where        = glue("{key} = '{val}'"))
+
+    nav_insert(
+      "nav",
+      target = "Map",
+      nav_panel(
+        "Table",
+        helpText("amt = n_cells * avg_pct_cell * avg_suit"),br(),
+        helpText("Amount (amt) is the multiplication of the number of cells (n_cells),
+               average percent of a cell (avg_pct_cell) within the selected polygon,
+               and the average Suitability (avg_suit; 0 to 1) of the species given by AquaMaps."),
+        dataTableOutput("tbl_spp") ) )
+
+    rx$status <- div(
+      "clicked ", a("feature", href=url, target='_blank'), br(),
+      "SCHEMA.TABLE: ", code(schema_tbl), br(),
+      "WHERE: ", code(glue("{key} = '{val}'")))
   })
 
   # * get edited ----
@@ -110,6 +129,9 @@ shinyServer(function(input, output, session) {
     txt <- div("last edited:", st_geometry(s_e) %>% st_as_text())
     # message(glue("get_edited(): {txt}"))
 
+    rx$clicked <- NULL
+    nav_remove("nav", "Table")
+
     rx$status <- txt
   })
 
@@ -119,5 +141,35 @@ shinyServer(function(input, output, session) {
   #     get_view_bounds(session)
   #   message(glue("extent: {paste(b, collapse=', ')}"))
   # })
+
+  # Table: tbl_spp ----
+  output$tbl_spp <- DT::renderDataTable({
+
+    req(rx$clicked)
+
+    msens::get_species_by_feature(
+      schema.table = rx$clicked$schema.table,
+      where        = rx$clicked$where) |>
+      datatable(
+        extensions = c("Buttons", "FixedColumns", "FixedHeader", "Scroller"),
+        options = list(
+          dom = "Blfrtip",
+          buttons = c("copy", "csv", "excel", "pdf", "print"),
+          scrollX = T,
+          scrollY = "50vh",
+          scrollCollapse = T,
+          fixedColumns = list(leftColumns = 1),
+          fixedHeader = T)) |>
+      formatPercentage(
+        columns = c("avg_pct_cell", "avg_suit"),
+        digits  = 0) |>
+      formatRound(
+        columns = c("n_cells"),
+        digits  = 0) |>
+      formatRound(
+        columns = c("amt"),
+        digits  = 3)
+  },
+  server = F)
 
 })
