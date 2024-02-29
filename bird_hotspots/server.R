@@ -1,32 +1,66 @@
 # Define server logic
 function(input, output, session) {
 
-  sel_cells <- reactiveValues()
+  rx <- reactiveValues(
+    cells = NULL)
 
   pal <- colorNumeric(
     palette = "inferno",
     domain  = hhvh$numhot)
 
   m = get_basemap() |>
-    # https://rstudio.github.io/leaflet/articles/choropleths.html
     addPolygons(
       data         = hhvh,
       fillColor    = ~pal(numhot), fillOpacity = 0.7,
-      color        = "white",      opacity     = 0.9, weight = 0.5,
-      smoothFactor = 0.5)
+      color        = "white",      opacity     = 0.9, weight = 0.1,
+      smoothFactor = 0.2)
 
-  # https://github.com/r-spatial/mapedit/blob/35ae8ccfb90b682bf98a82e85c3047f098857db3/inst/examples/shiny_modules.R#L46C1-L71C20
-  drawn <- callModule(editMod, "map_select", m)
+  drawn <- callModule(
+    editMod, "map", m,
+    editorOptions = list(
+      singleFeature       = T,
+      polylineOptions     = F,
+      markerOptions       = F,
+      circleMarkerOptions = F))
 
   observe({
     req(drawn()$finished)
-    sel_cells$intersection <- st_intersection(drawn()$finished, hhvh)
+    rx$cells <- hhvh |>
+      st_intersection(drawn()$finished)
+    # TODO: consider calculating area, and applying area-weighted average to values
   })
 
-  output$map_out <- renderLeaflet({
-    req(sel_cells$intersection)
+  output$plot <- renderPlotly({
+    req(rx$cells)
 
-    (mapview(sel_cells$intersection) + mapview(drawn()$finished))@map
+    d <- rx$cells |>
+      st_drop_geometry() |>
+      select(-ID, -numhot, -X_leaflet_id, -feature_type) |>
+      pivot_longer(
+        cols      = everything(),
+        names_to  = "sp",
+        values_to = "v") |>
+      group_by(sp) |>
+      summarize(
+        mean = mean(v),
+        n    = n(),
+        se   = sd(v) / sqrt(n)) |>
+      mutate(
+        margin = qt(p = (1 - conf_level) / 2, df = n - 1, lower.tail = F) * se,
+        upper = mean + margin,
+        lower = mean - margin,
+        lower = if_else(lower < 0, 0, lower) ) |>
+      arrange(desc(mean)) |>
+      filter(mean != 0)
+
+    g <- ggplot(d, aes(x = reorder(sp, -mean), y = mean, fill = sp)) +
+      geom_col() +
+      geom_errorbar(aes(ymin = lower, ymax = upper), width = 0.2) +
+      labs(x = "Species", y = "Avg Hotspot Probability", fill = "Species") +
+      theme_bw() +
+      coord_flip() +
+      theme(legend.position = "none")
+    ggplotly(g)
   })
 
 }
