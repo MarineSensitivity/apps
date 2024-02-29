@@ -167,7 +167,7 @@ shinyServer(function(input, output, session) {
         columns = c("n_cells"),
         digits  = 0) |>
       formatRound(
-        columns = c("amt"),
+        columns = c("amt","area_km2"),
         digits  = 3)
   },
   server = F)
