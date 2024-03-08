@@ -47,9 +47,9 @@ function(input, output, session) {
         se   = sd(v) / sqrt(n)) |>
       mutate(
         margin = qt(p = (1 - conf_level) / 2, df = n - 1, lower.tail = F) * se,
-        upper = mean + margin,
-        lower = mean - margin,
-        lower = if_else(lower < 0, 0, lower) ) |>
+        upper  = mean + margin,
+        lower  = mean - margin,
+        lower  = if_else(lower < 0, 0, lower) ) |>  # truncate lower CI at 0
       arrange(desc(mean)) |>
       filter(mean != 0)
 
@@ -60,6 +60,20 @@ function(input, output, session) {
       theme_bw() +
       coord_flip() +
       theme(legend.position = "none")
+    # TODO: flag (or drop) species where lower==0 so mean is not meaningful
+
+    # TODO:
+    # - add species names to bars
+    # - expand plot to full width as a new tab
+    # - visually indicate spp w/ lower CI == 0:
+    #   - darken background
+    #   - move it all to a sortable table
+    # - + Sort by: species name, or hotspot probability
+    # - checkbox to include Zeros
+    # - classify into guilds
+    # - Select Species (or hotspot) to map
+    # - Add legend
+
     ggplotly(g)
   })
 
