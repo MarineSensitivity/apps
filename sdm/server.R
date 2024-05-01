@@ -43,6 +43,9 @@ shinyServer(function(input, output, session) {
       pull(population) |>
       sort()
 
+    if (verbose)
+      message("rx_sp > sel_popn choices: ", paste(choices, collapse = ", "))
+
     updateSelectInput(
       inputId  = "sel_popn",
       choices  = choices,
@@ -51,12 +54,19 @@ shinyServer(function(input, output, session) {
     if (verbose)
       message("rx_sp > sel_popn END input$sel_popn: ", isolate(input$sel_popn))
 
-    toggle("sel_popn", length(choices) > 0)
+    # if (input$sel_sp == "Stenella frontalis")
+    #   browser()
+
+    if (length(choices) > 0)
+      shinyjs::show("sel_popn")
+    else
+      shinyjs::hide("sel_popn")
   })
 
   # * rx_popn <- rx_sp  ----
   rx_popn <- reactive({
     # req(input$sel_popn)
+
     popn <- input$sel_popn
 
     if (verbose)
@@ -100,9 +110,9 @@ shinyServer(function(input, output, session) {
   })
 
   # * rx_intvl -> sel_var ----
-  observeEvent(rx_popn(), {
+  observeEvent(rx_intvl(), {
 
-    choices <- rx_popn() |>
+    choices <- rx_intvl() |>
       distinct(var) |>
       pull(var) |>
       sort()

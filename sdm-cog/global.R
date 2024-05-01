@@ -5,7 +5,7 @@ if (!require("librarian"))
 librarian::shelf(
   bslib, dbplyr, dplyr, DT, glue, here, htmlwidgets, httr2,
   MarineSensitivity/msens,  # remotes::install_github("MarineSensitivity/msens")
-  purrr, qfes/rdeck, readr, sf,
+  purrr, qfes/rdeck, readr, sf, terra,
   shiny,
   shinyjs,
   shinyWidgets, stringr, tibble, tidyr, tidyselect, viridis)
@@ -14,8 +14,8 @@ options(readr.show_col_types = F)
 # variables ----
 verbose = T
 
-# mapbox token ----
 
+# mapbox token ----
 dir_private <- switch(
   Sys.info()[["sysname"]],
   "Darwin" = "/Users/bbest/My Drive/private",
@@ -34,24 +34,13 @@ options(rdeck.mapbox_access_token = mb_token)
 
 # datasets ----
 v_ds <- tbl(con, "sdm_datasets") |>
+  filter(spatial_data_type == "raster") |>
   select(name_short, ds_key) |>
+  arrange(name_short) |>
   collect() |>
   deframe()
 
-# tbl(con, "sdm_models") |> summarize(n()) # 672
+mdls_csv <- here("../workflows/data/nc_models.csv")
+d_mdls <- read_csv(mdls_csv)
 
-# bounding box ----
-# TODO: vary by input$sel_dataset
-ds_key <- "gm"
-q <- glue(
-  "WITH
-       g AS (
-         SELECT geom FROM sdm_geometries
-         WHERE ds_key = '{ds_key}')
-       SELECT ST_Extent(geom) AS ext FROM g")
-b <- dbGetQuery(con, q) |>
-  pull(ext) |>
-  str_replace_all("BOX\\((.*)\\)", "\\1") |>
-  str_split("[ ,]") %>%
-  .[[1]] |>
-  as.numeric()
+# tbl(con, "sdm_models") |> summarize(n()) # 672

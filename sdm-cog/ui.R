@@ -1,15 +1,16 @@
 page_sidebar(
-  title = "SDM Explorer",
+  title = "SDM Raster Explorer",
 
 
   sidebar = sidebar(
     useShinyjs(),
-    helpText("Collapse to see legend."),
-    selectInput("sel_ds", "Dataset", v_ds),
-    selectInput("sel_sp"  ,  "Species"   , choices = NULL),
-    selectInput("sel_popn",  "Population", choices = NULL),
-    selectInput("sel_intvl", "Time"      , choices = NULL),
-    selectInput("sel_var",   "Variable"  , choices = NULL) ),
+    selectInput("sel_ds"   , "Dataset" , v_ds),
+    selectInput("sel_sp"   , "Species" , choices = NULL),
+    selectInput("sel_intvl", "Season"  , choices = NULL),
+    selectInput("sel_var",   "Variable", choices = NULL),
+    helpText(
+      "Legend missing for now.", br(),
+      textOutput("txt_legend") ) ),
 
   tags$head(
     tags$link(rel="stylesheet", type="text/css", href="styles.css"),
