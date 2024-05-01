@@ -43,4 +43,8 @@ v_ds <- tbl(con, "sdm_datasets") |>
 mdls_csv <- here("../workflows/data/nc_models.csv")
 d_mdls <- read_csv(mdls_csv)
 
-# tbl(con, "sdm_models") |> summarize(n()) # 672
+# d_mdls |> select(region, var) |> table()
+# var
+# region     ci90_n_per_km2 cv_n_per_km2 n_per_km2
+# Atlantic            140          140       140
+# Pacific               0          135       135

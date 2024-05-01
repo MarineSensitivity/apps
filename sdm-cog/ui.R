@@ -1,7 +1,6 @@
 page_sidebar(
   title = "SDM Raster Explorer",
 
-
   sidebar = sidebar(
     useShinyjs(),
     selectInput("sel_ds"   , "Dataset" , v_ds),
