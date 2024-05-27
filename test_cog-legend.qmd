@@ -141,7 +141,8 @@ ctr <- st_bbox(ext(bb[1],bb[3],bb[2],bb[4])) |>
 x <- ctr[[1,"X"]]
 y <- ctr[[1,"Y"]]
 
-dc <- 0.00001
+# dc <- 0.00001
+dc <- 1.0
 b1 <- c(xmin = x, xmax = x+dc, ymax = y+dc, ymin = y) |>
   st_bbox(crs = st_crs(4326)) |> 
   st_as_sfc() |> 
@@ -159,9 +160,9 @@ plot(b)
 
 basemap <- "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
 
-leaflet() |> 
-  addProviderTiles(providers$Esri.OceanBasemap) |> 
-  fitBounds(bb[1], bb[2], bb[3], bb[4])
+# leaflet() |> 
+#   addProviderTiles(providers$Esri.OceanBasemap) |> 
+#   fitBounds(bb[1], bb[2], bb[3], bb[4])
 
 rdeck(
   map_style      = mapbox_dark(),
@@ -169,15 +170,18 @@ rdeck(
   initial_bounds = st_bbox(
     c(xmin=bb[1], ymin=bb[2], xmax=bb[3], ymax=bb[4]),
     crs = st_crs(4326) ) )  |>
-  # add_polygon_layer(
-  #   id             = "b",
-  #   name           = "bcol",
-  #   data           = b,
-  #   get_polygon    = x,
-  #   get_fill_color = scale_color_linear(
-  #     # palette = scales::viridis_pal()
-  #     palette = scales::colour_ramp(RColorBrewer::brewer.pal(11, "Spectral")),
-  #     val, limits = cog_rng)) |> 
+  add_polygon_layer(
+    id             = "b",
+    name           = "SDM",
+    data           = b,
+    get_polygon    = x,
+    get_fill_color = scale_color_linear(
+      val,
+      # palette = scales::viridis_pal()
+      palette   = scales::colour_ramp(
+        RColorBrewer::brewer.pal(11, "Spectral")),
+      limits    = cog_rng,
+      col_label = "Habitat")) |>
   add_tile_layer(
     id      = "base",
     opacity = 1,
