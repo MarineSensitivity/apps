@@ -24,6 +24,7 @@ if (!require("librarian"))
 
 librarian::shelf(
   bslib, dbplyr, dplyr, DT, glue, here, htmlwidgets, httr2,
+  leaflet,
   MarineSensitivity/msens,  # remotes::install_github("MarineSensitivity/msens")
   purrr, qfes/rdeck, readr, sf, terra,
   shiny,
@@ -55,7 +56,7 @@ bb <- c(-87.01826, 23.0674, -52.26961, 53.30289)
 
 sdm_tile_url <- "https://titiler.xyz/cog/tiles/WebMercatorQuad/{z}/{x}/{y}@2x.png?url=https://file.marinesensitivity.org/cog/sdm/raw/nc_atl_birds_dens/ARTE_summer.tif&bidx=1&expression=b1&unscale=false&resampling=bilinear&reproject=bilinear&return_mask=true&rescale=0.00035648315679282,0.810750484466553&colormap_name=spectral_r"
 
-pt_q <- /cog/point/{lon},{lat}
+# /cog/point/{lon},{lat}
 lon = -67.44509
 lat = 44.33313
 glue("https://titiler.xyz/cog/point/{lon},{lat}?url=https://file.marinesensitivity.org/cog/sdm/raw/nc_atl_birds_dens/ARTE_summer.tif")
@@ -126,12 +127,10 @@ glue("https://titiler.xyz/cog/info?url=https://file.marinesensitivity.org/cog/sd
 #   "nodata_value": null
 # }
 
-# then get stats with a feature
+# then get stats with a geojson feature
 # https://developmentseed.org/titiler/examples/notebooks/Working_with_Statistics/#:~:text=you%20can%20specify%20an%20area%20via%20a%20feature 
 
-
 cog_rng <- c(0.00035648315679282, 0.810750484466553)
-
 ```
 
 ```{r}
@@ -142,13 +141,14 @@ ctr <- st_bbox(ext(bb[1],bb[3],bb[2],bb[4])) |>
 x <- ctr[[1,"X"]]
 y <- ctr[[1,"Y"]]
 
-b1 <- c(xmin = x, xmax = x+1, ymax = y+1, ymin = y) |>
+dc <- 0.00001
+b1 <- c(xmin = x, xmax = x+dc, ymax = y+dc, ymin = y) |>
   st_bbox(crs = st_crs(4326)) |> 
   st_as_sfc() |> 
   st_as_sf() |> 
   mutate(
     val = cog_rng[1])
-b2 <- c(xmin = x-1, xmax = x, ymax = y, ymin = y-1) |>
+b2 <- c(xmin = x-dc, xmax = x, ymax = y, ymin = y-dc) |>
   st_bbox(crs = st_crs(4326)) |> 
   st_as_sfc() |> 
   st_as_sf() |> 
@@ -159,13 +159,9 @@ plot(b)
 
 basemap <- "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
 
-library(scales)
-show_col(pal_viridis()(10))
-show_col(pal_viridis(direction = -1)(6))
-show_col(pal_viridis(begin = 0.2, end = 0.8)(4))
-show_col(pal_viridis(option = "plasma")(6))
-
-
+leaflet() |> 
+  addProviderTiles(providers$Esri.OceanBasemap) |> 
+  fitBounds(bb[1], bb[2], bb[3], bb[4])
 
 rdeck(
   map_style      = mapbox_dark(),
@@ -173,15 +169,15 @@ rdeck(
   initial_bounds = st_bbox(
     c(xmin=bb[1], ymin=bb[2], xmax=bb[3], ymax=bb[4]),
     crs = st_crs(4326) ) )  |>
-  add_polygon_layer(
-    id             = "b",
-    name           = "bcol",
-    data           = b,
-    get_polygon    = x,
-    get_fill_color = scale_color_linear(
-      # palette = scales::viridis_pal()
-      palette = scales::colour_ramp(RColorBrewer::brewer.pal(11, "Spectral")),
-      val, limits = cog_rng)) |> 
+  # add_polygon_layer(
+  #   id             = "b",
+  #   name           = "bcol",
+  #   data           = b,
+  #   get_polygon    = x,
+  #   get_fill_color = scale_color_linear(
+  #     # palette = scales::viridis_pal()
+  #     palette = scales::colour_ramp(RColorBrewer::brewer.pal(11, "Spectral")),
+  #     val, limits = cog_rng)) |> 
   add_tile_layer(
     id      = "base",
     opacity = 1,
