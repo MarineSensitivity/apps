@@ -1,0 +1,210 @@
+---
+title: "test_cog-legend"
+format: html
+editor: visual
+editor_options: 
+  chunk_output_type: console
+---
+
+- https://developmentseed.org/titiler/endpoints/cog/
+
+- https://developmentseed.org/titiler/advanced/performance_tuning/
+ - "Setting these GDAL environment variables significantly impacts performance, with 100x speed up in performance."
+   -- https://nasa-impact.github.io/zarr-visualization-report/approaches/tiling/01-cmip6-cog-tile-server-benchmarks.html
+   
+- https://stackstac.readthedocs.io \
+  [`stackstac.stack`](https://stackstac.readthedocs.io/en/latest/api/main/stackstac.stack.html#stackstac.stack "stackstac.stack") turns a [STAC](http://stacspec.org/) collection into a lazy [`xarray.DataArray`](https://docs.xarray.dev/en/stable/generated/xarray.DataArray.html#xarray.DataArray "(in xarray v2023.11.1.dev0)"), backed by [dask](https://docs.dask.org/en/latest/array.html "(in Dask)").\
+  `stackstac.stack` turns a STAC collection into a lazy xarray.DataArray, backed by dask.
+  
+- [Guide for Generating and Using Cloud Optimized GeoTIFFs - Google Docs](https://docs.google.com/document/d/1rBRr4xcz2NH3JXS0Y8wNEqvd2-pzVw23_p2NV3jKnlM/edit)
+
+```{r}
+if (!require("librarian"))
+  install.packages("librarian")
+
+librarian::shelf(
+  bslib, dbplyr, dplyr, DT, glue, here, htmlwidgets, httr2,
+  MarineSensitivity/msens,  # remotes::install_github("MarineSensitivity/msens")
+  purrr, qfes/rdeck, readr, sf, terra,
+  shiny,
+  shinyjs,
+  shinyWidgets, stringr, tibble, tidyr, tidyselect, viridis)
+options(readr.show_col_types = F)
+
+# variables ----
+verbose = T
+
+# mapbox token ----
+dir_private <- switch(
+  Sys.info()[["sysname"]],
+  "Darwin" = "/Users/bbest/My Drive/private",
+  "Linux"  = "/share/private")
+
+mb_token_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
+plys_csv     <- here("../workflows/data/ingest_blocks_spatial-paths.csv")
+db_r         <- here("../workflows/libs/db.R")
+
+stopifnot(all(file.exists(c(mb_token_txt, plys_csv, db_r))))
+
+source(db_r)
+
+mb_token <- readLines(mb_token_txt)
+options(rdeck.mapbox_access_token = mb_token)
+
+bb <- c(-87.01826, 23.0674, -52.26961, 53.30289)
+
+sdm_tile_url <- "https://titiler.xyz/cog/tiles/WebMercatorQuad/{z}/{x}/{y}@2x.png?url=https://file.marinesensitivity.org/cog/sdm/raw/nc_atl_birds_dens/ARTE_summer.tif&bidx=1&expression=b1&unscale=false&resampling=bilinear&reproject=bilinear&return_mask=true&rescale=0.00035648315679282,0.810750484466553&colormap_name=spectral_r"
+
+pt_q <- /cog/point/{lon},{lat}
+lon = -67.44509
+lat = 44.33313
+glue("https://titiler.xyz/cog/point/{lon},{lat}?url=https://file.marinesensitivity.org/cog/sdm/raw/nc_atl_birds_dens/ARTE_summer.tif")
+# {
+#   "coordinates": [-67.44509, 44.33313],
+#   "values": [0.0559766516089439, 0.520359218120575, 0.107474312186241],
+#   "band_names": [
+#     "b1",
+#     "b2",
+#     "b3"
+#   ]
+# }
+
+# GET	/cog/point/{lon},{lat}	JSON	return pixel values from a dataset
+glue("https://titiler.xyz/cog/info?url=https://file.marinesensitivity.org/cog/sdm/raw/nc_atl_birds_dens/ARTE_summer.tif")
+# {
+#   "bounds": [-87.0182623445591, 23.0674605273313, -52.269605542605, 53.3028939614481],
+#   "minzoom": 3,
+#   "maxzoom": 6,
+#   "band_metadata": [
+#     [
+#       "b1",
+#       {
+# 
+#       }
+#     ],
+#     [
+#       "b2",
+#       {
+# 
+#       }
+#     ],
+#     [
+#       "b3",
+#       {
+# 
+#       }
+#     ]
+#   ],
+#   "band_descriptions": [
+#     [
+#       "b1",
+#       "n_per_km2"
+#     ],
+#     [
+#       "b2",
+#       "cv_n_per_km2"
+#     ],
+#     [
+#       "b3",
+#       "ci90_n_per_km2"
+#     ]
+#   ],
+#   "dtype": "float64",
+#   "nodata_type": "Nodata",
+#   "colorinterp": [
+#     "gray",
+#     "undefined",
+#     "undefined"
+#   ],
+#   "scales": [1, 1, 1],
+#   "offsets": [0, 0, 0],
+#   "driver": "GTiff",
+#   "count": 3,
+#   "width": 1200,
+#   "height": 1640,
+#   "overviews": [2, 4],
+#   "nodata_value": null
+# }
+
+# then get stats with a feature
+# https://developmentseed.org/titiler/examples/notebooks/Working_with_Statistics/#:~:text=you%20can%20specify%20an%20area%20via%20a%20feature 
+
+
+cog_rng <- c(0.00035648315679282, 0.810750484466553)
+
+```
+
+```{r}
+ctr <- st_bbox(ext(bb[1],bb[3],bb[2],bb[4])) |> 
+  st_as_sfc() |> 
+  st_centroid() |> 
+  st_coordinates()
+x <- ctr[[1,"X"]]
+y <- ctr[[1,"Y"]]
+
+b1 <- c(xmin = x, xmax = x+1, ymax = y+1, ymin = y) |>
+  st_bbox(crs = st_crs(4326)) |> 
+  st_as_sfc() |> 
+  st_as_sf() |> 
+  mutate(
+    val = cog_rng[1])
+b2 <- c(xmin = x-1, xmax = x, ymax = y, ymin = y-1) |>
+  st_bbox(crs = st_crs(4326)) |> 
+  st_as_sfc() |> 
+  st_as_sf() |> 
+  mutate(
+    val =cog_rng[2])
+b <- rbind(b1, b2)
+plot(b)
+
+basemap <- "https://server.arcgisonline.com/ArcGIS/rest/services/Ocean/World_Ocean_Base/MapServer/tile/{z}/{y}/{x}"
+
+library(scales)
+show_col(pal_viridis()(10))
+show_col(pal_viridis(direction = -1)(6))
+show_col(pal_viridis(begin = 0.2, end = 0.8)(4))
+show_col(pal_viridis(option = "plasma")(6))
+
+
+
+rdeck(
+  map_style      = mapbox_dark(),
+  theme          = "light",
+  initial_bounds = st_bbox(
+    c(xmin=bb[1], ymin=bb[2], xmax=bb[3], ymax=bb[4]),
+    crs = st_crs(4326) ) )  |>
+  add_polygon_layer(
+    id             = "b",
+    name           = "bcol",
+    data           = b,
+    get_polygon    = x,
+    get_fill_color = scale_color_linear(
+      # palette = scales::viridis_pal()
+      palette = scales::colour_ramp(RColorBrewer::brewer.pal(11, "Spectral")),
+      val, limits = cog_rng)) |> 
+  add_tile_layer(
+    id      = "base",
+    opacity = 1,
+    data    = basemap,
+    visible = T) |>
+  add_tile_layer(
+    id      = "sdm",
+    name    = "s dm",
+    opacity = 0.8,
+    data    = sdm_tile_url,
+    visible = T) # |>
+    # fill_color   = "val",
+    # fill_opacity = 0.5,
+    # stroke_color = "black",
+    # stroke_width = 1,
+    # visible      = T)
+
+sample_data <- paste0(
+  "https://raw.githubusercontent.com/",
+  "uber-common/deck.gl-data/",
+  "master/website/sf-zipcodes.json"
+)
+sd <- read_sf(sample_data)
+
+
+```

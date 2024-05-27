@@ -14,7 +14,6 @@ options(readr.show_col_types = F)
 # variables ----
 verbose = T
 
-
 # mapbox token ----
 dir_private <- switch(
   Sys.info()[["sysname"]],

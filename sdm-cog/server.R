@@ -163,7 +163,8 @@ shinyServer(function(input, output, session) {
       theme          = "light",
       initial_bounds = st_bbox(
         c(xmin=bb[1], ymin=bb[2], xmax=bb[3], ymax=bb[4]),
-        crs = st_crs(4326) ) )  |>
+        crs = st_crs(4326) ),
+      editor = T)  |>
       add_tile_layer(
         id              = "sdm",
         name            = "s dm",
@@ -173,6 +174,22 @@ shinyServer(function(input, output, session) {
       # TODO: get_tile_data
       #   <JS> retrieves the data of each tile. See deck.gl getTileData.
 
+  })
+
+  # * get edited ----
+  observe({
+    # spatial data frame of edited (and uploaded) feature
+    s_e <- rdeck_proxy("map") |>
+      get_edited_features(session)  # default: Simple feature collection with 0 features and 0 fields
+    # d_edited |> st_geometry() |> st_as_text()
+    req(nrow(s_e) > 0)
+    txt <- div("last edited:", st_geometry(s_e) %>% st_as_text())
+    if (verbose)
+      message(glue("get_edited(): {txt}"))
+
+    # rx$clicked <- NULL
+    # nav_remove("nav", "Table")
+    # rx$status <- txt
   })
 
 })
