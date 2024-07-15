@@ -36,6 +36,6 @@ cols_mw_notdisplay <- c(
   "taxonID","taxonomicStatus","acceptedNameUsageID","parentNameUsageID","originalNameUsageID",
   "scientificNameAuthorship","vernacularName")
 rgn_default <- "Atlantic"
-ssn_default <- "spring"
+ssn_default <- "Spring"
 d_mws_default <- d_mw |>
   filter(season == ssn_default)
