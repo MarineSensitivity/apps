@@ -1,6 +1,6 @@
 # libraries ----
 librarian::shelf(
-  bsicons, bslib, dplyr, DT, glue, here, htmltools, leaflet, purrr, readr,
+  bslib, dplyr, DT, glue, here, htmltools, leaflet, purrr, readr,
   shiny, shinyWidgets, stringr, terra)
 options(readr.show_col_types = F)
 
