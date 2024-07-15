@@ -172,7 +172,7 @@ rdeck(
     crs = st_crs(4326) ) )  |>
   add_polygon_layer(
     id             = "b",
-    name           = "SDM",
+    name           = "SDM legend",
     data           = b,
     get_polygon    = x,
     get_fill_color = scale_color_linear(
@@ -184,12 +184,13 @@ rdeck(
       col_label = "Habitat")) |>
   add_tile_layer(
     id      = "base",
+    name    = "Esri Ocean Basemap",
     opacity = 1,
     data    = basemap,
     visible = T) |>
   add_tile_layer(
     id      = "sdm",
-    name    = "sdm",
+    name    = "SDM",
     opacity = 0.8,
     data    = sdm_tile_url,
     visible = T) # |>
