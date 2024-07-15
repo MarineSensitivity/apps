@@ -7,7 +7,8 @@ page_fillable(
   navset_card_pill(
     id        = "nav",
     placement = "above",
-    selected  = "nav_map",
+    # selected  = "nav_map",
+    selected  = "nav_tables", # DEBUG
 
     # TODO: nav_about
     # nav_panel(
@@ -23,77 +24,64 @@ page_fillable(
       icon = icon("gear"),
 
       layout_column_wrap(
-        width  = 1/4,
-        height = 200,
+        width         = 1/2,
+        heights_equal = "row",
 
-        layout_column_wrap(
-          width         = 1,
-          heights_equal = "row",
+        selectInput(
+          "sel_rgn",
+          "Region",
+          c("Atlantic", "Pacific [TODO]")),
 
-          selectInput(
-            "sel_rgn",
-            "Region",
-            c("Atlantic", "Pacific [TODO]")),
+        selectInput(
+          "sel_ssn",
+          "Season",
+          c("Spring", "Summer", "Fall", "Winter")),
 
-          selectInput(
-            "sel_ssn",
-            "Season",
-            c("Spring", "Summer", "Fall", "Winter")) ),
+        treeInput(
+          "sel_spp",
+          label       = "Species",
+          choices     = create_tree(
+            d_spp,
+            # d_spp |> select(class, order, family, sp_scientific, sp_id) |> arrange(class, order, family, sp_scientific)
+            levels    = c("class", "order", "family", "sp_scientific"),
+            levels_id = c("class", "order", "family", "sp_id") ),
+          selected    = d_spp$sp_id,
+          returnValue = "id",
+          closeDepth  = 1 ),
 
-        layout_column_wrap(
-          width = 1,
-
-          treeInput(
-            "sel_spp",
-            label       = "Species",
-            choices     = create_tree(
-              d_spp,
-              # d_spp |> select(class, order, family, sp_scientific, sp_id) |> arrange(class, order, family, sp_scientific)
-              levels    = c("class", "order", "family", "sp_scientific"),
-              levels_id = c("class", "order", "family", "sp_id") ),
-            selected    = d_spp$sp_id,
-            returnValue = "id",
-            closeDepth  = 1 ),
-
-          helpText(
-            "Selecting a season (and eventually region) will update the selected
+        helpText(
+          "Selecting a season (and eventually region) will update the selected
             Species in this list for those having matching distribution maps and
             vulnerability parameters. You can further uncheck species to
-            customize the output.") ),
+            customize the output."),
 
-        layout_column_wrap(
-          width = 1,
-
-          textAreaInput(
-            "txt_eqn_r",
-            "Equation for each raster (r) before summing",
-            width = "100%",
-            height = "110px",
-            "terra::scale(r) * (
+        textAreaInput(
+          "txt_eqn_r",
+          "Equation for each raster (r) before summing",
+          width = "100%",
+          height = "110px",
+          "terra::scale(r) * (
               best_estimate_final_population_sensitivity +
               best_estimate_final_collision_sensitivity_rank +
               best_estimate_final_displacement_sensitivity_rank )"),
 
-          textAreaInput(
-            "txt_eqn_v",
-            "Equation for summed raster values (v)",
-            width = "100%",
-            "scales::rescale(v, c(0, 100))") ),
+        textAreaInput(
+          "txt_eqn_v",
+          "Equation for summed raster values (v)",
+          width = "100%",
+          "scales::rescale(v, c(0, 100))"),
 
-        layout_column_wrap(
-          width = 1,
+        sliderInput(
+          "sldr_opacity_r",
+          "Opacity of raster on map",
+          min = 0, max = 1, step = 0.1,
+          value = 1.0),
 
-          sliderInput(
-            "sldr_opacity_r",
-            "Opacity of raster on map",
-            min = 0, max = 1, step = 0.1,
-            value = 1.0),
-
-          sliderInput(
-            "sldr_opacity_b",
-            "Opacity of basemap",
-            min = 0, max = 1, step = 0.1,
-            value = 0.5) )
+        sliderInput(
+          "sldr_opacity_b",
+          "Opacity of basemap",
+          min = 0, max = 1, step = 0.1,
+          value = 0.5)
 
       ) ),
 

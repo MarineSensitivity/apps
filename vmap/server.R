@@ -79,19 +79,44 @@ function(input, output, session) {
   # tbl_mw ----
   output$tbl_mw_rs <- renderDT({
 
-    get_d_mw_rs() |>
+    d <- get_d_mw_rs() |>
       select(
         !all_of(cols_mw_notdisplay), -sp_id) |>
       rename(
         sp_id = sp_id_html) |>
       relocate(
-        sp_id, .before = sp_code) |>
+        sp_id, sp_common, sp_scientific, .before = scientificName) |>
+      relocate(
+        study_param, .after = infraspecificEpithet)
+
+    # browser()
+
+    flds_m <- names(d)[1:4]
+    flds_s <- names(d)[5:17]
+    flds_w <- names(d)[18:27]
+
+    hdr = htmltools::withTags(table(
+      class = 'display',
+      thead(
+        tr(
+          th(rowspan = 2, 'n'),
+          th(colspan = length(flds_m), 'Map'),
+          th(colspan = length(flds_s), 'Species'),
+          th(colspan = length(flds_w), 'Parameters')
+        ),
+        tr(
+          lapply(c(flds_m, flds_s, flds_w), th) ) ) ) )
+
+    d |>
       datatable(
-        caption = tags$caption(
+        container = hdr,
+        escape    = F,
+        class     = "cell-border compact stripe",
+        caption   = tags$caption(
           glue("Table of Species Parameters matching Distribution Maps for
                {input$sel_rgn} region in the {input$sel_ssn} season"),
-          style = "caption-side: top"),
-        escape = F)
+          # style = "caption-side: top; text-align: center;"))
+          style = "caption-side: top"))
   })
 
   # map ----
