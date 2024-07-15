@@ -7,8 +7,8 @@ page_fillable(
   navset_card_pill(
     id        = "nav",
     placement = "above",
-    # selected  = "nav_map",
-    selected  = "nav_tables", # DEBUG
+    selected  = "nav_map",
+    # selected  = "nav_tables", # DEBUG
 
     # TODO: nav_about
     # nav_panel(
