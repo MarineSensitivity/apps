@@ -117,7 +117,7 @@ function(input, output, session) {
           "Cumulative<br>
           Species<br>
           Vulnerability<br>
-          in {input$sel_ssn}")
+          in {input$sel_ssn}"))
 
   })
 
