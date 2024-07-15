@@ -81,15 +81,20 @@ function(input, output, session) {
 
     get_d_mw_rs() |>
       select(
-        !all_of(cols_mw_notdisplay)) |>
+        !all_of(cols_mw_notdisplay), -sp_id) |>
+      rename(
+        sp_id = sp_id_html) |>
+      relocate(
+        sp_id, .before = sp_code) |>
       datatable(
         caption = tags$caption(
           glue("Table of Species Parameters matching Distribution Maps for
                {input$sel_rgn} region in the {input$sel_ssn} season"),
-          style = "caption-side: top") )
+          style = "caption-side: top"),
+        escape = F)
   })
 
-  # tbl_mw ----
+  # map ----
   output$map <- renderLeaflet({
 
     r   <- get_r_mw_rs()

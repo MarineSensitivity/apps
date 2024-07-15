@@ -27,9 +27,19 @@ d_spp <- read_csv(mw_csv) |>  # species
     season   = str_to_title(season))
 d_mw  <- read_csv(mw_csv) |>  # [m]aps and [w]eights
   mutate(
-    season   = str_to_title(season),
-    path_tif = glue("{dir_tif}/{tif}"),
-    r        = map(path_tif, rast, lyrs = "n_per_km2") )
+    season      = str_to_title(season),
+    sp_id_html  = glue(
+      "<a href='https://www.gbif.org/species/{str_replace(sp_id, 'GBIF:', '')}' target='_blank'>{sp_id}</a>"),
+    study_map   = case_match(
+      study_map,
+      "winship2018"  ~ "<a href='https://coastalscience.noaa.gov/data_reports/modeling-at-sea-density-of-marine-birds-to-support-atlantic-marine-renewable-energy-planning-final-report/' target='_blank'>winship2018</a>"),
+    study_param = case_match(
+      study_param,
+      "willmott2013" ~ "<a href='https://espis.boem.gov/final%20reports/5319.PDF' target='_blank'>willmott2013</a>"),
+    path_tif    = glue("{dir_tif}/{tif}"),
+    tif         = glue(
+      "<a href='https://github.com/MarineSensitivity/workflows/raw/main/data/sdm/raw/nc_atl_birds_dens/{tif}' target='_blank'>{tif}</a>"),
+    r           = map(path_tif, rast, lyrs = "n_per_km2") )
 # d_mw |> names() |> paste(collapse = '","') |> cat()
 cols_mw_notdisplay <- c(
   "r", "path_tif",
