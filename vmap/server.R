@@ -1,14 +1,50 @@
 function(input, output, session) {
 
+  # get_sp_ids() ----
+  get_sp_ids <- reactive({
+    # TODO: check for sp_id selected not applicable to available region-season
+
+    input$sel_spp |>
+      str_subset("GBIF:") |>
+      sort()
+  })
+
   # get_d_mw_rs() ----
   # [d]ataframe of [m]aps & [w]eights, [r]egion & [s]eason
   get_d_mw_rs <- reactive({
     req(input$sel_rgn) # TODO: region
     req(input$sel_ssn)
 
+    sp_ids <- get_sp_ids()
+
     d_mw |>
       filter(
-        season == input$sel_ssn)
+        season == input$sel_ssn,
+        sp_id %in% sp_ids)
+  })
+
+
+  # get_m() ----
+  get_m <- reactive({
+
+    # metadata object from Configure tab
+    m <- list(
+      region = input$sel_rgn,
+      season = input$sel_ssn,
+      sp_ids = get_sp_ids(),
+      eqn_r  = input$txt_eqn_r,
+      eqn_v  = input$txt_eqn_v)
+    # hash to uniquely identify raster
+    h <- digest(m, algo="crc32")
+    # output raster and metadata
+    tif <- glue("{dir_cache}/vmap_{h}.tif")
+    yml <- glue("{dir_cache}/vmap_{h}.yml")
+
+    list(
+      m   = m,
+      h   = h,
+      tif = tif,
+      yml = yml)
   })
 
   # get_r_mw_rs() ----
@@ -17,6 +53,13 @@ function(input, output, session) {
 
     eqn_r <- input$txt_eqn_r
     eqn_v <- input$txt_eqn_v
+
+    m <- get_m()
+
+    if (file.exists(m$tif)){
+      r <- rast(m$tif)
+      return(r)
+    }
 
     n <- 4
     withProgress(
@@ -50,8 +93,24 @@ function(input, output, session) {
 
     })
 
+    writeRaster(r, m$tif)
+    write_yaml(m$m, m$yml)
+
     r
   })
+
+  # downloadData ----
+  output$downloadData <- downloadHandler(
+    filename = function() {
+      m <- get_m()
+      glue("vmap_{m$h}.zip")
+    },
+    content = function(fname) {
+      m <- get_m()
+      zip(zipfile=fname, files=c(m$tif, m$yml))
+    },
+    contentType = "application/zip"
+  )
 
   # get_d_mw_rs_spp() ----
   # species [spp] from [m]aps & [w]eights, [r]egion & [s]eason

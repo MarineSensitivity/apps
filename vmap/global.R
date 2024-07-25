@@ -1,7 +1,7 @@
 # libraries ----
 librarian::shelf(
-  bslib, dplyr, DT, glue, here, htmltools, leaflet, purrr, readr,
-  shiny, shinyWidgets, stringr, terra)
+  bslib, digest, dplyr, DT, glue, here, htmltools, leaflet, purrr, readr,
+  shiny, shinyWidgets, stringr, terra, yaml)
 options(readr.show_col_types = F)
 
 # paths ----
@@ -10,6 +10,9 @@ dir_tif       <- glue("{dir_workflows}/data/sdm/raw/nc_atl_birds_dens")
 dir_csv       <- glue("{dir_workflows}/data/sdm/derived/nc_atl_birds_dens")
 mw_csv        <- glue("{dir_csv}/mw.csv")
 spp_csv       <- glue("{dir_csv}/mw_spp.csv")
+dir_cache     <- here("vmap/cache")
+
+dir.create(dir_cache, showWarnings = F)
 
 # themes ----
 light <- bs_theme(
