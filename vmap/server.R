@@ -107,7 +107,8 @@ function(input, output, session) {
     },
     content = function(fname) {
       m <- get_m()
-      zip(zipfile=fname, files=c(m$tif, m$yml))
+      setwd(dir_cache)
+      zip(zipfile=fname, files=basename(c(m$tif, m$yml)))
     },
     contentType = "application/zip"
   )
