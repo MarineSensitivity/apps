@@ -27,6 +27,25 @@ function(input, output, session) {
   # get_m() ----
   get_m <- reactive({
 
+    # check validity of input equation functions
+    # DEBUG
+    # input <- list(
+    #   txt_eqn_r = "
+    #     terra::scale(r) * (
+    #           best_estimate_final_population_sensitivity +
+    #           best_estimate_final_collision_sensitivity_rank +
+    #           best_estimate_final_displacement_sensitivity_rank )",
+    #   txt_eqn_v = "scales::rescale(v, c(0, 100))")
+    allowed_fxns <-c("terra::scale", "scale",
+                     "scales::rescale", "rescale",
+                     "c", "mean", "sum")
+    eqn_r_fxns  <- input$txt_eqn_r |>
+      str_extract_all("[[:graph:]]+(?=\\()") |> unlist()
+    eqn_v_fxns  <- input$txt_eqn_v |>
+      str_extract_all("[[:graph:]]+(?=\\()") |> unlist()
+    stopifnot(all(eqn_r_fxns %in% allowed_fxns))
+    stopifnot(all(eqn_v_fxns %in% allowed_fxns))
+
     # metadata object from Configure tab
     m <- list(
       region = input$sel_rgn,
