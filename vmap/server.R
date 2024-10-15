@@ -29,13 +29,13 @@ function(input, output, session) {
 
     # check validity of input equation functions
     # DEBUG
-    # input <- list(
-    #   txt_eqn_r = "
-    #     terra::scale(r) * (
-    #           best_estimate_final_population_sensitivity +
-    #           best_estimate_final_collision_sensitivity_rank +
-    #           best_estimate_final_displacement_sensitivity_rank )",
-    #   txt_eqn_v = "scales::rescale(v, c(0, 100))")
+    input <- list(
+      txt_eqn_r = "
+        terra::scale(r) * (
+              best_estimate_final_population_sensitivity +
+              best_estimate_final_collision_sensitivity_rank +
+              best_estimate_final_displacement_sensitivity_rank )",
+      txt_eqn_v = "scales::rescale(v, c(0, 100))")
     allowed_fxns <-c("terra::scale", "scale",
                      "scales::rescale", "rescale",
                      "c", "mean", "sum")
@@ -43,8 +43,16 @@ function(input, output, session) {
       str_extract_all("[[:graph:]]+(?=\\()") |> unlist()
     eqn_v_fxns  <- input$txt_eqn_v |>
       str_extract_all("[[:graph:]]+(?=\\()") |> unlist()
-    stopifnot(all(eqn_r_fxns %in% allowed_fxns))
-    stopifnot(all(eqn_v_fxns %in% allowed_fxns))
+    eqn_r_fxns_bad <- setdiff(eqn_r_fxns, allowed_fxns)
+    eqn_v_fxns_bad <- setdiff(eqn_v_fxns, allowed_fxns)
+    if (length(eqn_r_fxns_bad) > 0)
+      safeError(stop(paste0(
+        "Invalid function(s) in equation for each raster: ",
+        paste(eqn_r_fxns_bad, collapse = ", "),".")))
+    if (length(eqn_v_fxns_bad) > 0)
+      safeError(stop(paste0(
+        "Invalid function(s) in equation for the summed raster: ",
+        paste(eqn_v_fxns_bad, collapse = ", "),".")))
 
     # metadata object from Configure tab
     m <- list(
