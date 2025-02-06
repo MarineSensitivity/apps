@@ -1,3 +1,7 @@
+# TODO:
+# - [ ] consider [blockr](https://bristolmyerssquibb.github.io/blockr/articles/blockr.html)
+#       for managing modular blocks of filtering / analysis
+
 # libraries ----
 librarian::shelf(
   bslib, digest, dplyr, DT, glue, here, htmltools, leaflet, purrr, readr,
