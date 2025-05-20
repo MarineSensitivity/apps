@@ -38,8 +38,8 @@ lst_aois <- c(
   "Planning Areas"       = "public.ply_ep_planareas",
   "Protraction Diagrams" = "public.ply_ecoprot")
 
-tile_opts <- glue(
-  "resampling_method={cog_method}&rescale={paste(cog_range, collapse=',')}&return_mask=true&colormap_name={cog_palette}")
-nspp_tile_url  <- glue(
-  "https://api.cogeo.xyz/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}@2x?url={cog_url}&{tile_opts}")
+# tile_opts <- glue(
+#   "resampling_method={cog_method}&rescale={paste(cog_range, collapse=',')}&return_mask=true&colormap_name={cog_palette}")
+# nspp_tile_url  <- glue(
+#   "https://api.cogeo.xyz/cog/tiles/WebMercatorQuad/{{z}}/{{x}}/{{y}}@2x?url={cog_url}&{tile_opts}")
 
