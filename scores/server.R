@@ -2,8 +2,7 @@ shinyServer(function(input, output, session) {
 
   # rx: reactive values ----
   rx <- reactiveValues(
-    clicked = NULL,
-    status  = NULL)
+    clicked = NULL)
 
   # map ----
   output$map <- renderRdeck({
@@ -22,16 +21,16 @@ shinyServer(function(input, output, session) {
     # * get extent of features in db ----
     # TODO: use faster ST_EstimatedExtent(). For PostgreSQL >= 8.0.0 statistics are gathered by VACUUM ANALYZE and the result extent will be about 95% of the actual one. For PostgreSQL < 8.0.0 statistics are gathered by running update_geometry_stats() and the result extent is exact.
     # if (schema_tbl == "public.ply_ep_planareas"){
-    #   b <- c(-193.3, 14.8, -14.7, 74.9)
+    b <- c(-193.3, 14.8, -14.7, 74.9)
     # } else {
-      b <- dbGetQuery(con, glue(
-        # "SELECT ST_EstimatedExtent('{schema}', '{tbl}', '{fld_geom}');")) |>
-        "SELECT ST_Extent({fld_geom}) AS ext FROM {schema_tbl}")) |>
-        pull(ext) |>
-        str_replace_all("BOX\\((.*)\\)", "\\1") |>
-        str_split("[ ,]") %>%
-        .[[1]] |>
-        as.numeric()  # xmin, ymin, xmax, ymax
+    #   b <- dbGetQuery(con, glue(
+    #     # "SELECT ST_EstimatedExtent('{schema}', '{tbl}', '{fld_geom}');")) |>
+    #     "SELECT ST_Extent({fld_geom}) AS ext FROM {schema_tbl}")) |>
+    #     pull(ext) |>
+    #     str_replace_all("BOX\\((.*)\\)", "\\1") |>
+    #     str_split("[ ,]") %>%
+    #     .[[1]] |>
+    #     as.numeric()  # xmin, ymin, xmax, ymax
     # }
     # message(glue("using extent: {paste(b, collapse=', ')}"))
 
@@ -44,7 +43,6 @@ shinyServer(function(input, output, session) {
       pull(column_name)
     # message(glue("with flds: {paste(flds, collapse=', ')}"))
 
-    # browser()
     v <- tbl(con, tbl) |>
       pull(score_even)
 
@@ -54,7 +52,6 @@ shinyServer(function(input, output, session) {
       initial_bounds = st_bbox(
         c(xmin=b[1], ymin=b[2], xmax=b[3], ymax=b[4]),
         crs = st_crs(4326)),
-      # editor = T)  |>
       editor = F)  |>
       add_mvt_layer(
         id                = "aoi",
@@ -68,13 +65,12 @@ shinyServer(function(input, output, session) {
         opacity           = 0.5,
         line_width_scale  = 1,
         line_width_units  = "pixels",
-        # get_fill_color    = "#0000FF80",  # blue 0.5 opacity
         # get_line_color    = "#0000FFCC")  # blue 0.8 opacity
         get_fill_color    = scale_color_linear(
           col     = score_even,
           palette = turbo(256),
           limits  = range(v)
-          ))  # blue 0.8 opacity
+          ))
 
   })
 
@@ -107,13 +103,6 @@ shinyServer(function(input, output, session) {
   })
 
 
-  # txt_status ----
-
-  # output$htm_status <- renderUI({
-  #   req(rx$status)
-  #   h6(code(rx$status))
-  # })
-
   # * get clicked ----
   observe({
     d_c <- rdeck_proxy("map") |>
@@ -145,62 +134,6 @@ shinyServer(function(input, output, session) {
       ply_name     = ply_name,
       d_fl         = d_fl)
   })
-
-  # observe({
-  #   d_c <- rdeck_proxy("map") |>
-  #     get_clicked_object(session)  # default: NULL
-  #
-  #   req(d_c)
-  #   schema_tbl <- isolate(input$sel_aois)
-  #   tbl        <- str_split(schema_tbl, "\\.")[[1]][2]
-  #
-  #   br
-  #   key <- case_match(
-  #     schema_tbl,
-  #     "public.ply_shlfs" ~ "shlf_key",
-  #     "public.ply_rgns"  ~ "rgn_key",
-  #     .default = "ms_key")
-  #   val <- d_c[key][1]
-  #   url <- glue("https://tile.marinesensitivity.org/{schema_tbl}.html?filter={key}='{val}'")
-  #   # txt <- glue("SCHEMA.TABLE: {schema_tbl}<br> WHERE: {key} = '{val}'")
-  #   # message(glue("get_clicked(): [{txt}]({url})"))
-  #
-  #   rx$clicked <- list(
-  #     schema.table = schema_tbl,
-  #     where        = glue("{key} = '{val}'"))
-  #
-  #   nav_insert(
-  #     "nav",
-  #     target = "Map",
-  #     nav_panel(
-  #       "Table",
-  #       helpText("amt = n_cells * avg_pct_cell * avg_suit"),br(),
-  #       helpText("Amount (amt) is the multiplication of the number of cells (n_cells),
-  #              average percent of a cell (avg_pct_cell) within the selected polygon,
-  #              and the average Suitability (avg_suit; 0 to 1) of the species given by AquaMaps."),
-  #       dataTableOutput("tbl_spp") ) )
-  #
-  #   rx$status <- div(
-  #     "clicked ", a("feature", href=url, target='_blank'), br(),
-  #     "SCHEMA.TABLE: ", code(schema_tbl), br(),
-  #     "WHERE: ", code(glue("{key} = '{val}'")))
-  # })
-
-  # * get edited ----
-  # observe({
-  #   # spatial data frame of edited (and uploaded) feature
-  #   s_e <- rdeck_proxy("map") |>
-  #     get_edited_features(session)  # default: Simple feature collection with 0 features and 0 fields
-  #   # d_edited |> st_geometry() |> st_as_text()
-  #   req(nrow(s_e) > 0)
-  #   txt <- div("last edited:", st_geometry(s_e) %>% st_as_text())
-  #   # message(glue("get_edited(): {txt}"))
-  #
-  #   rx$clicked <- NULL
-  #   nav_remove("nav", "Table")
-  #
-  #   rx$status <- txt
-  # })
 
   # * get bounds ----
   # observe({
