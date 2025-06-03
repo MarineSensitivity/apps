@@ -1,21 +1,28 @@
 librarian::shelf(
-  bslib, DBI, dplyr, duckdb, glue, here, mapgl, purrr, sf, shiny, stringr,
+  bslib, DBI, dplyr, duckdb, glue, here, purrr, sf, shiny, stringr,
   terra, tibble, tidyr)
 
-verbose   <- T
-is_server <-  Sys.info()[["sysname"]] == "Linux"
-dir_data  <- ifelse(
+verbose        <- F
+is_server      <-  Sys.info()[["sysname"]] == "Linux"
+dir_private    <- ifelse(
+  is_server,
+  "/share/private",
+  "~/My Drive/private")
+dir_data       <- ifelse(
   is_server,
   "/share/data",
   "~/My Drive/projects/msens/data")
-cell_tif  <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-sdm_dd    <- glue("{dir_data}/derived/sdm.duckdb")
+mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
+cell_tif       <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
+sdm_dd         <- glue("{dir_data}/derived/sdm.duckdb")
+
+Sys.setenv(MAPBOX_PUBLIC_TOKEN=readLines(mapbox_tkn_txt))
+librarian::shelf(
+  mapgl)
 
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
 
-r_cell <- terra::rast(cell_tif) # |>  # |> rotate()
-  # subset("prim_prod_mean")     # "depth_mean"
-# plot(r) # plet(r)
+r_cell <- terra::rast(cell_tif)
 
 sp_cats   <- tbl(con_sdm, "species") |> distinct(sp_cat) |> pull(sp_cat) |> sort()
 sp_cats_u <- sp_cats |> str_replace(" ", "_")
@@ -45,17 +52,15 @@ d_lyrs <- bind_rows(
     source   = "r_cell",
     lyr      = names(r_cell) |> setdiff("cell_id"),
     layer    = names(r_cell) |> setdiff("cell_id") ) )
-# View(d_lyrs)
 
 lyr_choices <- d_lyrs |>
   group_by(order, category) |>
   summarise(
-    layer = list(setNames(lyr, layer)), 
+    layer = list(setNames(lyr, layer)),
     .groups = "drop") |>
   arrange(order, layer) |>
   select(-order) |>
   deframe()
-View(d_lyrs)
 
 light <- bs_theme()
 dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
@@ -127,13 +132,6 @@ server <- function(input, output, session) {
       add_vector_source(
         id  = "vect_src",
         url = 'https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025') |>
-      add_fill_layer(
-        id                 = "vect_lyr",
-        source             = "vect_src",
-        source_layer       = "public.ply_planareas_2025",
-        fill_color         = "transparent",
-        fill_outline_color = "white",
-        tooltip            = "planarea_name") |>
       add_image_source(
         id     = "r_src",
         data   = r,
@@ -143,6 +141,23 @@ server <- function(input, output, session) {
         source            = 'r_src',
         raster_opacity    = 0.6,
         raster_resampling = "nearest") |>
+      add_line_layer(
+        id           = "vect_ln",
+        source       = "vect_src",
+        source_layer = "public.ply_planareas_2025",
+        line_color   = "white",
+        line_opacity = 1,
+        line_width   = 1) |>
+      # add_fill_layer(
+      #   id                 = "vect_fill",
+      #   source             = "vect_src",
+      #   source_layer       = "public.ply_planareas_2025",
+      #   fill_color         = "transparent",
+      #   fill_outline_color = "white",
+      #   tooltip            = "planarea_name",
+      #   hover_options = list(
+      #     fill_color = "yellow",
+      #     fill_opacity = 1 ) ) |>
       mapgl::add_legend(
         "Colorscale",
         values   = rng_r,
@@ -157,7 +172,6 @@ server <- function(input, output, session) {
 
   observeEvent(input$map_click, {
     # mapboxgl_proxy("map")
-    # browser()
     if (verbose){
       message(": input$map_click", str(input$map_click))
       message(": input$map_center", str(input$map_center))
