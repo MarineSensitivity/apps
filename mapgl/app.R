@@ -17,25 +17,45 @@ r_cell <- terra::rast(cell_tif) # |>  # |> rotate()
   # subset("prim_prod_mean")     # "depth_mean"
 # plot(r) # plet(r)
 
+sp_cats   <- tbl(con_sdm, "species") |> distinct(sp_cat) |> pull(sp_cat) |> sort()
+sp_cats_u <- sp_cats |> str_replace(" ", "_")
+
 d_lyrs <- bind_rows(
   tibble(
     order    = 1,
-    category = "Species Extinction Risk",
+    category = "Overall",
     source   = "db_metric",
-    layer    = c("all",
-                 tbl(con_sdm, "species") |> distinct(sp_cat) |> pull(sp_cat) ) ),
+    layer    = "score",
+    lyr      = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"),
   tibble(
     order    = 2,
+    category = "Species, rescaled by Ecoregion",
+    source   = "db_metric",
+    layer    = glue("{sp_cats}: ext. risk, ecorgn"),
+    lyr      = glue("extrisk_{sp_cats_u}_ecoregion_rescaled")),
+  tibble(
+    order    = 3,
+    category = "Species, raw Extinction Risk",
+    source   = "db_metric",
+    layer    = glue("{sp_cats}: ext. risk"),
+    lyr      = glue("extrisk_{sp_cats_u}")),
+  tibble(
+    order    = 4,
     category = "Environment",
     source   = "r_cell",
+    lyr      = names(r_cell) |> setdiff("cell_id"),
     layer    = names(r_cell) |> setdiff("cell_id") ) )
+# View(d_lyrs)
 
 lyr_choices <- d_lyrs |>
   group_by(order, category) |>
-  summarise(layer = list(layer), .groups = "drop") |>
+  summarise(
+    layer = list(setNames(lyr, layer)), 
+    .groups = "drop") |>
   arrange(order, layer) |>
   select(-order) |>
   deframe()
+View(d_lyrs)
 
 light <- bs_theme()
 dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
@@ -63,17 +83,18 @@ server <- function(input, output, session) {
   get_rast <- reactive({
     req(input$sel_lyr)
 
-    lyr <- input$sel_lyr  # lyr = "all"
+    lyr_val <- input$sel_lyr  # lyr_val = selected lyr value
     src <- d_lyrs |>
-      filter(layer == !!lyr) |>
+      filter(lyr == !!lyr_val) |>
       pull(source)
 
     if (verbose)
-      message("Source: ", src, " for layer: ", lyr)
+      message("Source: ", src, " for lyr: ", lyr_val)
     if (src == "r_cell") {
-      r <- r_cell[[lyr]]
+      r <- r_cell[[lyr_val]]
     } else {  # src == "db_metric"
 
+      m_key <- input$sel_lyr
       d <- dbGetQuery(con_sdm, glue("
         SELECT
           cm.cell_id,
@@ -82,7 +103,7 @@ server <- function(input, output, session) {
         WHERE cm.metric_seq = (
           SELECT metric_seq
           FROM metric
-          WHERE metric_type = 'extrisk_{str_replace(lyr, ' ', '_')}' )"))
+          WHERE metric_key = '{m_key}' )" ))
       stopifnot(sum(duplicated(d$cell_id)) == 0)
 
       r <- init(r_cell[[1]], NA)
