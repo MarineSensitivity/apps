@@ -19,9 +19,9 @@ mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 
 # load mapgl with mapbox token ----
 Sys.setenv(MAPBOX_PUBLIC_TOKEN=readLines(mapbox_tkn_txt))
-# librarian::shelf(
-#   mapgl)
-devtools::load_all("~/Github/bbest/mapgl")
+# devtools::load_all("~/Github/bbest/mapgl")
+librarian::shelf(
+  mapgl)
 
 # database connection ----
 stopifnot(file.exists(db_pass_txt))
@@ -94,53 +94,34 @@ server <- function(input, output, session) {
       center     = c(-106, 40.1)) |>
       add_vector_source(
         id         = "vect_src",
-        # url        = 'https://api.marinesensitivity.org/tilejson?table=oceanmetrics.ds_indicators&use_cache=F',
-        url        = 'https://api.marinesensitivity.org/tilejson?table=oceanmetrics.ds_indicators',
+        url        = "https://api.marinesensitivity.org/tilejson?table=oceanmetrics.ds_indicators",
         promoteId  = "id") |>
       add_fill_layer(
         id           = "vect_ply",
         source       = "vect_src",
         source_layer = "oceanmetrics.ds_indicators",
-        # fill_color   = "blue",
         fill_color = interpolate(
           column = input$sel_lyr,
           values = brks,
           stops  = cols ),
         fill_opacity = 0.7,
-        # tooltip = concat(
-        #   "key: ", input$sel_lyr    , "</pre><br>
-        #    id: ", get_column("id"), "</pre><br>
-        #    <strong>value</strong>: ", get_column(input$sel_lyr)),
         tooltip = input$sel_lyr,
+        popup = concat(
+          "layer key: ", input$sel_lyr    , "<br>
+           feature id: ", get_column("id"), "<br>
+           value: ", get_column(input$sel_lyr)),
         hover_options = list(
-          # id           = "id",
           fill_color   = "cyan",
-          fill_opacity = 1 ),
-        popup = input$sel_lyr ) # |>
-        # line_color   = "white",
-        # line_opacity = 1,
-        # line_width   = 1
-        # ) |>
-      # add_fill_layer(
-      #   id                 = "vect_fill",
-      #   source             = "vect_src",
-      #   source_layer       = "public.ply_planareas_2025",
-      #   fill_color         = "transparent",
-      #   fill_outline_color = "white",
-      #   tooltip            = "planarea_name",
-      #   hover_options = list(
-      #     fill_color = "yellow",
-      #     fill_opacity = 1 ) ) |>
-
-      # mapgl::add_legend(
-      #   d_lyr$description,
-      #   values   = rng,
-      #   colors   = cols,
-      #   position = "bottom-right") |>
-      # add_fullscreen_control(
-      #   position = "top-left") |>
-      # add_navigation_control() |>
-      # add_scale_control()
+          fill_opacity = 1 )) |>
+      mapgl::add_legend(
+        d_lyr$description,
+        values   = rng,
+        colors   = cols,
+        position = "bottom-right") |>
+      add_fullscreen_control(
+        position = "top-left") |>
+      add_navigation_control() |>
+      add_scale_control()
 
   })
 
