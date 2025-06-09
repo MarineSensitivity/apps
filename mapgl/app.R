@@ -130,24 +130,34 @@ server <- function(input, output, session) {
       zoom   = 3.5,
       center = c(-106, 40.1)) |>
       add_vector_source(
-        id  = "vect_src",
-        url = 'https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025') |>
+        id  = "pa_src",
+        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025") |>
+      add_vector_source(
+        id  = "er_src",
+        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025") |>
       add_image_source(
         id     = "r_src",
         data   = r,
         colors = cols_r) |>
       add_raster_layer(
-        id                = 'r_lyr',
-        source            = 'r_src',
+        id                = "r_lyr",
+        source            = "r_src",
         raster_opacity    = 0.6,
         raster_resampling = "nearest") |>
       add_line_layer(
-        id           = "vect_ln",
-        source       = "vect_src",
+        id           = "er_ln",
+        source       = "er_src",
+        source_layer = "public.ply_ecoregions_2025",
+        line_color   = "black",
+        line_opacity = 0.8,
+        line_width   = 0.5) |>
+      add_line_layer(
+        id           = "pa_ln",
+        source       = "pa_src",
         source_layer = "public.ply_planareas_2025",
         line_color   = "white",
-        line_opacity = 1,
-        line_width   = 1) |>
+        line_opacity = 0.8,
+        line_width   = 0.5) |>
       # add_fill_layer(
       #   id                 = "vect_fill",
       #   source             = "vect_src",
