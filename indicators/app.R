@@ -57,8 +57,8 @@ ui <- page_sidebar(
       "sel_lyr",
       "Layer",
       choices = lyr_choices),
-    input_switch(
-      "tgl_sphere", "Sphere", T ),
+    # input_switch(
+    #   "tgl_sphere", "Sphere", T ),
     input_dark_mode(
       id = "tgl_dark", mode = "dark")),
   card(
@@ -74,9 +74,10 @@ server <- function(input, output, session) {
   output$map <- renderMapboxgl({
   # output$map <- renderMaplibre({
 
-    req(input$sel_lyr, input$tgl_sphere)
+    # req(input$sel_lyr, input$tgl_sphere)
+    req(input$sel_lyr)
 
-    # input <- list(tgl_sphere = T, sel_lyr = "al_er_su_wr")
+    # input <- list(tgl_sphere = F, sel_lyr = "al_er_su_wr")
     d_lyr <- d_lyrs |>
       filter(key == input$sel_lyr)
 
@@ -87,7 +88,8 @@ server <- function(input, output, session) {
 
     mapboxgl(
       style      = mapbox_style("dark"),
-      projection = ifelse(input$tgl_sphere, "globe", "mercator"),
+      # projection = ifelse(input$tgl_sphere, "globe", "mercator"),
+      projection = "globe",
     # maplibre(
     #   style      = carto_style("voyager"),
       zoom       = 3.5,
