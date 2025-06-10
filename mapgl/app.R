@@ -1,7 +1,9 @@
+# packages ----
 librarian::shelf(
   bslib, DBI, dplyr, duckdb, glue, here, purrr, sf, shiny, stringr,
   terra, tibble, tidyr)
 
+# variables ----
 verbose        <- F
 is_server      <-  Sys.info()[["sysname"]] == "Linux"
 dir_private    <- ifelse(
@@ -20,10 +22,16 @@ Sys.setenv(MAPBOX_PUBLIC_TOKEN=readLines(mapbox_tkn_txt))
 librarian::shelf(
   mapgl)
 
+# database ----
+source(here("../workflows/libs/db.R")) # con
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
+# dbDisconnect(con, shutdown = T) # TODO: disconnect when Shiny closes
+# duckdb_shutdown(duckdb())
 
+# data prep ----
 r_cell <- terra::rast(cell_tif)
 
+# * lyrs ----
 sp_cats   <- tbl(con_sdm, "species") |> distinct(sp_cat) |> pull(sp_cat) |> sort()
 sp_cats_u <- sp_cats |> str_replace(" ", "_")
 
@@ -37,21 +45,34 @@ d_lyrs <- bind_rows(
   tibble(
     order    = 2,
     category = "Species, rescaled by Ecoregion",
-    source   = "db_metric",
     layer    = glue("{sp_cats}: ext. risk, ecorgn"),
     lyr      = glue("extrisk_{sp_cats_u}_ecoregion_rescaled")),
   tibble(
     order    = 3,
+    category = "Primary Productivity, rescaled by Ecoregion",
+    layer    = glue("{sp_cats}: ext. risk, ecorgn"),
+    lyr      = glue("extrisk_{sp_cats_u}_ecoregion_rescaled")),
+  tibble(
+    order    = 4,
     category = "Species, raw Extinction Risk",
-    source   = "db_metric",
     layer    = glue("{sp_cats}: ext. risk"),
     lyr      = glue("extrisk_{sp_cats_u}")),
   tibble(
-    order    = 4,
-    category = "Environment",
-    source   = "r_cell",
-    lyr      = names(r_cell) |> setdiff("cell_id"),
-    layer    = names(r_cell) |> setdiff("cell_id") ) )
+    order    = 5,
+    category = "Primary Productivity, raw Phytoplankton",
+    lyr      = "primprod",
+    layer    = "primary productivity (mmol/m^3)" ) )
+
+# confirm all layers available for both planareas and cell metrics
+lyrs_pa   <- dbListFields(con, "ply_planareas_2025")
+lyrs_cell <- tbl(con_sdm, "metric") |>
+  semi_join(
+    tbl(con_sdm, "cell_metric") |>
+      distinct(metric_seq),
+    by = "metric_seq") |>
+  pull(metric_key)
+stopifnot(all(d_lyrs$lyr %in% lyrs_pa))
+stopifnot(all(d_lyrs$lyr %in% lyrs_cell))
 
 lyr_choices <- d_lyrs |>
   group_by(order, category) |>
@@ -62,11 +83,21 @@ lyr_choices <- d_lyrs |>
   select(-order) |>
   deframe()
 
+# ui ----
 light <- bs_theme()
-dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
+# dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
+dark <- bs_theme()
 ui <- page_sidebar(
+  tags$head(tags$style(HTML(
+    ".mapboxgl-popup-content{color:black;}" ))),
   title = "BOEM Marine Sensitivity",
   sidebar = sidebar(
+    selectInput(
+      "sel_unit",
+      "Spatial units",
+      choices = c(
+        "Raster cells (0.05°)" = "cell",
+        "Planning areas"       = "pa")),
     selectInput(
       "sel_lyr",
       "Layer",
@@ -79,28 +110,20 @@ ui <- page_sidebar(
     full_screen = TRUE,
     mapboxglOutput("map") ) )
 
+# server ----
 server <- function(input, output, session) {
 
   # observe(session$setCurrentTheme(
   #   if (isTRUE(input$tgl_dark)) dark else light
   # ))
 
+  # * get_rast ----
   get_rast <- reactive({
-    req(input$sel_lyr)
+    req(input$sel_unit, input$sel_lyr)
 
-    lyr_val <- input$sel_lyr  # lyr_val = selected lyr value
-    src <- d_lyrs |>
-      filter(lyr == !!lyr_val) |>
-      pull(source)
+    m_key <- input$sel_lyr
 
-    if (verbose)
-      message("Source: ", src, " for lyr: ", lyr_val)
-    if (src == "r_cell") {
-      r <- r_cell[[lyr_val]]
-    } else {  # src == "db_metric"
-
-      m_key <- input$sel_lyr
-      d <- dbGetQuery(con_sdm, glue("
+    d <- dbGetQuery(con_sdm, glue("
         SELECT
           cm.cell_id,
           cm.value
@@ -109,20 +132,28 @@ server <- function(input, output, session) {
           SELECT metric_seq
           FROM metric
           WHERE metric_key = '{m_key}' )" ))
-      stopifnot(sum(duplicated(d$cell_id)) == 0)
+    stopifnot(sum(duplicated(d$cell_id)) == 0)
 
-      r <- init(r_cell[[1]], NA)
-      r[d$cell_id] <- d$value
-    }
+    r <- init(r_cell[[1]], NA)
+    r[d$cell_id] <- d$value
 
     r
   })
 
+  # * map ----
   output$map <- renderMapboxgl({
 
     r <- get_rast()
-    cols_r <- rev(RColorBrewer::brewer.pal(11, "Spectral"))
+    n_cols <- 11
+    cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
     rng_r <- minmax(r) |> as.numeric() |> signif(digits = 3)
+
+    var_pa <- "score_extriskspcat_primprod_ecoregionrescaled_equalweights"
+    rng_pa <- tbl(con, "ply_planareas_2025") |>
+      pull({{ var_pa }}) |>
+      range() # |> signif(digits = 3)
+    cols_pa  <- colorRampPalette(cols_r, space = "Lab")(n_cols)
+    brks_pa <- seq(rng_pa[1], rng_pa[2], length.out = n_cols)
 
     mapboxgl(
       style  = mapbox_style("dark"),
@@ -158,30 +189,38 @@ server <- function(input, output, session) {
         line_color   = "white",
         line_opacity = 0.8,
         line_width   = 0.5) |>
-      # add_fill_layer(
-      #   id                 = "vect_fill",
-      #   source             = "vect_src",
-      #   source_layer       = "public.ply_planareas_2025",
-      #   fill_color         = "transparent",
-      #   fill_outline_color = "white",
-      #   tooltip            = "planarea_name",
-      #   hover_options = list(
-      #     fill_color = "yellow",
-      #     fill_opacity = 1 ) ) |>
+      add_fill_layer(
+        id                 = "pa_ply",
+        source             = "pa_src",
+        source_layer       = "public.ply_planareas_2025",
+        fill_color         = interpolate(
+          column   = var_pa,
+          values   = brks_pa,
+          stops    = cols_pa,
+          na_color = "lightgrey"),
+        fill_outline_color = "white",
+        tooltip            = concat("Value: ", get_column(var_pa)),
+        hover_options = list(
+          fill_color = "purple",
+          fill_opacity = 1 ) ) |>
       mapgl::add_legend(
         "Colorscale",
         values   = rng_r,
         colors   = cols_r,
         position = "bottom-right") |>
-      add_fullscreen_control(
-        position = "top-left") |>
+      add_fullscreen_control() |>
+        # position = "top-left") |>
       add_navigation_control() |>
-      add_scale_control()
+      add_scale_control() |>
+      add_layers_control() |>
+      # add_globe_control() # only for MapLibre maps
+      add_geocoder_control() |>
+      add_draw_control(position = "top-right")
 
   })
 
+  # * map_click ----
   observeEvent(input$map_click, {
-    # mapboxgl_proxy("map")
     if (verbose){
       message(": input$map_click", str(input$map_click))
       message(": input$map_center", str(input$map_center))
