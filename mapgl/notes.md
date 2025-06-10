@@ -1,3 +1,20 @@
+## 2025-06-10.c table of values with primprod and species extinction risk
+
+In @apps/mapgl/app.R add a new tab panel that displays a table of values for all
+the component values, ie primprod and all species with extinction risk. Initially
+populate with all values, but then filter based on clicked planning area or cell.
+Use the @workflows/ingest_aquamaps_to_sdm_duckdb.qmd to understand how to 
+query the duckdb for the relevant data and use DT:datatable() or similar to 
+efficiently display up to 17K rows of data (with the option of downloading).
+For each value, include a link to a new tab (target = "blank") that goes to
+a new Shiny app @apps/maplyr/app.R (modeled after @apps/mapgl/app.R) that accepts the
+individual value input (either primprod or individual species).
+
+## 2025-06-10.b map pa vs cell, flower plot absolute panel
+
+In @apps/mapgl/app.R make visibility of `flower_panel` conditional on a valid
+input (ie clicked cell or polygon).
+
 ## 2025-06-10.a map pa vs cell, flower plot absolute panel
 
 In @apps/mapgl/app.R the `output$map` displays both raster (`add_raster_layer()`)

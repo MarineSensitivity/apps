@@ -193,26 +193,21 @@ ui <- page_sidebar(
       "tgl_sphere", "Sphere", T ),
     input_dark_mode(
       id = "tgl_dark", mode = "dark")),
+
   card(
     full_screen = TRUE,
     mapboxglOutput("map"),
-    absolutePanel(
-      id          = "flower_panel",
-      # top         = 60,
-      # right       = 10,
-      # width       = 350,
-      height      = "auto",
-      draggable   = T,
-      full_screen = T,
-      # style       = "background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);",
-      # style       = "background: white; padding: 10px; border-radius: 5px; box-shadow: 0 1px 5px rgba(0,0,0,0.2);",
-      style       = "background: white; padding: 3px; border-radius: 2px; box-shadow: 0 1px 3px rgba(0,0,0,0.2);",
-      # h4("Click a location for details", id = "flower_title"),
-      card_header("Score"),
-      card_body(
-        girafeOutput("plot_flower", height = "300px") ),
-      # verbatimTextOutput("click_info")
-      ) ) )
+    conditionalPanel(
+      absolutePanel(
+        id          = "flower_panel",
+        height      = "auto",
+        draggable   = T,
+        card(
+          full_screen = T,
+          card_header(class = "bg-dark", "Score"),
+          card_body(
+            girafeOutput("plot_flower", height = "300px") ) ) ),
+      condition = 'output.flower_status') ) )
 
 # server ----
 server <- function(input, output, session) {
@@ -225,6 +220,13 @@ server <- function(input, output, session) {
   rx <- reactiveValues(
     clicked_pa   = NULL,
     clicked_cell = NULL)
+
+  output$flower_status <- reactive({
+    if (!is.null(rx$clicked_pa) || !is.null(rx$clicked_cell))
+      return(T)
+    F
+  })
+  outputOptions(output, "flower_status", suspendWhenHidden = FALSE)
 
   # * get_rast ----
   get_rast <- reactive({
