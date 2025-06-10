@@ -1,7 +1,7 @@
 # packages ----
 librarian::shelf(
-  bslib, DBI, dplyr, duckdb, glue, here, purrr, sf, shiny, stringr,
-  terra, tibble, tidyr)
+  bslib, DBI, dplyr, duckdb, ggiraph, ggplot2, glue, here, purrr, RColorBrewer, sf,
+  shiny, stringr, terra, tibble, tidyr)
 
 # variables ----
 verbose        <- F
@@ -27,6 +27,93 @@ source(here("../workflows/libs/db.R")) # con
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
 # dbDisconnect(con, shutdown = T) # TODO: disconnect when Shiny closes
 # duckdb_shutdown(duckdb())
+
+# flower plot function ----
+plot_flower <- function(
+    data,
+    fld_category,
+    fld_height,
+    fld_width,
+    tooltip_expr = NULL,
+    score        = NULL,
+    title        = NULL,
+    colors       = "Set2"){
+
+  stopifnot(is.numeric(data |> pull({{ fld_height }})))
+  stopifnot(is.numeric(data |> pull({{ fld_width }})))
+
+  if (is.null(score)){
+    score <- data |>
+      # ensure both are not just integer (weighted.mean goes to 0)
+      mutate(
+        "{{fld_height}}" := as.double({{ fld_height }}),
+        "{{fld_width}}"  := as.double({{ fld_width  }}) ) |>
+      summarize(
+        score = weighted.mean({{ fld_height }}, {{ fld_width }}, na.rm = T)) |>
+      pull(score)
+  }
+
+  # Calculate positions
+  d <- data |>
+    arrange({{ fld_category }}) |>
+    mutate(across(!where(is.character), as.double)) |>
+    mutate(
+      # Calculate angles for plotting
+      ymax    = cumsum({{ fld_width }}),
+      ymin    = lag(ymax, default=0), # ,  c(0, head(ymax, n=-1)),
+      xmax    = {{ fld_height }},
+      xmin    = 0)
+
+  sym_category <- ensym(fld_category)
+  sym_height   <- ensym(fld_height)
+  sym_width    <- ensym(fld_width)
+
+  if (!is.null(tooltip_expr)){
+    d <- d |>
+      mutate(
+        tooltip = glue(tooltip_expr))
+  } else {
+    d <- d |>
+      mutate(
+        tooltip = glue("{!!fld_category}"))
+  }
+
+  g <- ggplot(d) +
+    geom_rect_interactive(aes(
+      xmin    = xmin,
+      xmax    = xmax,
+      ymin    = ymin,
+      ymax    = ymax,
+      fill    = {{ fld_category }},
+      color   = "white",
+      data_id = {{ fld_category }},
+      tooltip = tooltip),
+      color = "white",
+      alpha = 0.5) +
+    coord_polar(theta = "y") +
+    # Create donut hole
+    xlim(c(-10, max(data |> pull({{ fld_height }})))) +
+    # Add center score
+    annotate(
+      "text", x = -10, y = 0,
+      label = round(score),
+      size = 8,
+      fontface = "bold") +
+    # scale_fill_brewer(
+    #   palette = colors) +
+    # scale_fill_brewer() +
+    theme_minimal() +
+    # theme_void() +
+    theme(
+      legend.position = "bottom",
+      plot.margin = unit(c(20, 20, 20, 20), "pt"))
+
+  if (!is.null(title))
+    g <- g +
+      ggtitle(title)
+
+  girafe(ggobj = g)
+}
 
 # data prep ----
 r_cell <- terra::rast(cell_tif)
@@ -108,7 +195,24 @@ ui <- page_sidebar(
       id = "tgl_dark", mode = "dark")),
   card(
     full_screen = TRUE,
-    mapboxglOutput("map") ) )
+    mapboxglOutput("map"),
+    absolutePanel(
+      id          = "flower_panel",
+      # top         = 60,
+      # right       = 10,
+      # width       = 350,
+      height      = "auto",
+      draggable   = T,
+      full_screen = T,
+      # style       = "background: white; padding: 20px; border-radius: 10px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);",
+      # style       = "background: white; padding: 10px; border-radius: 5px; box-shadow: 0 1px 5px rgba(0,0,0,0.2);",
+      style       = "background: white; padding: 3px; border-radius: 2px; box-shadow: 0 1px 3px rgba(0,0,0,0.2);",
+      # h4("Click a location for details", id = "flower_title"),
+      card_header("Score"),
+      card_body(
+        girafeOutput("plot_flower", height = "300px") ),
+      # verbatimTextOutput("click_info")
+      ) ) )
 
 # server ----
 server <- function(input, output, session) {
@@ -117,9 +221,14 @@ server <- function(input, output, session) {
   #   if (isTRUE(input$tgl_dark)) dark else light
   # ))
 
+  # reactive values ----
+  rx <- reactiveValues(
+    clicked_pa   = NULL,
+    clicked_cell = NULL)
+
   # * get_rast ----
   get_rast <- reactive({
-    req(input$sel_unit, input$sel_lyr)
+    req(input$sel_lyr)
 
     m_key <- input$sel_lyr
 
@@ -143,89 +252,258 @@ server <- function(input, output, session) {
   # * map ----
   output$map <- renderMapboxgl({
 
-    r <- get_rast()
+    # default to show raster score
+    r      <- get_rast()
     n_cols <- 11
     cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-    rng_r <- minmax(r) |> as.numeric() |> signif(digits = 3)
+    rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
-    var_pa <- "score_extriskspcat_primprod_ecoregionrescaled_equalweights"
-    rng_pa <- tbl(con, "ply_planareas_2025") |>
-      pull({{ var_pa }}) |>
-      range() # |> signif(digits = 3)
-    cols_pa  <- colorRampPalette(cols_r, space = "Lab")(n_cols)
-    brks_pa <- seq(rng_pa[1], rng_pa[2], length.out = n_cols)
-
+    # input = list(tgl_sphere = T)
     mapboxgl(
       style  = mapbox_style("dark"),
       projection = ifelse(input$tgl_sphere, "globe", "mercator"),
       zoom   = 3.5,
       center = c(-106, 40.1)) |>
       add_vector_source(
-        id  = "pa_src",
-        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025") |>
-      add_vector_source(
         id  = "er_src",
         url = "https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025") |>
+      add_vector_source(
+        id  = "pa_src",
+        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025") |>
       add_image_source(
         id     = "r_src",
         data   = r,
         colors = cols_r) |>
-      add_raster_layer(
-        id                = "r_lyr",
-        source            = "r_src",
-        raster_opacity    = 0.6,
-        raster_resampling = "nearest") |>
-      add_line_layer(
-        id           = "er_ln",
-        source       = "er_src",
-        source_layer = "public.ply_ecoregions_2025",
-        line_color   = "black",
-        line_opacity = 0.8,
-        line_width   = 0.5) |>
       add_line_layer(
         id           = "pa_ln",
         source       = "pa_src",
         source_layer = "public.ply_planareas_2025",
         line_color   = "white",
-        line_opacity = 0.8,
-        line_width   = 0.5) |>
-      add_fill_layer(
-        id                 = "pa_ply",
-        source             = "pa_src",
-        source_layer       = "public.ply_planareas_2025",
-        fill_color         = interpolate(
-          column   = var_pa,
-          values   = brks_pa,
-          stops    = cols_pa,
-          na_color = "lightgrey"),
-        fill_outline_color = "white",
-        tooltip            = concat("Value: ", get_column(var_pa)),
-        hover_options = list(
-          fill_color = "purple",
-          fill_opacity = 1 ) ) |>
+        line_opacity = 1,
+        line_width   = 1) |>
+      add_line_layer(
+        id           = "er_ln",
+        source       = "er_src",
+        source_layer = "public.ply_ecoregions_2025",
+        line_color   = "black",
+        line_opacity = 1,
+        line_width   = 3,
+        before_id    = "pa_ln") |>
+      add_raster_layer(
+        id                = "r_lyr",
+        source            = "r_src",
+        raster_opacity    = 0.6,
+        raster_resampling = "nearest",
+        before_id         = "er_ln") |>
       mapgl::add_legend(
         "Colorscale",
         values   = rng_r,
         colors   = cols_r,
         position = "bottom-right") |>
       add_fullscreen_control() |>
-        # position = "top-left") |>
       add_navigation_control() |>
       add_scale_control() |>
-      add_layers_control() |>
-      # add_globe_control() # only for MapLibre maps
-      add_geocoder_control() |>
-      add_draw_control(position = "top-right")
+      # add_layers_control() |>
+      # add_draw_control(position = "top-right") |>
+      add_geocoder_control()
 
   })
 
+  # * update map based on unit selection ----
+  observeEvent(list(input$sel_unit, input$sel_lyr), {
+    req(input$sel_unit, input$sel_lyr)
+
+    map_proxy <- mapboxgl_proxy("map")
+
+    if (input$sel_unit == "cell") {
+      if (verbose)
+        message(glue("update map cell"))
+
+      # show raster layer
+      r      <- get_rast()
+      n_cols <- 11
+      cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+      rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
+
+      # remove planning area fill layer if exists
+      map_proxy |>
+        clear_layer("pa_lyr")
+
+      # update or add raster source and layer
+      map_proxy |>
+        clear_layer("r_src") |>
+        clear_layer("r_lyr") |>
+        add_image_source(
+          id     = "r_src",
+          data   = r,
+          colors = cols_r) |>
+        add_raster_layer(
+          id                = "r_lyr",
+          source            = "r_src",
+          raster_opacity    = 0.6,
+          raster_resampling = "nearest",
+          before_id         = "er_ln") |>
+        mapgl::add_legend(
+          "Colorscale",
+          values   = rng_r,
+          colors   = cols_r,
+          position = "bottom-right")
+
+    } else {
+      if (verbose)
+        message(glue("update map pa"))
+
+      # show planning area layer
+      n_cols <- 11
+      cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+      var_pa <- input$sel_lyr
+
+      rng_pa <- tbl(con, "ply_planareas_2025") |>
+        pull({{ var_pa }}) |>
+        range(na.rm = TRUE)
+      cols_pa  <- colorRampPalette(cols_r, space = "Lab")(n_cols)
+      brks_pa <- seq(rng_pa[1], rng_pa[2], length.out = n_cols)
+
+      # remove raster layer if exists
+      map_proxy |>
+        clear_layer("r_lyr")
+
+      # add planning area fill layer
+      map_proxy |>
+        clear_layer("pa_lyr") |>
+        add_fill_layer(
+          id                 = "pa_lyr",
+          source             = "pa_src",
+          source_layer       = "public.ply_planareas_2025",
+          fill_color         = interpolate(
+            column   = var_pa,
+            values   = brks_pa,
+            stops    = cols_pa,
+            na_color = "lightgrey"),
+          fill_outline_color = "white",
+          tooltip            = concat("Value: ", get_column(var_pa)),
+          hover_options = list(
+            fill_color = "purple",
+            fill_opacity = 1 ),
+          before_id = "pa_ln" ) |>
+        mapgl::add_legend(
+          "Colorscale",
+          values   = rng_pa,
+          colors   = cols_pa,
+          position = "bottom-right")
+    }
+  }, ignoreInit = FALSE)
+
   # * map_click ----
   observeEvent(input$map_click, {
-    if (verbose){
-      message(": input$map_click", str(input$map_click))
-      message(": input$map_center", str(input$map_center))
-      message(": input$map_zoom", str(input$map_zoom))
-      message(": input$map_bbox", str(input$map_bbox))
+    req(input$map_click)
+
+    click <- input$map_click
+
+    if (input$sel_unit == "cell") {
+      # handle raster click
+      lng <- click$lng
+      lat <- click$lat
+
+      # extract cell value at clicked location
+      pt <- vect(data.frame(x = lng, y = lat), geom = c("x", "y"), crs = "EPSG:4326") |>
+        st_as_sf() |>
+        st_shift_longitude()  # [-180,180] -> [0,360]
+      cell_id <- terra::extract(r_cell$cell_id , pt) |> pull(cell_id)
+
+      if (!is.na(cell_id)) {
+        rx$clicked_cell <- list(
+          lng      = lng,
+          lat      = lat,
+          cell_id  = cell_id,
+          lyr      = input$sel_lyr)
+      }
+
+    } else {
+      # handle planning area click
+      if (!is.null(input$map_feature_click)) {
+        rx$clicked_pa <- list(
+          id         = input$map_feature_click$id,
+          properties = input$map_feature_click$properties)
+      }
+    }
+  })
+
+  # * plot_flower ----
+  output$plot_flower <- renderGirafe({
+
+    if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
+      # get data for cell
+      cell_id <- rx$clicked_cell$cell_id
+      lng     <- rx$clicked_cell$lng |> round(3)
+      lat     <- rx$clicked_cell$lat |> round(3)
+
+      # get species group scores for the cell
+      d_fl <- tbl(con_sdm, "metric") |>
+        filter(str_detect(metric_key, ".*_ecoregion_rescaled$")) |>
+        left_join(
+          tbl(con_sdm, "cell_metric"),
+          by = "metric_seq") |>
+        filter(cell_id == !!cell_id) |>
+        select(metric_key, score = value) |>
+        mutate(
+          component = metric_key |>
+            str_replace("extrisk_","") |>
+            str_replace("_ecoregion_rescaled","") |>
+            str_replace("_", " "),
+          even = 1) |>
+        filter(component != "all") |>
+        collect()
+
+      if (nrow(d_fl) > 0) {
+        d_fl |>
+          plot_flower(
+            fld_category = component,
+            fld_height   = score,
+            fld_width    = even,
+            tooltip_expr = "{component}: {round(score, 2)}",
+            title        = glue("Cell ID: {cell_id} (x: {lng}, y: {lat})"))
+      }
+
+    } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
+
+      # get data for planning area
+      pa_name <- rx$clicked_pa$properties$planarea_name
+      pa_key  <- rx$clicked_pa$properties$planarea_key
+
+
+      l <- rx$clicked_pa$properties
+      l <- l[str_detect(names(l), "_ecoregion_rescaled$")]
+
+      d_fl <- tibble(
+        metric_key = names(l),
+        score      = unlist(l)) |>
+        mutate(
+          component = metric_key |>
+            str_replace("extrisk_","") |>
+            str_replace("_ecoregion_rescaled","") |>
+            str_replace("_", " "),
+          even = 1) |>
+        filter(component != "all")
+
+      if (nrow(d_fl) > 0) {
+        d_fl |>
+          plot_flower(
+            fld_category = component,
+            fld_height   = score,
+            fld_width    = even,
+            tooltip_expr = "{component}: {round(score, 2)}",
+            title        = pa_name)
+      }
+    }
+  })
+
+  # * click_info ----
+  output$click_info <- renderPrint({
+    if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
+      cat("Location:", round(rx$clicked_cell$lng, 4), ",", round(rx$clicked_cell$lat, 4))
+    } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
+      cat("Planning Area:", rx$clicked_pa$feature$properties$planarea_name)
     }
   })
 }
