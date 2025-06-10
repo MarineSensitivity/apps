@@ -57,8 +57,8 @@ ui <- page_sidebar(
       "sel_lyr",
       "Layer",
       choices = lyr_choices),
-    input_switch(
-      "tgl_sphere", "Sphere", T ),
+    # input_switch(
+    #   "tgl_sphere", "Sphere", T ),
     input_dark_mode(
       id = "tgl_dark", mode = "dark")),
   card(
@@ -74,9 +74,10 @@ server <- function(input, output, session) {
   output$map <- renderMapboxgl({
   # output$map <- renderMaplibre({
 
-    req(input$sel_lyr, input$tgl_sphere)
+    # req(input$sel_lyr, input$tgl_sphere)
+    req(input$sel_lyr)
 
-    # input <- list(tgl_sphere = T, sel_lyr = "al_er_su_wr")
+    # input <- list(tgl_sphere = F, sel_lyr = "al_er_su_wr")
     d_lyr <- d_lyrs |>
       filter(key == input$sel_lyr)
 
@@ -89,7 +90,8 @@ server <- function(input, output, session) {
     #   style      = carto_style("voyager"),
     mapboxgl(
       style      = mapbox_style("dark"),
-      projection = ifelse(input$tgl_sphere, "globe", "mercator")) |>
+      # projection = ifelse(input$tgl_sphere, "globe", "mercator")) |>
+      projection = "globe") |>
       fit_bounds(c(-97.86628, 11.76369, -43.88875, 56.52494)) |>
       add_vector_source(
         id         = "vect_src",
