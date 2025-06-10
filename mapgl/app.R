@@ -1,7 +1,8 @@
 # packages ----
 librarian::shelf(
-  bslib, DBI, dplyr, duckdb, ggiraph, ggplot2, glue, here, purrr, RColorBrewer, sf,
-  shiny, stringr, terra, tibble, tidyr)
+  bslib, DBI, dplyr, duckdb, DT, ggiraph, ggplot2, glue, here, purrr,
+  RColorBrewer, readr, sf, shiny, stringr, terra, tibble, tidyr)
+options(readr.show_col_types = F)
 
 # variables ----
 verbose        <- F
@@ -17,6 +18,7 @@ dir_data       <- ifelse(
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif       <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
 sdm_dd         <- glue("{dir_data}/derived/sdm.duckdb")
+spp_global_csv <- here("mapgl/spp_global_cache.csv")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN=readLines(mapbox_tkn_txt))
 librarian::shelf(
@@ -174,6 +176,44 @@ lyr_choices <- d_lyrs |>
   select(-order) |>
   deframe()
 
+# * d_spp_global ----
+if (file.exists(spp_global_csv)) {
+  d_spp_global <- read_csv(spp_global_csv)
+} else {
+  message("Generating spp_global_csv from database...")
+  tbl(con_sdm, "model_cell") |>
+    select(mdl_seq, cell_id, suitability = value) |>
+    left_join(
+      tbl(con_sdm, "model") |>
+        select(mdl_seq, taxa),
+      by = "mdl_seq") |>
+    group_by(taxa) |>
+    summarize(
+      suitability = mean(suitability, na.rm = TRUE),
+      .groups = "drop") |>
+    left_join(
+      tbl(con_sdm, "species") |>
+        select(taxa, sp_key, worms_id, gbif_id, sp_cat, scientific_name_dataset, common_name_dataset, redlist_code),
+      by = "taxa") |>    # TODO: later manage multiple species per model; assume 1 taxa to 1 species for now
+    mutate(
+      rl_score  = case_match(
+        redlist_code,
+        "CR" ~ 1.0,      # Critically Endangered
+        "EN" ~ 0.8,    # Endangered
+        "VU" ~ 0.6,    # Vulnerable
+        "NT" ~ 0.4,    # Near Threatened
+        "LC" ~ 0.2),   # Least Concern
+      suit_rl   = suitability * rl_score,
+      pct_total = suit_rl / sum(suit_rl, na.rm = T),
+      is_pct_na = is.na(pct_total)) |>
+    arrange(is_pct_na, desc(pct_total), scientific_name_dataset) |>
+    collect() |>
+    select(
+      sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
+      redlist_code, rl_score, suitability, suit_rl, pct_total) |>
+    write_csv(spp_global_csv)
+}
+
 # ui ----
 light <- bs_theme()
 # dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
@@ -214,22 +254,36 @@ ui <- page_sidebar(
     input_dark_mode(
       id = "tgl_dark", mode = "dark")),
 
-  card(
+  navset_card_tab(
     full_screen = TRUE,
-    mapboxglOutput("map"),
-    conditionalPanel(
-      absolutePanel(
-        id          = "flower_panel",
-        height      = "auto",
-        draggable   = T,
-        card(
-          # style       = "resize:vertical;",
-          full_screen = T,
-          card_header(class = "bg-dark", "Score"),
-          card_body(
-            # girafeOutput("plot_flower", height = "300px") ) ) ),
-            girafeOutput("plot_flower", height = "100%") ) ) ),
-      condition = 'output.flower_status') ) )
+    nav_panel(
+      "Map",
+      mapboxglOutput("map"),
+      conditionalPanel(
+        absolutePanel(
+          id          = "flower_panel",
+          top         = 60,
+          right       = 10,
+          width       = 350,
+          height      = "auto",
+          draggable   = T,
+          card(
+            # style       = "resize:vertical;",
+            full_screen = T,
+            card_header(class = "bg-dark", "Score"),
+            card_body(
+              # girafeOutput("plot_flower", height = "300px") ) ) ),
+              girafeOutput("plot_flower", height = "100%") ) ) ),
+        condition = 'output.flower_status')),
+    nav_panel(
+      "Species",
+      card(
+        card_header(
+          "Species", # TODO: update header based on clicked cell or planning area
+          class = "d-flex justify-content-between align-items-center",
+          downloadButton("download_data", "Download CSV", class = "btn-sm")),
+        card_body(
+          DTOutput("species_table")))) ) )
 
 # server ----
 server <- function(input, output, session) {
@@ -240,8 +294,9 @@ server <- function(input, output, session) {
 
   # reactive values ----
   rx <- reactiveValues(
-    clicked_pa   = NULL,
-    clicked_cell = NULL)
+    clicked_pa    = NULL,
+    clicked_cell  = NULL,
+    species_table = NULL)
 
   output$flower_status <- reactive({
     if (!is.null(rx$clicked_pa) || !is.null(rx$clicked_cell))
@@ -455,10 +510,10 @@ server <- function(input, output, session) {
 
   # * plot_flower ----
   output$plot_flower <- renderGirafe({
-    
+
     # set height based on container size
     height <- "100%"
-    
+
     if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
       # get data for cell
       cell_id <- rx$clicked_cell$cell_id
@@ -533,6 +588,160 @@ server <- function(input, output, session) {
       cat("Planning Area:", rx$clicked_pa$feature$properties$planarea_name)
     }
   })
+
+  # * get_species_table ----
+  get_species_table <- reactive({
+
+    # ** global ----
+    if (!is.null(rx$clicked_cell) && !is.null(rx$clicked_pa))
+      return(d_spp_global)
+
+    # ** cell ----
+    if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
+      # see original: https://github.com/MarineSensitivity/workflows/blob/76d711aed5ea319bde44158efade00a02c1031e4/ingest_aquamaps_to_sdm_duckdb.qmd#L1817-L1954
+
+      cell_id <- rx$clicked_cell$cell_id
+
+      d_spp <- tbl(con_sdm, "model_cell") |>
+        select(mdl_seq, cell_id, suitability = value) |>
+        filter(cell_id == !!cell_id) |>
+        left_join(
+          tbl(con_sdm, "model") |>
+            select(mdl_seq, taxa),
+          by = "mdl_seq") |>
+        left_join(
+          tbl(con_sdm, "species") |>
+            select(taxa, sp_key, worms_id, gbif_id, sp_cat, scientific_name_dataset, common_name_dataset, redlist_code),
+          by = "taxa") |>    # TODO: later manage multiple species per model; assume 1 taxa to 1 species for now
+        mutate(
+          rl_score  = case_match(
+            redlist_code,
+            "CR" ~ 1.0,      # Critically Endangered
+            "EN" ~ 0.8,    # Endangered
+            "VU" ~ 0.6,    # Vulnerable
+            "NT" ~ 0.4,    # Near Threatened
+            "LC" ~ 0.2),   # Least Concern
+          suit_rl   = suitability * rl_score,
+          pct_total = suit_rl / sum(suit_rl, na.rm = T),
+          is_pct_na = is.na(pct_total)) |>
+        arrange(is_pct_na, desc(pct_total), scientific_name_dataset) |>
+        collect() |>
+        select(
+          sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
+          redlist_code, rl_score, suitability, suit_rl, pct_total)
+      return(d_spp)
+    }
+
+    # ** pa ----
+    if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
+
+      pa_key <- rx$clicked_pa$feature$properties$planarea_key
+      # pa_key <- "ALA" # DEBUG
+
+      d_spp <- tbl(con_sdm, "zone") |>
+        filter(
+          tbl   == "ply_planareas_2025",
+          value == !!pa_key) |>
+        select(zone_seq) |>
+        left_join(
+          tbl(con_sdm, "zone_cell") |>
+            select(zone_seq, cell_id, pct_covered),
+          by = "zone_seq") |>
+        left_join(
+          tbl(con_sdm, "model_cell") |>
+          select(mdl_seq, cell_id, suitability = value),
+          by = "cell_id") |>
+        left_join(
+          tbl(con_sdm, "model") |>
+            select(mdl_seq, taxa),
+          by = "mdl_seq") |>
+        group_by(taxa) |>
+        summarize(
+          # suitability = (suitability * pct_covered) / sum(pct_covered, na.rm = T),
+          suitability = weighted_avg(suitability, pct_covered),
+          .groups = "drop") |>
+        left_join(
+          tbl(con_sdm, "species") |>
+            select(taxa, sp_key, worms_id, gbif_id, sp_cat, scientific_name_dataset, common_name_dataset, redlist_code),
+          by = "taxa") |>    # TODO: later manage multiple species per model; assume 1 taxa to 1 species for now
+        mutate(
+          rl_score  = case_match(
+            redlist_code,
+            "CR" ~ 1.0,      # Critically Endangered
+            "EN" ~ 0.8,    # Endangered
+            "VU" ~ 0.6,    # Vulnerable
+            "NT" ~ 0.4,    # Near Threatened
+            "LC" ~ 0.2),   # Least Concern
+          suit_rl   = suitability * rl_score,
+          pct_total = suit_rl / sum(suit_rl, na.rm = T),
+          is_pct_na = is.na(pct_total)) |>
+        arrange(is_pct_na, desc(pct_total), scientific_name_dataset) |>
+        collect() |>
+        select(
+          sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
+          redlist_code, rl_score, suitability, suit_rl, pct_total)
+
+      return(d_spp)
+    }
+  })
+
+  # * species_table ----
+  output$species_table <- renderDT({
+    d <- get_species_table()
+
+    # create app URL for each component
+    d <- d |>
+      mutate(
+        component_link = case_when(
+          component == "primprod" ~ glue('<a href="../maplyr/?layer=primprod" target="_blank">{component}</a>'),
+          TRUE ~ glue('<a href="../maplyr/?layer={component}" target="_blank">{component}</a>')
+        ),
+        value = round(value, 4)
+      )
+
+    # store for download
+    rx$species_table <- d
+
+    # select columns to display
+    if (input$sel_unit == "cell") {
+      display_cols <- c("cell_id", "component_link", "metric_name", "value", "scale_type")
+      col_names <- c("Cell ID", "Component", "Metric", "Value", "Scale")
+    } else {
+      display_cols <- c("zone_name", "component_link", "metric_name", "value", "scale_type")
+      col_names <- c("Planning Area", "Component", "Metric", "Value", "Scale")
+    }
+
+    datatable(
+      d[, display_cols],
+      colnames = col_names,
+      escape = FALSE,  # allow HTML in component_link column
+      options = list(
+        pageLength = 25,
+        scrollX = TRUE,
+        scrollY = "600px",
+        dom = 'Bfrtip',
+        buttons = list('copy', 'print'),
+        columnDefs = list(
+          list(className = 'dt-right', targets = which(display_cols == "value") - 1)
+        )
+      ),
+      filter = "top",
+      class = "display compact"
+    ) |>
+      formatRound("value", 4)
+  })
+
+  # * download_data ----
+  output$download_data <- downloadHandler(
+    filename = function() {
+      unit_type <- if (input$sel_unit == "cell") "cell" else "planarea"
+      paste0("component_values_", unit_type, "_", Sys.Date(), ".csv")
+    },
+    content = function(file) {
+      req(rx$species_table)
+      write.csv(rx$species_table |> select(-component_link), file, row.names = FALSE)
+    }
+  )
 }
 
 shinyApp(ui, server)
