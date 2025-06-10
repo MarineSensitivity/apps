@@ -593,7 +593,7 @@ server <- function(input, output, session) {
   get_species_table <- reactive({
 
     # ** global ----
-    if (!is.null(rx$clicked_cell) && !is.null(rx$clicked_pa))
+    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa))
       return(d_spp_global)
 
     # ** cell ----
@@ -689,57 +689,62 @@ server <- function(input, output, session) {
   output$species_table <- renderDT({
     d <- get_species_table()
 
-    # create app URL for each component
     d <- d |>
       mutate(
-        component_link = case_when(
-          component == "primprod" ~ glue('<a href="../maplyr/?layer=primprod" target="_blank">{component}</a>'),
-          TRUE ~ glue('<a href="../maplyr/?layer={component}" target="_blank">{component}</a>')
-        ),
-        value = round(value, 4)
-      )
+        sp_key   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={sp_key}" target="_blank">{sp_key}</a>'),
+        worms_id = ifelse(
+          is.na(worms_id),
+          NA,
+          glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms_id}" target="_blank">{worms_id}</a>')),
+        gbif_id  = ifelse(
+          is.na(gbif_id),
+          NA,
+          glue('<a href="https://www.gbif.org/species/{gbif_id}" target="_blank">{gbif_id}</a>')),
+        suitability = round(suitability, 1),
+        suit_rl     = round(suit_rl, 1),
+        pct_total   = round(pct_total * 100, 3) )
 
     # store for download
     rx$species_table <- d
 
     # select columns to display
-    if (input$sel_unit == "cell") {
-      display_cols <- c("cell_id", "component_link", "metric_name", "value", "scale_type")
-      col_names <- c("Cell ID", "Component", "Metric", "Value", "Scale")
-    } else {
-      display_cols <- c("zone_name", "component_link", "metric_name", "value", "scale_type")
-      col_names <- c("Planning Area", "Component", "Metric", "Value", "Scale")
-    }
+    # if (input$sel_unit == "cell") {
+    #   display_cols <- c("cell_id", "component_link", "metric_name", "value", "scale_type")
+    #   col_names <- c("Cell ID", "Component", "Metric", "Value", "Scale")
+    # } else {
+    #   display_cols <- c("zone_name", "component_link", "metric_name", "value", "scale_type")
+    #   col_names <- c("Planning Area", "Component", "Metric", "Value", "Scale")
+    # }
 
     datatable(
-      d[, display_cols],
-      colnames = col_names,
+      # d[, display_cols],
+      # colnames = col_names,
+      d,
       escape = FALSE,  # allow HTML in component_link column
       options = list(
         pageLength = 25,
         scrollX = TRUE,
         scrollY = "600px",
         dom = 'Bfrtip',
-        buttons = list('copy', 'print'),
-        columnDefs = list(
-          list(className = 'dt-right', targets = which(display_cols == "value") - 1)
-        )
+        buttons = list('copy', 'print') #,
+        # columnDefs = list(
+        #   list(className = 'dt-right', targets = which(display_cols == "value") - 1)
+        # )
       ),
       filter = "top",
       class = "display compact"
-    ) |>
-      formatRound("value", 4)
+    ) # |>
+      # formatRound("value", 4)
   })
 
   # * download_data ----
   output$download_data <- downloadHandler(
     filename = function() {
-      unit_type <- if (input$sel_unit == "cell") "cell" else "planarea"
-      paste0("component_values_", unit_type, "_", Sys.Date(), ".csv")
+      paste0("species_table_", Sys.Date(), ".csv")
     },
     content = function(file) {
       req(rx$species_table)
-      write.csv(rx$species_table |> select(-component_link), file, row.names = FALSE)
+      write_csv(rx$species_table, file)
     }
   )
 }
