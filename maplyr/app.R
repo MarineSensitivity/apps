@@ -4,7 +4,7 @@ librarian::shelf(
   shiny, stringr, terra, tibble, tidyr)
 
 # variables ----
-verbose        <- F
+verbose        <- T
 is_server      <-  Sys.info()[["sysname"]] == "Linux"
 dir_private    <- ifelse(
   is_server,
@@ -55,7 +55,7 @@ ui <- page_sidebar(
     selectizeInput(
       "sel_sp",
       "Select Species",
-      choices = NULL), # TODO: show comparison of old to new species map
+      choices = spp_choices), # TODO: show comparison of old to new species map
     input_switch(
       "tgl_sphere", "Sphere", T ),
     input_dark_mode(
@@ -65,26 +65,27 @@ ui <- page_sidebar(
 
 # server ----
 server <- function(input, output, session) {
-  updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T)
-
-  # reactive values ----
-  rx <- reactiveValues(
-    sp_key = NULL)
+  # updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T)
+  # TODO: server side is faster but not allowing for URL update?
 
   # parse URL parameters ----
+  # http://127.0.0.1:3763/?sp_key=ITS-Mam-180528
+  # input <- list(sel_sp = "ITS-Mam-180528") # DEBUG
   observe({
     query <- parseQueryString(session$clientData$url_search)
-    if (!is.null(query$sp_key))
-      rx$sp_key <- query$sp_key
+    if (!is.null(query$sp_key)) {
+      browser()
+      updateSelectizeInput(session, "sel_sp", selected = query$sp_key)
+    }
   })
 
   # * species_info ----
-  output$layer_info <- renderUI({
-    req(rx$sp_key)
+  output$species_info <- renderUI({
+    req(input$sel_sp)
 
     with(
       d_spp |>
-        filter(sp_key == rx$sp_key), {
+        filter(sp_key == input$sel_sp), {
       tagList(
         h5(scientific_name_dataset),
         p(glue("Common name: {common_name_dataset}")),
@@ -93,13 +94,13 @@ server <- function(input, output, session) {
 
   # * get_rast ----
   get_rast <- reactive({
-    req(rx$sp_key)
+    req(input$sel_sp)
 
-    # rx <- list(sp_key = "ITS-Mam-180528") # DEBUG with blue whale
+    # debug: input$sel_sp = "ITS-Mam-180528" # blue whale
 
     d <- tbl(con_sdm, "species") |>
       select(sp_key, taxa) |>
-      filter(sp_key == !!rx$sp_key) |>
+      filter(sp_key == !!input$sel_sp) |>
       left_join(
         tbl(con_sdm, "model") |>
           select(taxa, mdl_seq),
@@ -170,22 +171,16 @@ server <- function(input, output, session) {
       add_fullscreen_control() |>
       add_navigation_control() |>
       add_scale_control() |>
-      add_geocoder_control()
+      add_geocoder_control() |>
+      add_globe_minimap(position = "top-left")
   })
 
-  # * input$sel_sp -> rx$sp_key ----
+  # * input$sel_sp -> update map ----
   observeEvent(input$sel_sp, {
     req(input$sel_sp)
 
     if (verbose)
       message("observeEvent(input$sel_sp): ", input$sel_sp)
-
-    rx$sp_key <- input$sel_sp
-  })
-
-  # rx$sp_key -> map rast ----
-  observeEvent(rx$sp_key, {
-    req(rx$sp_key)
 
     map_proxy <- mapboxgl_proxy("map")
 
@@ -195,10 +190,17 @@ server <- function(input, output, session) {
     cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
     rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
+    # get species name for legend
+    sp_name <- d_spp |>
+      filter(sp_key == input$sel_sp) |>
+      pull(scientific_name_dataset) |>
+      first()
+
     # update raster
     map_proxy |>
       clear_layer("r_src") |>
       clear_layer("r_lyr") |>
+      clear_legend() |>
       add_image_source(
         id     = "r_src",
         data   = r,
@@ -209,12 +211,16 @@ server <- function(input, output, session) {
         raster_opacity    = 0.8,
         raster_resampling = "nearest",
         before_id         = "er_ln") |>
-      mapgl::add_legend(
-        rx$layer,
+      add_legend(
+        sp_name,
         values   = rng_r,
         colors   = cols_r,
-        position = "bottom-right")
+        position = "bottom-right") |>
+      fit_bounds(
+        bbox = trim(r) |> st_bbox() |> as.numeric(),
+        animate = T)
   })
+
 
   # map_click ----
   observeEvent(input$map_click, {
@@ -233,7 +239,7 @@ server <- function(input, output, session) {
         val <- terra::extract(r, pt)[1,1]
         if (!is.na(val)) {
           showNotification(
-            glue("{rx$layer}: {round(val, 3)}"),
+            glue("{input$sel_sp}: {round(val, 3)}"),
             duration = 3,
             type = "message" ) } } })
 }
