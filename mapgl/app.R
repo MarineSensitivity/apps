@@ -203,10 +203,12 @@ ui <- page_sidebar(
         height      = "auto",
         draggable   = T,
         card(
+          # style       = "resize:vertical;",
           full_screen = T,
           card_header(class = "bg-dark", "Score"),
           card_body(
-            girafeOutput("plot_flower", height = "300px") ) ) ),
+            # girafeOutput("plot_flower", height = "300px") ) ) ),
+            girafeOutput("plot_flower") ) ) ),
       condition = 'output.flower_status') ) )
 
 # server ----
