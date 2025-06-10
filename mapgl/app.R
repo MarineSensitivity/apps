@@ -112,7 +112,11 @@ plot_flower <- function(
     g <- g +
       ggtitle(title)
 
-  girafe(ggobj = g)
+  girafe(
+    ggobj = g,
+    options = list(
+      opts_sizing(rescale = TRUE, width = 1),
+      opts_tooltip(css = "background-color:white;color:black;padding:5px;border-radius:3px;")))
 }
 
 # data prep ----
@@ -176,7 +180,23 @@ light <- bs_theme()
 dark <- bs_theme()
 ui <- page_sidebar(
   tags$head(tags$style(HTML(
-    ".mapboxgl-popup-content{color:black;}" ))),
+    ".mapboxgl-popup-content{color:black;}
+     .bslib-full-screen .girafe_container_std {
+       height: calc(100vh - 120px) !important;
+       width: 100% !important;
+     }
+     .bslib-full-screen .card-body {
+       height: calc(100vh - 120px) !important;
+       display: flex;
+       flex-direction: column;
+     }
+     .bslib-full-screen #plot_flower {
+       height: 100% !important;
+       flex: 1;
+     }
+     #plot_flower {
+       height: 300px;
+     }" ))),
   title = "BOEM Marine Sensitivity",
   sidebar = sidebar(
     selectInput(
@@ -208,7 +228,7 @@ ui <- page_sidebar(
           card_header(class = "bg-dark", "Score"),
           card_body(
             # girafeOutput("plot_flower", height = "300px") ) ) ),
-            girafeOutput("plot_flower") ) ) ),
+            girafeOutput("plot_flower", height = "100%") ) ) ),
       condition = 'output.flower_status') ) )
 
 # server ----
@@ -435,7 +455,10 @@ server <- function(input, output, session) {
 
   # * plot_flower ----
   output$plot_flower <- renderGirafe({
-
+    
+    # set height based on container size
+    height <- "100%"
+    
     if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
       # get data for cell
       cell_id <- rx$clicked_cell$cell_id
