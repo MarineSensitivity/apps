@@ -19,7 +19,7 @@ mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 
 # load mapgl with mapbox token ----
 Sys.setenv(MAPBOX_PUBLIC_TOKEN=readLines(mapbox_tkn_txt))
-# devtools::load_all("~/Github/bbest/mapgl")
+# devtools::install_github("bbest/mapgl")
 librarian::shelf(
   mapgl)
 
@@ -85,13 +85,12 @@ server <- function(input, output, session) {
     rng    <- d_lyr |> select(value_min, value_max) |> as.numeric()
     brks   <- seq(rng[1], rng[2], length.out = n_cols)
 
-    mapboxgl(
-      style      = mapbox_style("dark"),
-      projection = ifelse(input$tgl_sphere, "globe", "mercator"),
     # maplibre(
     #   style      = carto_style("voyager"),
-      zoom       = 3.5,
-      center     = c(-106, 40.1)) |>
+    mapboxgl(
+      style      = mapbox_style("dark"),
+      projection = ifelse(input$tgl_sphere, "globe", "mercator")) |>
+      fit_bounds(c(-97.86628, 11.76369, -43.88875, 56.52494)) |>
       add_vector_source(
         id         = "vect_src",
         url        = "https://api.marinesensitivity.org/tilejson?table=oceanmetrics.ds_indicators",
@@ -115,7 +114,7 @@ server <- function(input, output, session) {
           fill_opacity = 1 )) |>
       mapgl::add_legend(
         d_lyr$description,
-        values   = rng,
+        values   = rng |> signif(digits = 2),
         colors   = cols,
         position = "bottom-right") |>
       add_fullscreen_control(
