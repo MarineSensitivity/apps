@@ -1,4 +1,8 @@
-## 2025-06-10.c + maplyr app for individual values
+## 2025-06-10.d + maplyr app, mapgl but for species
+
+
+
+## 2025-06-10.c + maplyr app for components
 
 In @apps/mapgl/app.R add a new tab panel that displays a table of values for all
 the component values, ie primprod and all species with extinction risk. Initially
