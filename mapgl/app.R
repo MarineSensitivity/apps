@@ -279,7 +279,7 @@ ui <- page_sidebar(
       "Species",
       card(
         card_header(
-          "Species", # TODO: update header based on clicked cell or planning area
+          textOutput("species_table_header", inline = T),
           class = "d-flex justify-content-between align-items-center",
           downloadButton("download_data", "Download CSV", class = "btn-sm")),
         card_body(
@@ -384,7 +384,7 @@ server <- function(input, output, session) {
       add_scale_control() |>
       # add_layers_control() |>
       # add_draw_control(position = "top-right") |>
-      add_geocoder_control()
+      add_geocoder_control(placeholder = "Go to location")
 
   })
 
@@ -587,6 +587,15 @@ server <- function(input, output, session) {
     } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
       cat("Planning Area:", rx$clicked_pa$feature$properties$planarea_name)
     }
+  })
+
+  # * species_table_header ----
+
+  output$species_table_header <- renderText({
+    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa))
+      return("Species for Global")
+
+    "Species for ?"
   })
 
   # * get_species_table ----
