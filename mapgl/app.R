@@ -156,6 +156,13 @@ d_lyrs <- bind_rows(
     lyr      = "primprod",
     layer    = "primary productivity (mmol/m^3)" ) )
 
+# d_lyrs |>
+#   group_by(order, category) |>
+#   summarize(
+#     n = n(),
+#     lyrs = paste(layer, collapse = "; "),
+#     .groups = "drop")
+
 # confirm all layers available for both planareas and cell metrics
 lyrs_pa   <- dbListFields(con, "ply_planareas_2025")
 lyrs_cell <- tbl(con_sdm, "metric") |>
@@ -605,9 +612,9 @@ server <- function(input, output, session) {
 
     # ** global ----
     if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa)){
-      rx$species_table_header   <- "Species for Global"
-      rx$species_table_filename <- "species_global"
-      return(d_spp_global)
+      rx$species_table_header   <- "Species across USA"
+      rx$species_table_filename <- "species_usa"
+      d_spp <- d_spp_global
     }
 
     # ** cell ----
@@ -645,7 +652,6 @@ server <- function(input, output, session) {
         select(
           sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
           redlist_code, rl_score, suitability, suit_rl, pct_total)
-      return(d_spp)
     }
 
     # ** pa ----
@@ -699,29 +705,44 @@ server <- function(input, output, session) {
         select(
           sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
           redlist_code, rl_score, suitability, suit_rl, pct_total)
-
-      return(d_spp)
     }
+
+    # rename columns
+    d_spp |>
+      select(
+        category   = sp_cat,
+        key        = sp_key,
+        scientific = scientific_name_dataset,
+        common     = common_name_dataset,
+        worms      = worms_id,
+        gbif       = gbif_id,
+        rl_code    = redlist_code,
+        rl_score,
+        suit       = suitability,
+        suit_rl,
+        pct_all    = pct_total)
   })
 
   # * species_table ----
   output$species_table <- renderDT({
     d <- get_species_table()
+    # d <- d_spp_global # DEBUG
 
     d <- d |>
       mutate(
-        sp_key   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={sp_key}" target="_blank">{sp_key}</a>'),
-        worms_id = ifelse(
-          is.na(worms_id),
+        key   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={key}" target="_blank">{key}</a>'),
+        worms = ifelse(
+          is.na(worms),
           NA,
-          glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms_id}" target="_blank">{worms_id}</a>')),
-        gbif_id  = ifelse(
-          is.na(gbif_id),
+          glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms}" target="_blank">{worms}</a>')),
+        gbif  = ifelse(
+          is.na(gbif),
           NA,
-          glue('<a href="https://www.gbif.org/species/{gbif_id}" target="_blank">{gbif_id}</a>')),
-        suitability = round(suitability, 1),
-        suit_rl     = round(suit_rl, 1),
-        pct_total   = round(pct_total * 100, 3) )
+          glue('<a href="https://www.gbif.org/species/{gbif}" target="_blank">{gbif}</a>')))
+        # suitability = round(suitability, 1),
+        # suit_rl     = round(suit_rl, 1)
+        # pct_total   = round(pct_total * 100, 3) ) |>
+    # TODO: add n_cells and avg_suitability for PlanAreas (or drawn areas)
 
     # store for download
     rx$species_table <- d
@@ -735,26 +756,33 @@ server <- function(input, output, session) {
     #   col_names <- c("Planning Area", "Component", "Metric", "Value", "Scale")
     # }
 
+    # browser()
+    # TODO: rename columns and add explanation with info popups
     datatable(
       # d[, display_cols],
       # colnames = col_names,
+      # d |> slice(1:100), # DEBUG
       d,
-      escape = FALSE,  # allow HTML in component_link column
-      options = list(
-        pageLength = 25,
-        scrollX = TRUE,
-        scrollY = "600px",
-        dom = 'Bfrtip',
-        buttons = list('copy', 'print') #,
+      escape     = F,  # allow HTML in component_link column
+      # filter     = "top",
+      class      = "display compact",
+      # extensions = c("Buttons", "ColReorder", "KeyTable", "Responsive"),
+      extensions = c("ColReorder", "KeyTable", "Responsive"),
+      options    = list(
+        # buttons    = c("copy", "csv", "excel", "pdf", "print"),
+        colReorder = T, # ColReorder
+        keys       = T, # KeyTable
+        pageLength = 5,
+        lengthMenu = c(5, 50, 100),
+        # scrollX    = TRUE,
+        # scrollY    = "600px",
+        # dom        = 'Bfrtip',
+        dom        = 'lfrtip') ) |>
         # columnDefs = list(
-        #   list(className = 'dt-right', targets = which(display_cols == "value") - 1)
-        # )
-      ),
-      filter = "top",
-      class = "display compact"
-    ) # |>
-      # formatRound("value", 4)
-  })
+        #   list(className = 'dt-right', targets = which(display_cols == "value") - 1) ))  |>
+      formatPercentage(c("pct_all"), 2) |>
+      formatRound(c("suit","suit_rl"), 1)
+  }, server = T)
 
   # * download_data ----
   output$download_data <- downloadHandler(
