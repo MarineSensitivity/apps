@@ -294,9 +294,11 @@ server <- function(input, output, session) {
 
   # reactive values ----
   rx <- reactiveValues(
-    clicked_pa    = NULL,
-    clicked_cell  = NULL,
-    species_table = NULL)
+    clicked_pa             = NULL,
+    clicked_cell           = NULL,
+    species_table          = NULL,
+    species_table_header   = NULL,
+    species_table_filename = NULL)
 
   output$flower_status <- reactive({
     if (!is.null(rx$clicked_pa) || !is.null(rx$clicked_cell))
@@ -592,24 +594,27 @@ server <- function(input, output, session) {
   # * species_table_header ----
 
   output$species_table_header <- renderText({
-    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa))
-      return("Species for Global")
-
-    "Species for ?"
+    req(rx$species_table_header)
+    rx$species_table_header
   })
 
   # * get_species_table ----
   get_species_table <- reactive({
 
     # ** global ----
-    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa))
+    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa)){
+      rx$species_table_header   <- "Species for Global"
+      rx$species_table_filename <- "species_global"
       return(d_spp_global)
+    }
 
     # ** cell ----
     if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
       # see original: https://github.com/MarineSensitivity/workflows/blob/76d711aed5ea319bde44158efade00a02c1031e4/ingest_aquamaps_to_sdm_duckdb.qmd#L1817-L1954
 
       cell_id <- rx$clicked_cell$cell_id
+      rx$species_table_header   <- glue("Species for Cell ID: {cell_id}")
+      rx$species_table_filename <- glue("species_cellid-{cell_id}")
 
       d_spp <- tbl(con_sdm, "model_cell") |>
         select(mdl_seq, cell_id, suitability = value) |>
@@ -644,8 +649,11 @@ server <- function(input, output, session) {
     # ** pa ----
     if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
 
-      pa_key <- rx$clicked_pa$feature$properties$planarea_key
+      pa_key  <- rx$clicked_pa$properties$planarea_key
+      pa_name <- rx$clicked_pa$properties$planarea_name
       # pa_key <- "ALA" # DEBUG
+      rx$species_table_header   <- glue("Species for Planning Area: {pa_name}")
+      rx$species_table_filename <- glue("species_planarea-{str_replace(pa_name, ' ', '-') |> str_to_lower()}")
 
       d_spp <- tbl(con_sdm, "zone") |>
         filter(
@@ -749,13 +757,11 @@ server <- function(input, output, session) {
   # * download_data ----
   output$download_data <- downloadHandler(
     filename = function() {
-      paste0("species_table_", Sys.Date(), ".csv")
-    },
+      rx$species_table_filename |>
+        paste0("_", Sys.Date(), ".csv") },
     content = function(file) {
-      req(rx$species_table)
-      write_csv(rx$species_table, file)
-    }
-  )
+      req(rx$species_table_header, rx$species_table)
+      write_csv(rx$species_table, file) } )
 }
 
 shinyApp(ui, server)
