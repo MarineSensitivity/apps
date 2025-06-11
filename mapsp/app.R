@@ -1,6 +1,6 @@
 # packages ----
 librarian::shelf(
-  bslib, DBI, dplyr, duckdb, glue, here, RColorBrewer, sf,
+  bslib, DBI, dplyr, duckdb, glue, here, htmltools, RColorBrewer, sf,
   shiny, stringr, terra, tibble, tidyr)
 
 # variables ----
@@ -35,7 +35,15 @@ d_spp <- tbl(con_sdm, "model") |>
     tbl(con_sdm, "species") |>
       select(taxa, sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id, redlist_code),
     by = "taxa") |>
-  collect()
+  collect() |>
+  mutate(
+    key_url   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={sp_key}" target="_blank">{sp_key}</a>'),
+    worms_url = ifelse(
+      is.na(worms_id), NA,
+      glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms_id}" target="_blank">{worms_id}</a>')),
+    gbif_url  = ifelse(
+      is.na(gbif_id), NA,
+      glue('<a href="https://www.gbif.org/species/{gbif_id}" target="_blank">{gbif_id}</a>')))
 
 spp_choices <- d_spp |>
   arrange(sp_cat, scientific_name_dataset) |>
@@ -55,27 +63,25 @@ ui <- page_sidebar(
     selectizeInput(
       "sel_sp",
       "Select Species",
-      choices = spp_choices), # TODO: show comparison of old to new species map
+      # choices = spp_choices), # TODO: show comparison of old to new species map
+      choices = NULL), # TODO: show comparison of old to new species map
     input_switch(
       "tgl_sphere", "Sphere", T ),
     input_dark_mode(
-      id = "tgl_dark", mode = "dark") ),
+      id = "tgl_dark", mode = "dark"),
+    uiOutput("species_info")),
   card(
     mapboxglOutput("map") ) )
 
 # server ----
 server <- function(input, output, session) {
-  # updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T)
-  # TODO: server side is faster but not allowing for URL update?
 
-  # parse URL parameters ----
-  # http://127.0.0.1:3763/?sp_key=ITS-Mam-180528
-  # input <- list(sel_sp = "ITS-Mam-180528") # DEBUG
   observe({
     query <- parseQueryString(session$clientData$url_search)
     if (!is.null(query$sp_key)) {
-      browser()
-      updateSelectizeInput(session, "sel_sp", selected = query$sp_key)
+      updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = query$sp_key)
+    } else {
+      updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = NULL)
     }
   })
 
@@ -83,14 +89,22 @@ server <- function(input, output, session) {
   output$species_info <- renderUI({
     req(input$sel_sp)
 
+    sp_key <- input$sel_sp
+    d_sp   <- d_spp |>
+      filter(sp_key == !!sp_key)
+
     with(
-      d_spp |>
-        filter(sp_key == input$sel_sp), {
-      tagList(
+      d_sp,
+      {tagList(
         h5(scientific_name_dataset),
-        p(glue("Common name: {common_name_dataset}")),
-        p(glue("Extinction risk (IUCN RedList): {redlist_code}"))) })
-  })
+        tags$ul(
+          tags$li(HTML(glue("Scientific name: {scientific_name_dataset} ({key_url})"))),
+          tags$li(glue("Common name: {common_name_dataset}")),
+          tags$li(glue("Category: {sp_cat}")),
+          tags$li(glue("Extinction risk (IUCN RedList): {redlist_code}")),
+          tags$li(HTML(glue("MarineSpecies.org: {worms_url}"))),
+          tags$li(HTML(glue("GBIF.org: {gbif_url}"))) ) ) } )
+    })
 
   # * get_rast ----
   get_rast <- reactive({
