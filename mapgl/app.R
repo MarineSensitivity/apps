@@ -262,18 +262,20 @@ ui <- page_sidebar(
       conditionalPanel(
         absolutePanel(
           id          = "flower_panel",
-          top         = 60,
-          right       = 10,
-          width       = 350,
+          top         = 80,
+          left        = 30,
+          # width       = 350,
           height      = "auto",
           draggable   = T,
-          card(
+          accordion(accordion_panel(
+            "Plot",
+            card(
             # style       = "resize:vertical;",
             full_screen = T,
-            card_header(class = "bg-dark", "Score"),
+            # card_header(class = "bg-dark", "Score"),
             card_body(
               # girafeOutput("plot_flower", height = "300px") ) ) ),
-              girafeOutput("plot_flower", height = "100%") ) ) ),
+              girafeOutput("plot_flower", height = "100%") ) ) ) ) ),
         condition = 'output.flower_status')),
     nav_panel(
       "Species",
@@ -377,7 +379,7 @@ server <- function(input, output, session) {
         raster_resampling = "nearest",
         before_id         = "er_ln") |>
       mapgl::add_legend(
-        "Colorscale",
+        "Value",
         values   = rng_r,
         colors   = cols_r,
         position = "bottom-right") |>
