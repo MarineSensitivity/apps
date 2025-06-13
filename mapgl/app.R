@@ -18,6 +18,9 @@ dir_data       <- ifelse(
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif       <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
 sdm_dd         <- glue("{dir_data}/derived/sdm.duckdb")
+pa_gpkg        <- glue("{dir_data}/derived/ply_planareas_2025.gpkg")
+er_gpkg        <- glue("{dir_data}/derived/ply_ecoregions_2025.gpkg")
+metrics_tif    <- glue("{dir_data}/derived/r_metrics.tif")
 spp_global_csv <- here("mapgl/spp_global_cache.csv")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN=readLines(mapbox_tkn_txt))
@@ -143,8 +146,8 @@ d_lyrs <- bind_rows(
   tibble(
     order    = 3,
     category = "Primary Productivity, rescaled by Ecoregion",
-    layer    = glue("{sp_cats}: ext. risk, ecorgn"),
-    lyr      = glue("extrisk_{sp_cats_u}_ecoregion_rescaled")),
+    layer    = glue("prim prod, ecorgn"),
+    lyr      = glue("primprod_ecoregion_rescaled")),
   tibble(
     order    = 4,
     category = "Species, raw Extinction Risk",
@@ -154,7 +157,7 @@ d_lyrs <- bind_rows(
     order    = 5,
     category = "Primary Productivity, raw Phytoplankton",
     lyr      = "primprod",
-    layer    = "primary productivity (mmol/m^3)" ) )
+    layer    = "prim prod (mmol/m^3)" ) )
 
 # d_lyrs |>
 #   group_by(order, category) |>
@@ -219,6 +222,21 @@ if (file.exists(spp_global_csv)) {
       sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
       redlist_code, rl_score, suitability, suit_rl, pct_total) |>
     write_csv(spp_global_csv)
+}
+
+# * cache downloads: pa|er.gpkg, metrics.tif ----
+if (!file.exists(pa_gpkg)) {
+  message("Generating Planning Areas geopackage...")
+  st_read(con, "ply_planareas_2025") |>
+    st_write(pa_gpkg, delete_dsn = T, quiet = T)
+}
+if (!file.exists(er_gpkg)) {
+  message("Generating Ecoregion geopackage...")
+  st_read(con, "ply_ecoregions_2025") |>
+    st_write(er_gpkg, delete_dsn = T, quiet = T)
+}
+if (!file.exists(metrics_tif)) {
+  message("TODO: Generate metrics raster...")
 }
 
 # ui ----
