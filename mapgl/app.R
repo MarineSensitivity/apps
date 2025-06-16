@@ -30,6 +30,7 @@ librarian::shelf(
 # database ----
 source(here("../workflows/libs/db.R")) # con
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
+# dbListTables(con_sdm)
 # dbDisconnect(con, shutdown = T) # TODO: disconnect when Shiny closes
 # duckdb_shutdown(duckdb())
 
@@ -699,9 +700,11 @@ server <- function(input, output, session) {
             select(mdl_seq, taxa),
           by = "mdl_seq") |>
         group_by(taxa) |>
+        filter(
+          !is.na(suitability),
+          !is.na(pct_covered)) |>
         summarize(
-          # suitability = (suitability * pct_covered) / sum(pct_covered, na.rm = T),
-          suitability = weighted_avg(suitability, pct_covered),
+          suitability = sum(suitability * pct_covered, na.rm = T) / sum(pct_covered, na.rm = T),
           .groups = "drop") |>
         left_join(
           tbl(con_sdm, "species") |>
@@ -774,7 +777,6 @@ server <- function(input, output, session) {
     #   col_names <- c("Planning Area", "Component", "Metric", "Value", "Scale")
     # }
 
-    # browser()
     # TODO: rename columns and add explanation with info popups
     datatable(
       # d[, display_cols],
