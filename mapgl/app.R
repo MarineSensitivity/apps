@@ -1,7 +1,7 @@
 # packages ----
 librarian::shelf(
   bslib, DBI, dplyr, duckdb, DT, ggiraph, ggplot2, glue, here, purrr,
-  RColorBrewer, readr, sf, shiny, stringr, terra, tibble, tidyr)
+  RColorBrewer, readr, scales, sf, shiny, stringr, terra, tibble, tidyr)
 options(readr.show_col_types = F)
 
 # variables ----
@@ -84,6 +84,12 @@ plot_flower <- function(
         tooltip = glue("{!!fld_category}"))
   }
 
+  cols <- setNames(
+    hue_pal()(7),
+    c("fish", "crustacean",
+      "primprod", # ensure green
+      "sea turtle", "marine mammal", "mollusk", "other"))
+
   g <- ggplot(d) +
     geom_rect_interactive(aes(
       xmin    = xmin,
@@ -96,6 +102,7 @@ plot_flower <- function(
       tooltip = tooltip),
       color = "white",
       alpha = 0.5) +
+    scale_fill_manual(values = cols) +
     coord_polar(theta = "y") +
     # Create donut hole
     xlim(c(-10, max(data |> pull({{ fld_height }})))) +
@@ -158,7 +165,7 @@ d_lyrs <- bind_rows(
     order    = 5,
     category = "Primary Productivity, raw Phytoplankton",
     lyr      = "primprod",
-    layer    = "prim prod (mmol/m^3)" ) )
+    layer    = "prim prod, 2023 avg (mg C/m^2/day)" ) )
 
 # d_lyrs |>
 #   group_by(order, category) |>
