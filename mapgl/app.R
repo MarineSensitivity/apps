@@ -34,6 +34,7 @@ pa_gpkg        <- glue("{dir_data}/derived/ply_planareas_2025.gpkg")
 er_gpkg        <- glue("{dir_data}/derived/ply_ecoregions_2025.gpkg")
 metrics_tif    <- glue("{dir_data}/derived/r_metrics.tif")
 spp_global_csv <- here("mapgl/spp_global_cache.csv")
+lyrs_csv       <- glue("{dir_data}/derived/layers.csv")
 
 if (verbose)
   message(glue("Verbose: TRUE"))
@@ -154,39 +155,40 @@ r_cell <- terra::rast(cell_tif)
 sp_cats   <- tbl(con_sdm, "species") |> distinct(sp_cat) |> pull(sp_cat) |> sort()
 sp_cats_u <- sp_cats |> str_replace(" ", "_")
 
-d_lyrs <- bind_rows(
-  tibble(
-    order    = 1,
-    category = "Overall",
-    layer    = "score",
-    lyr      = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"),
-  tibble(
-    order    = 2,
-    category = "Species, rescaled by Ecoregion",
-    layer    = glue("{sp_cats}: ext. risk, ecorgn"),
-    lyr      = glue("extrisk_{sp_cats_u}_ecoregion_rescaled")),
-  tibble(
-    order    = 3,
-    category = "Primary Productivity, rescaled by Ecoregion",
-    layer    = glue("prim prod, ecorgn"),
-    lyr      = glue("primprod_ecoregion_rescaled")),
-  tibble(
-    order    = 4,
-    category = "Species, raw Extinction Risk",
-    layer    = glue("{sp_cats}: ext. risk"),
-    lyr      = glue("extrisk_{sp_cats_u}")),
-  tibble(
-    order    = 5,
-    category = "Primary Productivity, raw Phytoplankton",
-    lyr      = "primprod",
-    layer    = "prim prod, 2023 avg (mg C/m^2/day)" ) )
+if(file_exists(lyrs_csv)){
+  d_lyrs <- read_csv(lyrs_csv)
+} else {
+  if (verbose)
+    message("Generating layers CSV...")
+  d_lyrs <- bind_rows(
+    tibble(
+      order    = 1,
+      category = "Overall",
+      layer    = "score",
+      lyr      = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"),
+    tibble(
+      order    = 2,
+      category = "Species, rescaled by Ecoregion",
+      layer    = glue("{sp_cats}: ext. risk, ecorgn"),
+      lyr      = glue("extrisk_{sp_cats_u}_ecoregion_rescaled")),
+    tibble(
+      order    = 3,
+      category = "Primary Productivity, rescaled by Ecoregion",
+      layer    = glue("prim prod, ecorgn"),
+      lyr      = glue("primprod_ecoregion_rescaled")),
+    tibble(
+      order    = 4,
+      category = "Species, raw Extinction Risk",
+      layer    = glue("{sp_cats}: ext. risk"),
+      lyr      = glue("extrisk_{sp_cats_u}")),
+    tibble(
+      order    = 5,
+      category = "Primary Productivity, raw Phytoplankton",
+      lyr      = "primprod",
+      layer    = "prim prod, 2023 avg (mg C/m^2/day)" ) )
 
-# d_lyrs |>
-#   group_by(order, category) |>
-#   summarize(
-#     n = n(),
-#     lyrs = paste(layer, collapse = "; "),
-#     .groups = "drop")
+  write_csv(d_lyrs, lyrs_csv)
+}
 
 # confirm all layers available for both planareas and cell metrics
 lyrs_pa   <- dbListFields(con, "ply_planareas_2025")
