@@ -1,3 +1,15 @@
+# TODO:
+# - [ ] on click, add marker (rast) or highlight (pa)
+# - [use new features mapgl 0.3](https://walker-data.com/mapgl/news/index.html#mapgl-03)
+#   - [ ] on hover, show rast value using `enable_shiny_hover()`
+#   - [ ] legend pretty, more compact with `legend_style()`
+# - [ ] on light theme, change basemap to light too
+# - [ ] Species table: rename columns and add explanation with info popups
+# - [ ] Disconnect db connections when Shiny closes
+# - [ ] later manage multiple species per model; assume 1 taxa to 1 species for now
+# - [ ] Generate metrics raster
+# - [ ] Add Download button for cell (tif), pa (gpkg), er (gpkg) with README.md, csv lookup table as zip (ea.)
+
 # packages ----
 librarian::shelf(
   bslib, DBI, dplyr, duckdb, DT, ggiraph, ggplot2, glue, here, purrr,
@@ -5,7 +17,7 @@ librarian::shelf(
 options(readr.show_col_types = F)
 
 # variables ----
-verbose        <- F
+verbose        <- interactive()
 is_server      <-  Sys.info()[["sysname"]] == "Linux"
 dir_private    <- ifelse(
   is_server,
@@ -23,6 +35,10 @@ er_gpkg        <- glue("{dir_data}/derived/ply_ecoregions_2025.gpkg")
 metrics_tif    <- glue("{dir_data}/derived/r_metrics.tif")
 spp_global_csv <- here("mapgl/spp_global_cache.csv")
 
+if (verbose)
+  message(glue("Verbose: TRUE"))
+
+# mapbox token ----
 Sys.setenv(MAPBOX_PUBLIC_TOKEN=readLines(mapbox_tkn_txt))
 librarian::shelf(
   mapgl)
@@ -31,7 +47,7 @@ librarian::shelf(
 source(here("../workflows/libs/db.R")) # con
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
 # dbListTables(con_sdm)
-# dbDisconnect(con, shutdown = T) # TODO: disconnect when Shiny closes
+# dbDisconnect(con, shutdown = T)
 # duckdb_shutdown(duckdb())
 
 # flower plot function ----
@@ -143,7 +159,6 @@ d_lyrs <- bind_rows(
   tibble(
     order    = 1,
     category = "Overall",
-    source   = "db_metric",
     layer    = "score",
     lyr      = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"),
   tibble(
@@ -194,6 +209,8 @@ lyr_choices <- d_lyrs |>
   select(-order) |>
   deframe()
 
+lyr_default <- d_lyrs$lyr[1]
+
 # * d_spp_global ----
 if (file.exists(spp_global_csv)) {
   d_spp_global <- read_csv(spp_global_csv)
@@ -243,8 +260,38 @@ if (!file.exists(er_gpkg)) {
   st_read(con, "ply_ecoregions_2025") |>
     st_write(er_gpkg, delete_dsn = T, quiet = T)
 }
-if (!file.exists(metrics_tif)) {
-  message("TODO: Generate metrics raster...")
+# if (!file.exists(metrics_tif)) {
+#   # message("TODO: Generate metrics raster...")
+# }
+
+# helper functions ----
+get_rast <- function(m_key){
+
+  d <- dbGetQuery(con_sdm, glue("
+        SELECT
+          cm.cell_id,
+          cm.value
+        FROM cell_metric cm
+        WHERE cm.metric_seq = (
+          SELECT metric_seq
+          FROM metric
+          WHERE metric_key = '{m_key}' )" ))
+  stopifnot(sum(duplicated(d$cell_id)) == 0)
+
+  r <- init(r_cell[[1]], NA)
+  r[d$cell_id] <- d$value
+
+  r
+}
+
+get_lyr_name <- function(lyr) {
+  # get layer name from d_lyrs
+  lyr_name <- d_lyrs |>
+    filter(lyr == !!lyr) |>
+    pull(layer)
+  if (length(lyr_name) == 0)
+    stop(glue("Layer '{lyr}' not found in d_lyrs."))
+  lyr_name
 }
 
 # ui ----
@@ -281,7 +328,8 @@ ui <- page_sidebar(
     selectInput(
       "sel_lyr",
       "Layer",
-      choices = lyr_choices),
+      choices = lyr_choices,
+      selected = lyr_default),
     input_switch(
       "tgl_sphere", "Sphere", T ),
     input_dark_mode(
@@ -342,34 +390,21 @@ server <- function(input, output, session) {
   })
   outputOptions(output, "flower_status", suspendWhenHidden = FALSE)
 
-  # * get_rast ----
-  get_rast <- reactive({
-    req(input$sel_lyr)
+  # * get_rast_rx ----
+  get_rast_rx <- reactive({
+    req(input$sel_unit, input$sel_lyr)
 
-    m_key <- input$sel_lyr
+    if (input$sel_unit == "pa")
+      return(NULL)
 
-    d <- dbGetQuery(con_sdm, glue("
-        SELECT
-          cm.cell_id,
-          cm.value
-        FROM cell_metric cm
-        WHERE cm.metric_seq = (
-          SELECT metric_seq
-          FROM metric
-          WHERE metric_key = '{m_key}' )" ))
-    stopifnot(sum(duplicated(d$cell_id)) == 0)
-
-    r <- init(r_cell[[1]], NA)
-    r[d$cell_id] <- d$value
-
-    r
+    get_rast(input$sel_lyr)
   })
 
   # * map ----
   output$map <- renderMapboxgl({
 
     # default to show raster score
-    r      <- get_rast()
+    r      <- get_rast(lyr_default)
     n_cols <- 11
     cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
     rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
@@ -412,7 +447,7 @@ server <- function(input, output, session) {
         raster_resampling = "nearest",
         before_id         = "er_ln") |>
       mapgl::add_legend(
-        "Value",
+        get_lyr_name(lyr_default),
         values   = rng_r,
         colors   = cols_r,
         position = "bottom-right") |>
@@ -425,30 +460,33 @@ server <- function(input, output, session) {
 
   })
 
-  # * update map based on unit selection ----
-  observeEvent(list(input$sel_unit, input$sel_lyr), {
+  # * update map ----
+  observeEvent(c(input$sel_unit, input$sel_lyr), {
     req(input$sel_unit, input$sel_lyr)
 
     map_proxy <- mapboxgl_proxy("map")
 
     if (input$sel_unit == "cell") {
       if (verbose)
-        message(glue("update map cell"))
+        message(glue("update map cell - beg"))
+
+      rx$clicked_pa <- NULL
 
       # show raster layer
-      r      <- get_rast()
+      r      <- get_rast_rx()
       n_cols <- 11
       cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
       rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
-      # remove planning area fill layer if exists
+      # remove layers if exist
       map_proxy |>
-        clear_layer("pa_lyr")
-
-      # update or add raster source and layer
-      map_proxy |>
+        clear_layer("pa_lyr") |>
         clear_layer("r_src") |>
         clear_layer("r_lyr") |>
+        clear_legend()
+
+      # add raster source and layer
+      map_proxy |>
         add_image_source(
           id     = "r_src",
           data   = r,
@@ -460,14 +498,21 @@ server <- function(input, output, session) {
           raster_resampling = "nearest",
           before_id         = "er_ln") |>
         mapgl::add_legend(
-          "Colorscale",
+          get_lyr_name(input$sel_lyr),
           values   = rng_r,
           colors   = cols_r,
           position = "bottom-right")
 
-    } else {
       if (verbose)
-        message(glue("update map pa"))
+        message(glue("update map cell - end"))
+
+    } else {
+      # assume: input$sel_unit == "pa"
+
+      if (verbose)
+        message(glue("update map pa - beg"))
+
+      rx$clicked_cell <- NULL
 
       # show planning area layer
       n_cols <- 11
@@ -482,11 +527,12 @@ server <- function(input, output, session) {
 
       # remove raster layer if exists
       map_proxy |>
-        clear_layer("r_lyr")
+        clear_layer("r_lyr") |>
+        clear_layer("pa_lyr") |>
+        clear_legend()
 
       # add planning area fill layer
       map_proxy |>
-        clear_layer("pa_lyr") |>
         add_fill_layer(
           id                 = "pa_lyr",
           source             = "pa_src",
@@ -503,10 +549,14 @@ server <- function(input, output, session) {
             fill_opacity = 1 ),
           before_id = "pa_ln" ) |>
         mapgl::add_legend(
-          "Colorscale",
+          get_lyr_name(input$sel_lyr),
           values   = rng_pa,
           colors   = cols_pa,
           position = "bottom-right")
+
+      if (verbose)
+        message(glue("update map pa - end"))
+
     }
   }, ignoreInit = FALSE)
 
@@ -517,6 +567,8 @@ server <- function(input, output, session) {
     click <- input$map_click
 
     if (input$sel_unit == "cell") {
+      rx$clicked_pa <- NULL
+
       # handle raster click
       lng <- click$lng
       lat <- click$lat
@@ -537,6 +589,8 @@ server <- function(input, output, session) {
 
     } else {
       # handle planning area click
+      rx$clicked_cell <- NULL
+
       if (!is.null(input$map_feature_click)) {
         rx$clicked_pa <- list(
           id         = input$map_feature_click$id,
@@ -685,7 +739,7 @@ server <- function(input, output, session) {
 
       pa_key  <- rx$clicked_pa$properties$planarea_key
       pa_name <- rx$clicked_pa$properties$planarea_name
-      # pa_key <- "ALA" # DEBUG
+
       rx$species_table_header   <- glue("Species for Planning Area: {pa_name}")
       rx$species_table_filename <- glue("species_planarea-{str_replace(pa_name, ' ', '-') |> str_to_lower()}")
 
@@ -754,7 +808,6 @@ server <- function(input, output, session) {
   # * species_table ----
   output$species_table <- renderDT({
     d <- get_species_table()
-    # d <- d_spp_global # DEBUG
 
     d <- d |>
       mutate(
@@ -784,11 +837,9 @@ server <- function(input, output, session) {
     #   col_names <- c("Planning Area", "Component", "Metric", "Value", "Scale")
     # }
 
-    # TODO: rename columns and add explanation with info popups
     datatable(
       # d[, display_cols],
       # colnames = col_names,
-      # d |> slice(1:100), # DEBUG
       d,
       escape     = F,  # allow HTML in component_link column
       # filter     = "top",
