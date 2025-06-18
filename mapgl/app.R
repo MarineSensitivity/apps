@@ -12,7 +12,7 @@
 
 # packages ----
 librarian::shelf(
-  bslib, DBI, dplyr, duckdb, DT, ggiraph, ggplot2, glue, here, purrr,
+  bslib, DBI, dplyr, duckdb, DT, fs, ggiraph, ggplot2, glue, here, purrr,
   RColorBrewer, readr, scales, sf, shiny, stringr, terra, tibble, tidyr)
 options(readr.show_col_types = F)
 
@@ -47,8 +47,7 @@ librarian::shelf(
 source(here("../workflows/libs/db.R")) # con
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
 # dbListTables(con_sdm)
-# dbDisconnect(con, shutdown = T)
-# duckdb_shutdown(duckdb())
+# dbDisconnect(con, shutdown = T); duckdb_shutdown(duckdb()); rm(con_sdm)
 
 # flower plot function ----
 plot_flower <- function(
@@ -250,6 +249,11 @@ if (file.exists(spp_global_csv)) {
 }
 
 # * cache downloads: pa|er.gpkg, metrics.tif ----
+redo_dl <- F
+if (redo_dl){
+  for (f in c(pa_gpkg, er_gpkg)){
+    if (file_exists(f))
+      file_delete(f) } }
 if (!file.exists(pa_gpkg)) {
   message("Generating Planning Areas geopackage...")
   st_read(con, "ply_planareas_2025") |>
