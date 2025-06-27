@@ -50,7 +50,36 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
 # dbListTables(con_sdm)
 # dbDisconnect(con, shutdown = T); duckdb_shutdown(duckdb()); rm(con_sdm)
 
-# flower plot function ----
+# helper functions ----
+get_rast <- function(m_key){
+
+  d <- dbGetQuery(con_sdm, glue("
+        SELECT
+          cm.cell_id,
+          cm.value
+        FROM cell_metric cm
+        WHERE cm.metric_seq = (
+          SELECT metric_seq
+          FROM metric
+          WHERE metric_key = '{m_key}' )" ))
+  stopifnot(sum(duplicated(d$cell_id)) == 0)
+
+  r <- init(r_cell[[1]], NA)
+  r[d$cell_id] <- d$value
+
+  r
+}
+
+get_lyr_name <- function(lyr) {
+  # get layer name from d_lyrs
+  lyr_name <- d_lyrs |>
+    filter(lyr == !!lyr) |>
+    pull(layer)
+  if (length(lyr_name) == 0)
+    stop(glue("Layer '{lyr}' not found in d_lyrs."))
+  lyr_name
+}
+
 plot_flower <- function(
     data,
     fld_category,
@@ -253,7 +282,7 @@ if (file.exists(spp_global_csv)) {
 # * cache downloads: pa|er.gpkg, metrics.tif ----
 redo_dl <- F
 if (redo_dl){
-  for (f in c(pa_gpkg, er_gpkg)){
+  for (f in c(pa_gpkg, er_gpkg, metrics_tif)){
     if (file_exists(f))
       file_delete(f) } }
 if (!file.exists(pa_gpkg)) {
@@ -266,38 +295,21 @@ if (!file.exists(er_gpkg)) {
   st_read(con, "ply_ecoregions_2025") |>
     st_write(er_gpkg, delete_dsn = T, quiet = T)
 }
-# if (!file.exists(metrics_tif)) {
-#   # message("TODO: Generate metrics raster...")
-# }
+if (!file.exists(metrics_tif)) {
+  message("Generating Metrics raster...")
 
-# helper functions ----
-get_rast <- function(m_key){
+  lst <- list()
+  for (i in 1:nrow(d_lyrs)){ # i = 2
+    lyr   <- d_lyrs$lyr[i]
+    layer <- d_lyrs$layer[i]
 
-  d <- dbGetQuery(con_sdm, glue("
-        SELECT
-          cm.cell_id,
-          cm.value
-        FROM cell_metric cm
-        WHERE cm.metric_seq = (
-          SELECT metric_seq
-          FROM metric
-          WHERE metric_key = '{m_key}' )" ))
-  stopifnot(sum(duplicated(d$cell_id)) == 0)
-
-  r <- init(r_cell[[1]], NA)
-  r[d$cell_id] <- d$value
-
-  r
-}
-
-get_lyr_name <- function(lyr) {
-  # get layer name from d_lyrs
-  lyr_name <- d_lyrs |>
-    filter(lyr == !!lyr) |>
-    pull(layer)
-  if (length(lyr_name) == 0)
-    stop(glue("Layer '{lyr}' not found in d_lyrs."))
-  lyr_name
+    r <- get_rast(lyr) # plot(r)
+    names(r) <- lyr
+    varnames(r) <- layer
+    lst[[i]] <- r
+  }
+  r_metrics <- do.call(c, lst)
+  writeRaster(r_metrics, metrics_tif)
 }
 
 # ui ----
