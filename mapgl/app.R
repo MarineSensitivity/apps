@@ -518,9 +518,13 @@ server <- function(input, output, session) {
   observeEvent(c(input$sel_unit, input$sel_lyr), {
     req(input$sel_unit, input$sel_lyr)
 
+    # explicitly reference either select to force update
+    unit <- input$sel_unit
+    lyr  <- input$sel_lyr
+
     map_proxy <- mapboxgl_proxy("map")
 
-    if (input$sel_unit == "cell") {
+    if (unit == "cell") {
       if (verbose)
         message(glue("update map cell - beg"))
 
@@ -561,7 +565,7 @@ server <- function(input, output, session) {
         message(glue("update map cell - end"))
 
     } else {
-      # assume: input$sel_unit == "pa"
+      # assume: unit == "pa"
 
       if (verbose)
         message(glue("update map pa - beg"))
@@ -571,7 +575,7 @@ server <- function(input, output, session) {
       # show planning area layer
       n_cols <- 11
       cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-      var_pa <- input$sel_lyr
+      var_pa <- lyr
 
       rng_pa <- tbl(con, "ply_planareas_2025") |>
         pull({{ var_pa }}) |>
