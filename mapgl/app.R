@@ -298,6 +298,40 @@ if (!file.exists(er_gpkg)) {
 if (!file.exists(metrics_tif)) {
   message("Generating Metrics raster...")
 
+  # add zones
+  lst <- list()
+  for (zone_fld in c("ecoregion_key", "planarea_key")){
+    # zone_fld = "ecoregion_key"
+    # zone_fld = "planarea_key"
+
+    d <- tbl(con_sdm, "zone") |>
+      filter(fld == !!zone_fld) |>
+      left_join(
+        tbl(con_sdm, "zone_cell"),
+        by = "zone_seq") |>
+      group_by(cell_id) |>
+      window_order(pct_covered) |>
+      summarize(
+        value = last(value),
+        .groups = "drop" ) |>
+      collect() |>
+      mutate(
+        "{zone_fld}" := as.factor(value)) |>
+      select(all_of(c("cell_id", zone_fld)))
+
+    r <- init(r_cell[[1]], NA) # |> as.factor() #sort(unique(d$value)))
+    # r$chr <- NA_character_ # ensure chr type
+    r[d$cell_id] <- d[[zone_fld]]
+    varnames(r)  <- zone_fld
+    names(r)     <- zone_fld
+    levels(r)    <- tibble(
+      id            = 1:length(levels(d[[zone_fld]])),
+      "{zone_fld}" := levels(d[[zone_fld]]))
+    lst[[zone_fld]] <- r
+  }
+  r_zones <- do.call(c, lst |> unname())
+
+  # add layers
   lst <- list()
   for (i in 1:nrow(d_lyrs)){ # i = 2
     lyr   <- d_lyrs$lyr[i]
@@ -309,7 +343,9 @@ if (!file.exists(metrics_tif)) {
     lst[[i]] <- r
   }
   r_metrics <- do.call(c, lst)
-  writeRaster(r_metrics, metrics_tif)
+
+  r_metrics <- c(r_zones, r_metrics)
+  writeRaster(r_metrics, metrics_tif, overwrite = T)
 }
 
 # ui ----
