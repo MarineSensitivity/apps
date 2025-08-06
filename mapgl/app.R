@@ -12,7 +12,7 @@
 
 # packages ----
 librarian::shelf(
-  bslib, DBI, dplyr, duckdb, DT, fs, ggiraph, ggplot2, glue, here, purrr,
+  bsicons, bslib, DBI, dplyr, duckdb, DT, fs, ggiraph, ggplot2, glue, here, purrr,
   RColorBrewer, readr, scales, sf, shiny, stringr, terra, tibble, tidyr)
 options(readr.show_col_types = F)
 
@@ -293,11 +293,13 @@ ui <- page_sidebar(
       "Species",
       card(
         card_header(
-          textOutput("species_table_header", inline = T),
+          span(
+            textOutput("species_table_header", inline = T),
+            actionButton("btn_tbl_info", "", icon = icon("circle-info"), class = "btn-sm")),
           class = "d-flex justify-content-between align-items-center",
           downloadButton("download_data", "Download CSV", class = "btn-sm")),
         card_body(
-          DTOutput("species_table")))) ) )
+          DTOutput("species_table") ) ) ) ) )
 
 # server ----
 server <- function(input, output, session) {
@@ -616,11 +618,34 @@ server <- function(input, output, session) {
   })
 
   # * species_table_header ----
-
   output$species_table_header <- renderText({
     req(rx$species_table_header)
     rx$species_table_header
   })
+
+  # * btn_tbl_info ----
+  observe({
+    showModal(modalDialog(
+      title      = "Species table information",
+      size       = "l",
+      easy_close = T,
+      helpText(markdown(
+        "Species are listed for the entire USA waters, or the currently
+          selected area — a clicked Planning Area or cell. The columns correspond to:
+          - `cat` species categorical component; one of: bird, coral, fish, invertebrate, mammal, reptile, other
+          - `taxon` taxonomic identifier from Birds of the World (botw) or World Registry of Marine Species (worms) for non-bird species
+          - `scientific` scientific name
+          - `common` common name, if available
+          - `rl_code` IUCN Red List code: CR (Critically Endangered), EN (Endangered), VU (Vulnerable), TN (Threatened), NT (Near Threatened), LC (Least Concern), DD (Data Deficient), NA (Not Available)
+          - `rl_score` IUCN Red List score: 1 = CR, 0.8 = EN, 0.6 = VU|TN, 0.4 = NT, 0.2 = LC|DD|NA
+          - `model` model identifier; click to visit species distribution in seperate app
+          - `area_km2` area of cells with non-zero value for distribution, within selected area (USA, Planning Area or Cell)
+          - `avg_suit` average suitability across all non-zero cells, ranging from 1 to 100%
+          - `pct_cat` percent contribution of the species (`rl_score * avg_suit * area_km2`) towards the total summed category (`cat`) within selected area (USA, Planning Area or Cell).
+             Note rescaling by Ecoregion min/max that contributes to the component and overall scores is not captured by this simpler metric."))
+    ) )
+  }) |>
+    bindEvent(input$btn_tbl_info)
 
   # * get_species_table ----
   get_species_table <- reactive({
@@ -763,23 +788,27 @@ server <- function(input, output, session) {
       relocate(taxon, .after = component) |>
       relocate(model, .after = rl_score) |>
       select(-taxon_id, -taxon_authority, -taxon_str, -taxon_url, -model_url, -model_id) |>
+      rename(cat = component, pct_cat = pct_component) |>
       datatable(
-        escape     = F,
-        class      = "display compact",
+        escape        = F,
+        rownames      = F,
+        fillContainer = T,
+        # style         = "auto",  # "bootstrap4",
+        style         = "bootstrap4",  # "auto",
+        class         = "display compact",
         extensions = c("ColReorder", "KeyTable", "Responsive"),
         options    = list(
           colReorder = T,
           keys       = T,
           pageLength = 5,
           lengthMenu = c(5, 50, 100),
-          scrollX    = TRUE,
-          # scrollY    = "600px",
+          scrollX    = TRUE, # scrollY    = "600px",
           dom        = 'lfrtip') ) |>
       formatPercentage(c(
         "rl_score"), 0) |>
       formatPercentage(c(
         "avg_suit",
-        "pct_component"), 2) |>
+        "pct_cat"), 2) |>
       formatSignif(c("area_km2"), 4)
   }, server = T)
 
