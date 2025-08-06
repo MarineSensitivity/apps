@@ -32,9 +32,9 @@ cell_tif       <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
 sdm_dd         <- glue("{dir_data}/derived/sdm.duckdb")
 pa_gpkg        <- glue("{dir_data}/derived/ply_planareas_2025.gpkg")
 er_gpkg        <- glue("{dir_data}/derived/ply_ecoregions_2025.gpkg")
-metrics_tif    <- glue("{dir_data}/derived/r_metrics.tif")
-spp_global_csv <- here("mapgl/spp_global_cache.csv")
 lyrs_csv       <- glue("{dir_data}/derived/layers.csv")
+metrics_tif    <- glue("{dir_data}/derived/r_metrics.tif")
+# spp_global_csv <- glue("{dir_data}/derived/spp_global_cache.csv")
 
 if (verbose)
   message(glue("Verbose: TRUE"))
@@ -90,6 +90,8 @@ plot_flower <- function(
     title        = NULL,
     colors       = "Set2"){
 
+  # TODO: fix NA scores to 0 and colors
+
   stopifnot(is.numeric(data |> pull({{ fld_height }})))
   stopifnot(is.numeric(data |> pull({{ fld_width }})))
 
@@ -129,11 +131,14 @@ plot_flower <- function(
         tooltip = glue("{!!fld_category}"))
   }
 
+  # components <- tbl(con_sdm, "taxon") |> filter(is_ok) |> distinct(sp_cat) |>
+  #   pull(sp_cat) %>% c(., "primprod") |> sort() |>  paste(collapse = '", "') |> cat()
+  components <- c("invertebrate", "mammal", "other", "primprod", "reptile", "bird", "coral", "fish")
+  # primprod in 4th green position
   cols <- setNames(
-    hue_pal()(7),
-    c("fish", "crustacean",
-      "primprod", # ensure green
-      "sea turtle", "marine mammal", "mollusk", "other"))
+    hue_pal()(length(components)),
+    components)
+  # show_col(cols)
 
   g <- ggplot(d) +
     geom_rect_interactive(aes(
@@ -178,46 +183,25 @@ plot_flower <- function(
 }
 
 # data prep ----
-r_cell <- terra::rast(cell_tif)
+
+# * check cached: cell_tif, pa|er_gpkg, metricss_tif, lyrs_csv ----
+v_f <- file_exists(c(cell_tif, pa_gpkg, er_gpkg, lyrs_csv, metrics_tif))
+if (any(!v_f))
+  stop(glue(
+    "Required cached files do not exist:
+       {paste(basename(names(v_f)[v_f == F]), collapse = ', ').}
+     Run calc_scores.qmd, chunk: update_cached_downloads."))
+
+# * d_spp_global ----
+d_spp_global <- tbl(con_sdm, "zone_taxon") |>
+  filter(
+    zone_fld   == "subregion_key",
+    zone_value == "USA") |>
+  collect()
+d_lyrs       <- read_csv(lyrs_csv)
+r_cell       <- rast(cell_tif)
 
 # * lyrs ----
-sp_cats   <- tbl(con_sdm, "species") |> distinct(sp_cat) |> pull(sp_cat) |> sort()
-sp_cats_u <- sp_cats |> str_replace(" ", "_")
-
-if(file_exists(lyrs_csv)){
-  d_lyrs <- read_csv(lyrs_csv)
-} else {
-  if (verbose)
-    message("Generating layers CSV...")
-  d_lyrs <- bind_rows(
-    tibble(
-      order    = 1,
-      category = "Overall",
-      layer    = "score",
-      lyr      = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"),
-    tibble(
-      order    = 2,
-      category = "Species, rescaled by Ecoregion",
-      layer    = glue("{sp_cats}: ext. risk, ecorgn"),
-      lyr      = glue("extrisk_{sp_cats_u}_ecoregion_rescaled")),
-    tibble(
-      order    = 3,
-      category = "Primary Productivity, rescaled by Ecoregion",
-      layer    = glue("prim prod, ecorgn"),
-      lyr      = glue("primprod_ecoregion_rescaled")),
-    tibble(
-      order    = 4,
-      category = "Species, raw Extinction Risk",
-      layer    = glue("{sp_cats}: ext. risk"),
-      lyr      = glue("extrisk_{sp_cats_u}")),
-    tibble(
-      order    = 5,
-      category = "Primary Productivity, raw Phytoplankton",
-      lyr      = "primprod",
-      layer    = "prim prod, 2023 avg (mg C/m^2/day)" ) )
-
-  write_csv(d_lyrs, lyrs_csv)
-}
 
 # confirm all layers available for both planareas and cell metrics
 lyrs_pa   <- dbListFields(con, "ply_planareas_2025")
@@ -240,113 +224,6 @@ lyr_choices <- d_lyrs |>
   deframe()
 
 lyr_default <- d_lyrs$lyr[1]
-
-# * d_spp_global ----
-if (file.exists(spp_global_csv)) {
-  d_spp_global <- read_csv(spp_global_csv)
-} else {
-  message("Generating spp_global_csv from database...")
-  tbl(con_sdm, "model_cell") |>
-    select(mdl_seq, cell_id, suitability = value) |>
-    left_join(
-      tbl(con_sdm, "model") |>
-        select(mdl_seq, taxa),
-      by = "mdl_seq") |>
-    group_by(taxa) |>
-    summarize(
-      suitability = mean(suitability, na.rm = TRUE),
-      .groups = "drop") |>
-    left_join(
-      tbl(con_sdm, "species") |>
-        select(taxa, sp_key, worms_id, gbif_id, sp_cat, scientific_name_dataset, common_name_dataset, redlist_code),
-      by = "taxa") |>    # TODO: later manage multiple species per model; assume 1 taxa to 1 species for now
-    mutate(
-      rl_score  = case_match(
-        redlist_code,
-        "CR" ~ 1.0,      # Critically Endangered
-        "EN" ~ 0.8,    # Endangered
-        "VU" ~ 0.6,    # Vulnerable
-        "NT" ~ 0.4,    # Near Threatened
-        "LC" ~ 0.2),   # Least Concern
-      suit_rl   = suitability * rl_score,
-      pct_total = suit_rl / sum(suit_rl, na.rm = T),
-      is_pct_na = is.na(pct_total)) |>
-    arrange(is_pct_na, desc(pct_total), scientific_name_dataset) |>
-    collect() |>
-    select(
-      sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
-      redlist_code, rl_score, suitability, suit_rl, pct_total) |>
-    write_csv(spp_global_csv)
-}
-
-# * cache downloads: pa|er.gpkg, metrics.tif ----
-redo_dl <- F
-if (redo_dl){
-  for (f in c(pa_gpkg, er_gpkg, metrics_tif)){
-    if (file_exists(f))
-      file_delete(f) } }
-if (!file.exists(pa_gpkg)) {
-  message("Generating Planning Areas geopackage...")
-  st_read(con, "ply_planareas_2025") |>
-    st_write(pa_gpkg, delete_dsn = T, quiet = T)
-}
-if (!file.exists(er_gpkg)) {
-  message("Generating Ecoregion geopackage...")
-  st_read(con, "ply_ecoregions_2025") |>
-    st_write(er_gpkg, delete_dsn = T, quiet = T)
-}
-if (!file.exists(metrics_tif)) {
-  message("Generating Metrics raster...")
-
-  # add zones
-  lst <- list()
-  for (zone_fld in c("ecoregion_key", "planarea_key")){
-    # zone_fld = "ecoregion_key"
-    # zone_fld = "planarea_key"
-
-    d <- tbl(con_sdm, "zone") |>
-      filter(fld == !!zone_fld) |>
-      left_join(
-        tbl(con_sdm, "zone_cell"),
-        by = "zone_seq") |>
-      group_by(cell_id) |>
-      window_order(pct_covered) |>
-      summarize(
-        value = last(value),
-        .groups = "drop" ) |>
-      collect() |>
-      mutate(
-        "{zone_fld}" := as.factor(value)) |>
-      select(all_of(c("cell_id", zone_fld)))
-
-    r <- init(r_cell[[1]], NA) # |> as.factor() #sort(unique(d$value)))
-    # r$chr <- NA_character_ # ensure chr type
-    r[d$cell_id] <- d[[zone_fld]]
-    varnames(r)  <- zone_fld
-    names(r)     <- zone_fld
-    levels(r)    <- tibble(
-      id            = 1:length(levels(d[[zone_fld]])),
-      "{zone_fld}" := levels(d[[zone_fld]]))
-    lst[[zone_fld]] <- r
-  }
-  r_zones <- do.call(c, lst |> unname())
-
-  # add layers
-  lst <- list()
-  for (i in 1:nrow(d_lyrs)){ # i = 2
-    lyr   <- d_lyrs$lyr[i]
-    layer <- d_lyrs$layer[i]
-
-    r <- get_rast(lyr) # plot(r)
-    names(r) <- lyr
-    varnames(r) <- layer
-    lst[[i]] <- r
-  }
-  r_metrics <- do.call(c, lst)
-
-  r_metrics <- c(r_zones, r_metrics)
-  writeRaster(r_metrics, metrics_tif, overwrite = T)
-}
 
 # ui ----
 light <- bs_theme()
@@ -760,36 +637,61 @@ server <- function(input, output, session) {
       # see original: https://github.com/MarineSensitivity/workflows/blob/76d711aed5ea319bde44158efade00a02c1031e4/ingest_aquamaps_to_sdm_duckdb.qmd#L1817-L1954
 
       cell_id <- rx$clicked_cell$cell_id
+      # cell_id <- 4151839
       rx$species_table_header   <- glue("Species for Cell ID: {cell_id}")
       rx$species_table_filename <- glue("species_cellid-{cell_id}")
 
-      d_spp <- tbl(con_sdm, "model_cell") |>
-        select(mdl_seq, cell_id, suitability = value) |>
-        filter(cell_id == !!cell_id) |>
-        left_join(
-          tbl(con_sdm, "model") |>
-            select(mdl_seq, taxa),
-          by = "mdl_seq") |>
-        left_join(
-          tbl(con_sdm, "species") |>
-            select(taxa, sp_key, worms_id, gbif_id, sp_cat, scientific_name_dataset, common_name_dataset, redlist_code),
-          by = "taxa") |>    # TODO: later manage multiple species per model; assume 1 taxa to 1 species for now
-        mutate(
-          rl_score  = case_match(
-            redlist_code,
-            "CR" ~ 1.0,      # Critically Endangered
-            "EN" ~ 0.8,    # Endangered
-            "VU" ~ 0.6,    # Vulnerable
-            "NT" ~ 0.4,    # Near Threatened
-            "LC" ~ 0.2),   # Least Concern
-          suit_rl   = suitability * rl_score,
-          pct_total = suit_rl / sum(suit_rl, na.rm = T),
-          is_pct_na = is.na(pct_total)) |>
-        arrange(is_pct_na, desc(pct_total), scientific_name_dataset) |>
-        collect() |>
+      tbl_taxon <- tbl(con_sdm, "taxon") |>
+        filter(is_ok) |>
         select(
-          sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
-          redlist_code, rl_score, suitability, suit_rl, pct_total)
+          sp_cat, sp_common = common_name, sp_scientific = scientific_name,
+          taxon_id, taxon_authority,  # TODO: in app, sp_taxon: [{taxon_authority}:{taxon_id}](https://...)
+          rl_code = redlist_code, mdl_seq) |>
+        # arrange(sp_cat, common_name) |>
+        mutate(
+          rl_score = case_match(
+            rl_code,
+            # NEW: EX (extinct): is_ok = F
+            # NEW: NE (not evaluated), DD (data deficient), <NA> (not available) -> LC
+            # https://oceanhealthindex.org/images/htmls/Supplement.html#62_Biodiversity
+            "CR" ~ 1,           #  - CR: Critically Endangered
+            "EN" ~ 0.8,         #  - EN: Endangered (+ESA)
+            "VU" ~ 0.6,         #  - VU: Vulnerable
+            "TN" ~ 0.6,         #  - TN: Threatened (ESA only)
+            "NT" ~ 0.4,         #  - NT: Near Threatened
+            "LC" ~ 0.2,         #  - LC: Least Concern
+            .default = 0.2)) |> #  - NEW: assume LC for NAs and the rest
+        relocate(rl_score, .after = rl_code) # |>
+      # collect()  # 17,379 × 8
+
+      d_spp <- tbl(con_sdm, "model_cell") |>
+        filter(cell_id == !!cell_id) |>
+        inner_join(
+          tbl_taxon,
+          by = join_by(mdl_seq)) |>
+        inner_join(
+          tbl(con_sdm, "cell") |>
+            select(cell_id, area_km2),
+          by = join_by(cell_id)) |>
+        group_by(
+          mdl_seq,
+          sp_cat, sp_common, sp_scientific,
+          taxon_id, taxon_authority,
+          rl_code, rl_score) |>
+        summarize(
+          area_km2 = sum(area_km2, na.rm = T),
+          avg_suit = mean(value, na.rm = T) / 100,
+          .groups = "drop") |>
+        collect() |>
+        mutate(
+          suit_rl      = avg_suit * rl_score,
+          suit_rl_area = avg_suit * rl_score * area_km2) |>
+        group_by(sp_cat) |>
+        mutate(
+          cat_suit_rl_area = sum(suit_rl_area, na.rm = T)) |>
+        ungroup() |>
+        mutate(
+          pct_cat = suit_rl_area / cat_suit_rl_area)
     }
 
     # ** pa ----
@@ -801,123 +703,84 @@ server <- function(input, output, session) {
       rx$species_table_header   <- glue("Species for Planning Area: {pa_name}")
       rx$species_table_filename <- glue("species_planarea-{str_replace(pa_name, ' ', '-') |> str_to_lower()}")
 
-      d_spp <- tbl(con_sdm, "zone") |>
+      # debug #  pa_key = "CGA"; pa_name = "Central Gulf of America"
+
+      # model stats in given zone
+      # ℹ In argument: `value == "WAO"`
+      # Caused by error:
+      #   ! Object `value` not found.
+
+      d_spp <- tbl(con_sdm, "zone_taxon") |>
         filter(
-          tbl   == "ply_planareas_2025",
-          value == !!pa_key) |>
-        select(zone_seq) |>
-        left_join(
-          tbl(con_sdm, "zone_cell") |>
-            select(zone_seq, cell_id, pct_covered),
-          by = "zone_seq") |>
-        left_join(
-          tbl(con_sdm, "model_cell") |>
-          select(mdl_seq, cell_id, suitability = value),
-          by = "cell_id") |>
-        left_join(
-          tbl(con_sdm, "model") |>
-            select(mdl_seq, taxa),
-          by = "mdl_seq") |>
-        group_by(taxa) |>
-        filter(
-          !is.na(suitability),
-          !is.na(pct_covered)) |>
-        summarize(
-          suitability = sum(suitability * pct_covered, na.rm = T) / sum(pct_covered, na.rm = T),
-          .groups = "drop") |>
-        left_join(
-          tbl(con_sdm, "species") |>
-            select(taxa, sp_key, worms_id, gbif_id, sp_cat, scientific_name_dataset, common_name_dataset, redlist_code),
-          by = "taxa") |>    # TODO: later manage multiple species per model; assume 1 taxa to 1 species for now
-        mutate(
-          rl_score  = case_match(
-            redlist_code,
-            "CR" ~ 1.0,      # Critically Endangered
-            "EN" ~ 0.8,    # Endangered
-            "VU" ~ 0.6,    # Vulnerable
-            "NT" ~ 0.4,    # Near Threatened
-            "LC" ~ 0.2),   # Least Concern
-          suit_rl   = suitability * rl_score,
-          pct_total = suit_rl / sum(suit_rl, na.rm = T),
-          is_pct_na = is.na(pct_total)) |>
-        arrange(is_pct_na, desc(pct_total), scientific_name_dataset) |>
-        collect() |>
-        select(
-          sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id,
-          redlist_code, rl_score, suitability, suit_rl, pct_total)
+          zone_fld   == "planarea_key",
+          zone_value == !!pa_key) |>
+        collect()
     }
 
     # rename columns
     d_spp |>
+      mutate(
+        model_url = glue("https://shiny.marinesensitivity.org/mapsp/?mdl_seq={mdl_seq}"),
+        taxon_str = glue("{taxon_authority}:{taxon_id}"),
+        taxon_url = ifelse(
+          taxon_authority == "botw",
+          "https://birdsoftheworld.org",
+          glue("https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}"))) |>
+      # TODO: construct URL
+      # Search: "Limosa lapponica" taxon_id: 22693158
+      # at https://birdsoftheworld.org/
+      # https://birdsoftheworld.org/bow/api/v1/taxa?limit=100&q=Limosa%20lapponica
+      # [{  "code": "batgod",
+      #     "name": "Bar-tailed Godwit - Limosa lapponica",
+      #     "order": 5973  }]
+      # https://birdsoftheworld.org/bow/species/batgod/cur/introduction
+      # https://www.iucnredlist.org/species/22693158/111221714
+      # https://www.iucnredlist.org/species/22693158 taxon_id alone doesn't work
       select(
-        category   = sp_cat,
-        key        = sp_key,
-        scientific = scientific_name_dataset,
-        common     = common_name_dataset,
-        worms      = worms_id,
-        gbif       = gbif_id,
-        rl_code    = redlist_code,
-        rl_score,
-        suit       = suitability,
-        suit_rl,
-        pct_all    = pct_total)
+        component  = sp_cat,
+        taxon_authority, taxon_id, taxon_str, taxon_url,
+        scientific = sp_scientific,
+        common     = sp_common,
+        rl_code, rl_score,
+        model_id   = mdl_seq, model_url,
+        area_km2,
+        avg_suit,
+        pct_component = pct_cat) |>
+      arrange(component, scientific)
   })
 
   # * species_table ----
   output$species_table <- renderDT({
     d <- get_species_table()
 
-    d <- d |>
-      mutate(
-        key   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={key}" target="_blank">{key}</a>'),
-        worms = ifelse(
-          is.na(worms),
-          NA,
-          glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms}" target="_blank">{worms}</a>')),
-        gbif  = ifelse(
-          is.na(gbif),
-          NA,
-          glue('<a href="https://www.gbif.org/species/{gbif}" target="_blank">{gbif}</a>')))
-        # suitability = round(suitability, 1),
-        # suit_rl     = round(suit_rl, 1)
-        # pct_total   = round(pct_total * 100, 3) ) |>
-    # TODO: add n_cells and avg_suitability for PlanAreas (or drawn areas)
-
     # store for download
     rx$species_table <- d
 
-    # select columns to display
-    # if (input$sel_unit == "cell") {
-    #   display_cols <- c("cell_id", "component_link", "metric_name", "value", "scale_type")
-    #   col_names <- c("Cell ID", "Component", "Metric", "Value", "Scale")
-    # } else {
-    #   display_cols <- c("zone_name", "component_link", "metric_name", "value", "scale_type")
-    #   col_names <- c("Planning Area", "Component", "Metric", "Value", "Scale")
-    # }
-
-    datatable(
-      # d[, display_cols],
-      # colnames = col_names,
-      d,
-      escape     = F,  # allow HTML in component_link column
-      # filter     = "top",
-      class      = "display compact",
-      # extensions = c("Buttons", "ColReorder", "KeyTable", "Responsive"),
-      extensions = c("ColReorder", "KeyTable", "Responsive"),
-      options    = list(
-        # buttons    = c("copy", "csv", "excel", "pdf", "print"),
-        colReorder = T, # ColReorder
-        keys       = T, # KeyTable
-        pageLength = 5,
-        lengthMenu = c(5, 50, 100),
-        # scrollX    = TRUE,
-        # scrollY    = "600px",
-        # dom        = 'Bfrtip',
-        dom        = 'lfrtip') ) |>
-        # columnDefs = list(
-        #   list(className = 'dt-right', targets = which(display_cols == "value") - 1) ))  |>
-      formatPercentage(c("pct_all"), 2) |>
-      formatRound(c("suit","suit_rl"), 1)
+    d |>
+      mutate(
+        taxon = glue('<a href="{taxon_url}" target="_blank">{taxon_str}</a>'),
+        model = glue('<a href="{model_url}" target="_blank">{model_id}</a>'),) |>
+      relocate(taxon, .after = component) |>
+      relocate(model, .after = rl_score) |>
+      select(-taxon_str, -taxon_url, -model_url, -model_id) |>
+      datatable(
+        escape     = F,
+        class      = "display compact",
+        extensions = c("ColReorder", "KeyTable", "Responsive"),
+        options    = list(
+          colReorder = T,
+          keys       = T,
+          pageLength = 5,
+          lengthMenu = c(5, 50, 100),
+          # scrollX    = TRUE,
+          # scrollY    = "600px",
+          dom        = 'lfrtip') ) |>
+      formatPercentage(c(
+        "rl_score"), 0) |>
+      formatPercentage(c(
+        "avg_suit",
+        "pct_component"), 2) |>
+      formatSignif(c("area_km2"), 4)
   }, server = T)
 
   # * download_data ----
