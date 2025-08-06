@@ -86,8 +86,7 @@ server <- function(input, output, session) {
 
   observe({
     query <- parseQueryString(session$clientData$url_search)
-    if (!is.null(query$sp_key)) {
-      # updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = query$sp_key)
+    if (!is.null(query$mdl_seq)) {
       updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = query$mdl_seq)
     } else {
       updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = NULL)
