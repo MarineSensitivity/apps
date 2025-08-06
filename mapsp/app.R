@@ -1,7 +1,7 @@
 # packages ----
 librarian::shelf(
-  bslib, DBI, dplyr, duckdb, glue, here, htmltools, RColorBrewer, sf,
-  shiny, stringr, terra, tibble, tidyr)
+  bslib, DBI, dplyr, duckdb, glue, here, htmltools, RColorBrewer,
+  scales, sf, shiny, stringr, terra, tibble, tidyr)
 
 # variables ----
 verbose        <- T
@@ -29,29 +29,35 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
 # data prep ----
 r_cell <- rast(cell_tif)
 
-d_spp <- tbl(con_sdm, "model") |>
-  select(mdl_seq, taxa) |>
-  left_join(
-    tbl(con_sdm, "species") |>
-      select(taxa, sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id, redlist_code),
-    by = "taxa") |>
+d_spp <- tbl(con_sdm, "taxon") |>
+  filter(is_ok) |>
+  # select(mdl_seq, taxa) |>
+  # left_join(
+  #   tbl(con_sdm, "species") |>
+  #     select(taxa, sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id, redlist_code),
+  #   by = "taxa") |>
   collect() |>
   mutate(
-    key_url   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={sp_key}" target="_blank">{sp_key}</a>'),
+  #   key_url   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={sp_key}" target="_blank">{sp_key}</a>'),
     worms_url = ifelse(
       is.na(worms_id), NA,
-      glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms_id}" target="_blank">{worms_id}</a>')),
-    gbif_url  = ifelse(
-      is.na(gbif_id), NA,
-      glue('<a href="https://www.gbif.org/species/{gbif_id}" target="_blank">{gbif_id}</a>')))
+      glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms_id}" target="_blank">{worms_id}</a>'))) #,
+  #   gbif_url  = ifelse(
+  #     is.na(gbif_id), NA,
+  #     glue('<a href="https://www.gbif.org/species/{gbif_id}" target="_blank">{gbif_id}</a>')))
 
 spp_choices <- d_spp |>
-  arrange(sp_cat, scientific_name_dataset) |>
+  arrange(sp_cat, scientific_name) |>
   group_by(sp_cat) |>
   summarise(
-    layer = list(setNames(sp_key, scientific_name_dataset)),
+    layer = list(setNames(mdl_seq, scientific_name)),
     .groups = "drop") |>
   deframe()
+
+sel_sp_default <- d_spp |>
+  filter(
+    scientific_name == "Balaenoptera ricei") |>
+  pull(mdl_seq)
 
 # ui ----
 ui <- page_sidebar(
@@ -63,8 +69,10 @@ ui <- page_sidebar(
     selectizeInput(
       "sel_sp",
       "Select Species",
-      # choices = spp_choices), # TODO: show comparison of old to new species map
-      choices = NULL), # TODO: show comparison of old to new species map
+      choices = NULL),
+      # choices = spp_choices,
+      # selected = sel_sp_default),
+      # TODO: show comparison of old to new species map
     input_switch(
       "tgl_sphere", "Sphere", T ),
     input_dark_mode(
@@ -79,7 +87,8 @@ server <- function(input, output, session) {
   observe({
     query <- parseQueryString(session$clientData$url_search)
     if (!is.null(query$sp_key)) {
-      updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = query$sp_key)
+      # updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = query$sp_key)
+      updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = query$mdl_seq)
     } else {
       updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = NULL)
     }
@@ -89,57 +98,54 @@ server <- function(input, output, session) {
   output$species_info <- renderUI({
     req(input$sel_sp)
 
-    sp_key <- input$sel_sp
+    # sp_key <- input$sel_sp
+    mdl_seq <- input$sel_sp
     d_sp   <- d_spp |>
-      filter(sp_key == !!sp_key)
+      filter(mdl_seq == !!mdl_seq)
 
     with(
       d_sp,
       {tagList(
-        h5(scientific_name_dataset),
+        h5(scientific_name),
         tags$ul(
-          tags$li(HTML(glue("Scientific name: {scientific_name_dataset} ({key_url})"))),
-          tags$li(glue("Common name: {common_name_dataset}")),
+          # tags$li(HTML(glue("Scientific name: {scientific_name} ({key_url})"))),
+          tags$li(HTML(glue("Scientific name: {scientific_name}"))),
+          tags$li(glue("Common name: {common_name}")),
           tags$li(glue("Category: {sp_cat}")),
           tags$li(glue("Extinction risk (IUCN RedList): {redlist_code}")),
-          tags$li(HTML(glue("MarineSpecies.org: {worms_url}"))),
-          tags$li(HTML(glue("GBIF.org: {gbif_url}"))) ) ) } )
+          tags$li(HTML(glue("MarineSpecies.org: {worms_url}"))) #,
+          # tags$li(HTML(glue("GBIF.org: {gbif_url}")))
+          ) ) } )
     })
 
   # * get_rast ----
   get_rast <- reactive({
     req(input$sel_sp)
 
-    # debug: input$sel_sp = "ITS-Mam-180528" # blue whale
+    mdl_seq <- input$sel_sp
+    # mdl_seq = 18232 # Balaenoptera ricei
 
-    d <- tbl(con_sdm, "species") |>
-      select(sp_key, taxa) |>
-      filter(sp_key == !!input$sel_sp) |>
-      left_join(
-        tbl(con_sdm, "model") |>
-          select(taxa, mdl_seq),
-        by = "taxa") |>
-      left_join(
-        tbl(con_sdm, "model_cell") |>
-          select(mdl_seq, cell_id, value),
-        by = "mdl_seq") |>
+    d <- tbl(con_sdm, "model_cell") |>
+      filter(mdl_seq == !!mdl_seq) |>
       select(cell_id, value) |>
       collect()
 
     r <- init(r_cell[[1]], NA)
     r[d$cell_id] <- d$value
+    names(r) <- "value"
 
     r
   })
 
+  # * get_name ----
+  get_name <- reactive({
+    d_spp |>
+      filter(mdl_seq == input$sel_sp) |>
+      pull(scientific_name)
+  })
+
   # * map ----
   output$map <- renderMapboxgl({
-    # req(rx$sp_key)
-
-    # r      <- get_rast()
-    # n_cols <- 11
-    # cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-    # rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
     mapboxgl(
       style  = mapbox_style("dark"),
@@ -152,10 +158,6 @@ server <- function(input, output, session) {
       add_vector_source(
         id  = "pa_src",
         url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025") |>
-      # add_image_source(
-      #   id     = "r_src",
-      #   data   = r,
-      #   colors = cols_r) |>
       add_line_layer(
         id           = "pa_ln",
         source       = "pa_src",
@@ -171,17 +173,6 @@ server <- function(input, output, session) {
         line_opacity = 1,
         line_width   = 3,
         before_id    = "pa_ln") |>
-      # add_raster_layer(
-      #   id                = "r_lyr",
-      #   source            = "r_src",
-      #   raster_opacity    = 0.8,
-      #   raster_resampling = "nearest",
-      #   before_id         = "er_ln") |>
-      # mapgl::add_legend(
-      #   rx$layer,
-      #   values   = rng_r,
-      #   colors   = cols_r,
-      #   position = "bottom-right") |>
       add_fullscreen_control() |>
       add_navigation_control() |>
       add_scale_control() |>
@@ -205,15 +196,12 @@ server <- function(input, output, session) {
     rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
     # get species name for legend
-    sp_name <- d_spp |>
-      filter(sp_key == input$sel_sp) |>
-      pull(scientific_name_dataset) |>
-      first()
+    sp_name <- get_name()
 
     # update raster
     map_proxy |>
-      clear_layer("r_src") |>
       clear_layer("r_lyr") |>
+      clear_layer("r_src") |>
       clear_legend() |>
       add_image_source(
         id     = "r_src",
@@ -250,10 +238,12 @@ server <- function(input, output, session) {
 
       r <- get_rast()
       if (!is.null(r)) {
-        val <- terra::extract(r, pt)[1,1]
+        sp_name <- get_name()
+
+        val <- terra::extract(r, pt) |> pull(value)
         if (!is.na(val)) {
           showNotification(
-            glue("{input$sel_sp}: {round(val, 3)}"),
+            glue("{sp_name} ({round(click$lng, 3)}, {round(click$lat, 3)}): {round(val, 3)}"),
             duration = 3,
             type = "message" ) } } })
 }
