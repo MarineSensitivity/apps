@@ -762,7 +762,7 @@ server <- function(input, output, session) {
         model = glue('<a href="{model_url}" target="_blank">{model_id}</a>'),) |>
       relocate(taxon, .after = component) |>
       relocate(model, .after = rl_score) |>
-      select(-taxon_str, -taxon_url, -model_url, -model_id) |>
+      select(-taxon_id, -taxon_authority, -taxon_str, -taxon_url, -model_url, -model_id) |>
       datatable(
         escape     = F,
         class      = "display compact",
@@ -772,7 +772,7 @@ server <- function(input, output, session) {
           keys       = T,
           pageLength = 5,
           lengthMenu = c(5, 50, 100),
-          # scrollX    = TRUE,
+          scrollX    = TRUE,
           # scrollY    = "600px",
           dom        = 'lfrtip') ) |>
       formatPercentage(c(
