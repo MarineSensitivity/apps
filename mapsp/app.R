@@ -23,7 +23,7 @@ librarian::shelf(
   mapgl)
 
 # database ----
-source(here("../workflows/libs/db.R")) # con
+# source(here("../workflows/libs/db.R")) # con
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
 
 # data prep ----
@@ -31,13 +31,11 @@ r_cell <- rast(cell_tif)
 
 d_spp <- tbl(con_sdm, "taxon") |>
   filter(is_ok) |>
-  # select(mdl_seq, taxa) |>
-  # left_join(
-  #   tbl(con_sdm, "species") |>
-  #     select(taxa, sp_cat, sp_key, scientific_name_dataset, common_name_dataset, worms_id, gbif_id, redlist_code),
-  #   by = "taxa") |>
   collect() |>
   mutate(
+    lbl_cmn = ifelse(
+      !is.na(common_name), glue(" ({common_name})", .trim = F), ""),
+    label = glue("{sp_cat}: {scientific_name}{lbl_cmn}"),
   #   key_url   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={sp_key}" target="_blank">{sp_key}</a>'),
     worms_url = ifelse(
       is.na(worms_id), NA,
@@ -47,29 +45,28 @@ d_spp <- tbl(con_sdm, "taxon") |>
   #     glue('<a href="https://www.gbif.org/species/{gbif_id}" target="_blank">{gbif_id}</a>')))
 
 spp_choices <- d_spp |>
-  arrange(sp_cat, scientific_name) |>
+  arrange(sp_cat, label) |>
   group_by(sp_cat) |>
   summarise(
-    layer = list(setNames(mdl_seq, scientific_name)),
+    layer = list(setNames(mdl_seq, label)),
     .groups = "drop") |>
   deframe()
 
 sel_sp_default <- d_spp |>
-  filter(
-    scientific_name == "Balaenoptera ricei") |>
-  pull(mdl_seq)
+  filter(scientific_name == "Balaenoptera ricei") |> pull(mdl_seq)
 
 # ui ----
 ui <- page_sidebar(
   tags$head(tags$style(HTML(
     ".mapboxgl-popup-content{color:black;}" ))),
-  titlePanel("BOEM Marine Sensitivity - Species Viewer"),
+  titlePanel("BOEM Marine Sensitivity - Species Distribution"),
 
   sidebar = sidebar(
-    selectizeInput(
-      "sel_sp",
-      "Select Species",
-      choices = NULL),
+    open = F,
+    # selectizeInput(
+    #   "sel_sp",
+    #   "Select Species",
+    #   choices = NULL),
       # choices = spp_choices,
       # selected = sel_sp_default),
       # TODO: show comparison of old to new species map
@@ -78,6 +75,11 @@ ui <- page_sidebar(
     input_dark_mode(
       id = "tgl_dark", mode = "dark"),
     uiOutput("species_info")),
+  selectizeInput(
+    "sel_sp",
+    "Select Species",
+    choices = NULL,
+    width   = "100%"),
   card(
     mapboxglOutput("map") ) )
 
@@ -89,7 +91,8 @@ server <- function(input, output, session) {
     if (!is.null(query$mdl_seq)) {
       updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = query$mdl_seq)
     } else {
-      updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = NULL)
+      # updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = NULL)
+      updateSelectizeInput(session, 'sel_sp', choices = spp_choices, server = T, selected = sel_sp_default)
     }
   })
 
@@ -107,7 +110,6 @@ server <- function(input, output, session) {
       {tagList(
         h5(scientific_name),
         tags$ul(
-          # tags$li(HTML(glue("Scientific name: {scientific_name} ({key_url})"))),
           tags$li(HTML(glue("Scientific name: {scientific_name}"))),
           tags$li(glue("Common name: {common_name}")),
           tags$li(glue("Category: {sp_cat}")),
