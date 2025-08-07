@@ -523,6 +523,7 @@ server <- function(input, output, session) {
 
       sr_bb <- sr |>
         filter(subregion_key == !!sr_key) |>
+        st_shift_longitude() |>
         st_bbox() |> as.numeric()
 
       pa_keys <- d_sr_pa |>
