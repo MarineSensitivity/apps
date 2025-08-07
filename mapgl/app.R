@@ -34,6 +34,8 @@ pa_gpkg        <- glue("{dir_data}/derived/ply_planareas_2025.gpkg")
 er_gpkg        <- glue("{dir_data}/derived/ply_ecoregions_2025.gpkg")
 lyrs_csv       <- glue("{dir_data}/derived/layers.csv")
 metrics_tif    <- glue("{dir_data}/derived/r_metrics.tif")
+sr_gpkg        <- glue("{dir_data}/derived/ply_subregions_2025.gpkg")
+sr_pa_csv      <- glue("{dir_data}/derived/subregion_planareas.csv")
 # spp_global_csv <- glue("{dir_data}/derived/spp_global_cache.csv")
 
 if (verbose)
@@ -51,22 +53,36 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
 # dbDisconnect(con, shutdown = T); duckdb_shutdown(duckdb()); rm(con_sdm)
 
 # helper functions ----
-get_rast <- function(m_key){
+get_rast <- function(m_key, subregion_key = "USA"){
+  # m_key = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"
+  # subregion_key = "AK"
 
-  d <- dbGetQuery(con_sdm, glue("
-        SELECT
-          cm.cell_id,
-          cm.value
-        FROM cell_metric cm
-        WHERE cm.metric_seq = (
-          SELECT metric_seq
-          FROM metric
-          WHERE metric_key = '{m_key}' )" ))
-  stopifnot(sum(duplicated(d$cell_id)) == 0)
+  d <- tbl(con_sdm, "metric") |>             # get metric.metric_seq
+    filter(metric_key == !!m_key) |>         #   by input$sel_lyr
+    select(metric_seq) |>
+    inner_join(                              # get cell_metric.value
+      tbl(con_sdm, "cell_metric") |>
+        select(metric_seq, cell_id, value),
+      by = join_by(metric_seq)) |>
+    select(cell_id, value) |>
+    inner_join(                              # limit to zone
+      tbl(con_sdm, "zone") |>
+        filter(
+          fld   == "subregion_key",
+          value == !!subregion_key) |>       #   by input$sel_subregion
+        select(zone_seq) |>
+        inner_join(
+          tbl(con_sdm, "zone_cell") |>
+            select(zone_seq, cell_id),
+          by = join_by(zone_seq)) |>
+        select(cell_id),
+      by = join_by(cell_id)) |>
+    collect()
 
   r <- init(r_cell[[1]], NA)
   r[d$cell_id] <- d$value
 
+  r <- trim(r)  # plot(r)
   r
 }
 
@@ -183,6 +199,11 @@ plot_flower <- function(
 }
 
 # data prep ----
+sr_choices <- c(
+  "All USA"               = "USA",
+  "USA mainland"          = "L48",
+  "Alaska"                = "AK",
+  "USA mainland & Alaska" = "AKL48")
 
 # * check cached: cell_tif, pa|er_gpkg, metricss_tif, lyrs_csv ----
 v_f <- file_exists(c(cell_tif, pa_gpkg, er_gpkg, lyrs_csv, metrics_tif))
@@ -192,16 +213,10 @@ if (any(!v_f))
        {paste(basename(names(v_f)[v_f == F]), collapse = ', ').}
      Run calc_scores.qmd, chunk: update_cached_downloads."))
 
-# * d_spp_global ----
-d_spp_global <- tbl(con_sdm, "zone_taxon") |>
-  filter(
-    zone_fld   == "subregion_key",
-    zone_value == "USA") |>
-  collect()
-d_lyrs       <- read_csv(lyrs_csv)
 r_cell       <- rast(cell_tif)
 
 # * lyrs ----
+d_lyrs       <- read_csv(lyrs_csv)
 
 # confirm all layers available for both planareas and cell metrics
 lyrs_pa   <- dbListFields(con, "ply_planareas_2025")
@@ -224,6 +239,50 @@ lyr_choices <- d_lyrs |>
   deframe()
 
 lyr_default <- d_lyrs$lyr[1]
+
+# * planareas by subregion ----
+
+if (!file.exists(sr_pa_csv)) {
+  # calculate subregion - planarea cells
+  message(glue("Calculating subregion - planarea cells..."))
+
+  # subregion cells
+  tbl_sr_cell <- tbl(con_sdm, "zone") |>
+    filter(fld == "subregion_key") |>
+    select(sr_key = value, zone_seq) |>
+    inner_join(
+      tbl(con_sdm, "zone_cell") |>
+        select(zone_seq, cell_id),
+      by = join_by(zone_seq)) |>
+    select(sr_key, cell_id)
+
+  # planarea cells
+  tbl_pa_cell <- tbl(con_sdm, "zone") |>
+    filter(fld == "planarea_key") |>
+    select(pa_key = value, zone_seq) |>
+    inner_join(
+      tbl(con_sdm, "zone_cell") |>
+        select(zone_seq, cell_id),
+      by = join_by(zone_seq)) |>
+    select(pa_key, cell_id)
+
+  # planareas per subregion
+  d_sr_pa <- tbl_sr_cell |>
+    inner_join(
+      tbl_pa_cell, by = join_by(cell_id)) |>
+    group_by(sr_key, pa_key) |>
+    summarise(n_cells = n(), .groups = "drop") |>
+    arrange(sr_key, pa_key) |>
+    select(
+      subregion_key = sr_key, planarea_key = pa_key) |>
+    collect()
+
+  # write to csv
+  write_csv(d_sr_pa, sr_pa_csv)
+} else {
+  d_sr_pa <- read_csv(sr_pa_csv)
+}
+sr <- read_sf(sr_gpkg)
 
 # ui ----
 light <- bs_theme()
@@ -250,6 +309,10 @@ ui <- page_sidebar(
      }" ))),
   title = "BOEM Marine Sensitivity",
   sidebar = sidebar(
+    selectInput(
+      "sel_subregion",
+      "Study area",
+      choices = sr_choices),
     selectInput(
       "sel_unit",
       "Spatial units",
@@ -325,12 +388,15 @@ server <- function(input, output, session) {
 
   # * get_rast_rx ----
   get_rast_rx <- reactive({
-    req(input$sel_unit, input$sel_lyr)
+    req(input$sel_subregion, input$sel_unit, input$sel_lyr)
 
     if (input$sel_unit == "pa")
       return(NULL)
 
-    get_rast(input$sel_lyr)
+    if (verbose)
+      message(glue("get_rast_rx() input$sel_subregion: {input$sel_subregion}"))
+
+    get_rast(input$sel_lyr, subregion_key = input$sel_subregion)
   })
 
   # * map ----
@@ -394,12 +460,13 @@ server <- function(input, output, session) {
   })
 
   # * update map ----
-  observeEvent(c(input$sel_unit, input$sel_lyr), {
-    req(input$sel_unit, input$sel_lyr)
+  observeEvent(c(input$sel_subregion, input$sel_unit, input$sel_lyr), {
+    req(input$sel_subregion, input$sel_unit, input$sel_lyr)
 
     # explicitly reference either select to force update
-    unit <- input$sel_unit
-    lyr  <- input$sel_lyr
+    sr_key <- input$sel_subregion
+    unit   <- input$sel_unit
+    lyr    <- input$sel_lyr
 
     map_proxy <- mapboxgl_proxy("map")
 
@@ -418,8 +485,8 @@ server <- function(input, output, session) {
       # remove layers if exist
       map_proxy |>
         clear_layer("pa_lyr") |>
-        clear_layer("r_src") |>
         clear_layer("r_lyr") |>
+        clear_layer("r_src") |>
         clear_legend()
 
       # add raster source and layer
@@ -438,7 +505,10 @@ server <- function(input, output, session) {
           get_lyr_name(input$sel_lyr),
           values   = rng_r,
           colors   = cols_r,
-          position = "bottom-right")
+          position = "bottom-right") |>
+        mapgl::fit_bounds(
+          bbox    = as.numeric(st_bbox(r)),
+          animate = T)
 
       if (verbose)
         message(glue("update map cell - end"))
@@ -450,6 +520,14 @@ server <- function(input, output, session) {
         message(glue("update map pa - beg"))
 
       rx$clicked_cell <- NULL
+
+      sr_bb <- sr |>
+        filter(subregion_key == !!sr_key) |>
+        st_bbox() |> as.numeric()
+
+      pa_keys <- d_sr_pa |>
+        filter(subregion_key == !!sr_key) |>
+        pull(planarea_key)
 
       # show planning area layer
       n_cols <- 11
@@ -484,12 +562,15 @@ server <- function(input, output, session) {
           hover_options = list(
             fill_color = "purple",
             fill_opacity = 1 ),
-          before_id = "pa_ln" ) |>
+          before_id = "pa_ln",
+          filter = c("in", "planarea_key", pa_keys)) |>
         mapgl::add_legend(
           get_lyr_name(input$sel_lyr),
           values   = rng_pa,
           colors   = cols_pa,
-          position = "bottom-right")
+          position = "bottom-right") |>
+        mapgl::fit_bounds(sr_bb, animate = T)
+      # TODO: sr_bb is odd when AK included
 
       if (verbose)
         message(glue("update map pa - end"))
@@ -650,11 +731,20 @@ server <- function(input, output, session) {
   # * get_species_table ----
   get_species_table <- reactive({
 
-    # ** global ----
+    # ** subregion ----
     if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa)){
-      rx$species_table_header   <- "Species across USA"
-      rx$species_table_filename <- "species_usa"
-      d_spp <- d_spp_global
+
+      sr_key <- input$sel_subregion
+      sr_lbl <- names(sr_choices)[sr_choices == sr_key]
+
+      rx$species_table_header   <- glue("Species in {sr_lbl}")
+      rx$species_table_filename <- glue("species_{sr_key}")
+
+      d_spp <- tbl(con_sdm, "zone_taxon") |>
+        filter(
+          zone_fld   == "subregion_key",
+          zone_value == sr_key) |>
+        collect()
     }
 
     # ** cell ----
