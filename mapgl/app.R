@@ -936,8 +936,9 @@ server <- function(input, output, session) {
         escape        = F,
         rownames      = F,
         fillContainer = T,
+        filter        = "top",
         # style         = "auto",  # "bootstrap4",
-        style         = "bootstrap4",  # "auto",
+        # style         = "bootstrap4",  # "auto",
         class         = "display compact",
         extensions = c("ColReorder", "KeyTable", "Responsive"),
         options    = list(
