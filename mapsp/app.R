@@ -33,6 +33,11 @@ d_spp <- tbl(con_sdm, "taxon") |>
   filter(is_ok) |>
   collect() |>
   mutate(
+    common_name = case_match(
+      scientific_name,
+      "Eubalaena glacialis"    ~ "North Atlantic right whale",  # OLD: black right whale
+      "Megaptera novaeangliae" ~ "humpback whale",              # OLD: hump
+      .default = common_name),
     lbl_cmn = ifelse(
       !is.na(common_name), glue(" ({common_name})", .trim = F), ""),
     label = glue("{sp_cat}: {scientific_name}{lbl_cmn}"),
