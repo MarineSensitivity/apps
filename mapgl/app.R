@@ -893,7 +893,12 @@ server <- function(input, output, session) {
         taxon_url = ifelse(
           taxon_authority == "botw",
           "https://birdsoftheworld.org",
-          glue("https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}"))) |>
+          glue("https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}")),
+        sp_common = case_match(
+          sp_scientific,
+          "Eubalaena glacialis"    ~ "North Atlantic right whale",  # OLD: black right whale
+          "Megaptera novaeangliae" ~ "humpback whale",              # OLD: hump
+          .default = sp_common) ) |>
       # TODO: construct URL
       # Search: "Limosa lapponica" taxon_id: 22693158
       # at https://birdsoftheworld.org/
