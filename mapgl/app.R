@@ -12,8 +12,10 @@
 
 # packages ----
 librarian::shelf(
-  bsicons, bslib, DBI, dplyr, duckdb, DT, fs, ggiraph, ggplot2, glue, here, purrr,
-  RColorBrewer, readr, scales, sf, shiny, stringr, terra, tibble, tidyr)
+  bsicons, bslib, DBI, dplyr, duckdb, DT, fs, ggiraph, ggplot2, glue, here,
+  yogevherz/plotme, plotly, purrr, RColorBrewer, readr, scales, sf, shiny,
+  stringr, terra, tibble, tidyr,
+  quiet = T)
 options(readr.show_col_types = F)
 
 # profile performance of app:
@@ -40,6 +42,8 @@ metrics_tif    <- glue("{dir_data}/derived/r_metrics.tif")
 sr_gpkg        <- glue("{dir_data}/derived/ply_subregions_2025.gpkg")
 sr_pa_csv      <- glue("{dir_data}/derived/subregion_planareas.csv")
 init_tif       <- here("mapgl/cache/r_init.tif")
+taxonomy_csv   <- here("../workflows/data/taxonomic_hierarchy_worms_2025-10-30.csv")
+
 # spp_global_csv <- glue("{dir_data}/derived/spp_global_cache.csv")
 
 if (verbose)
@@ -311,6 +315,9 @@ if (!file_exists(init_tif)){
 }
 r_init <- rast(init_tif)
 
+# * d_taxonomy ----
+d_taxonomy <- read_csv(taxonomy_csv, guess_max = Inf)
+
 # ui ----
 light <- bs_theme()
 # dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
@@ -388,7 +395,15 @@ ui <- page_sidebar(
           class = "d-flex justify-content-between align-items-center",
           downloadButton("download_tbl", "Download CSV", class = "btn-sm")),
         card_body(
-          DTOutput("spp_tbl") ) ) ) ) )
+          navset_card_tab(
+            nav_panel(
+              "Table",
+              DTOutput("spp_tbl") ),
+            nav_panel(
+              "Composition",
+              "NOTE: The 'bird' component has yet to be added to this visualization.",
+              plotlyOutput("spp_comp")
+              )))))))
 
 # server ----
 server <- function(input, output, session) {
@@ -969,5 +984,41 @@ server <- function(input, output, session) {
     content = function(file) {
       req(rx$spp_tbl_hdr, rx$spp_tbl)
       write_csv(rx$spp_tbl, file) } )
+
+  # * spp_comp ----
+  output$spp_comp <- renderPlotly({
+
+    # TODO:
+    # - [ ] birds
+    # - [ ] ranks_with_variety
+    d <- get_spp_tbl() |>
+      filter(taxon_authority == "worms") |>
+      inner_join(
+        d_taxonomy |>
+          select(-component),
+        by = join_by(taxon_id == species_id)) |>
+      mutate(
+        name = glue("{scientific} ({common}; worms:{taxon_id})"),
+        n    = 1) |>
+      select(component, Kingdom, Phylum, Class, Order, Family, Genus, name, n)
+
+    p <- count_to_treemap(d)
+
+    theme <- bs_current_theme()
+    if(input$tgl_dark == "dark") {
+      bg <- bs_get_variables(theme, "body-bg-dark")[["body-bg-dark"]]
+      fg <- bs_get_variables(theme, "body-color-dark")[["body-color-dark"]]
+    } else {
+      bg <- bs_get_variables(theme, "body-bg")[["body-bg"]]
+      fg <- bs_get_variables(theme, "body-color")[["body-color"]]
+    }
+
+    p |>
+      layout(
+        font = list(
+          color = fg),
+        plot_bgcolor  = bg,
+        paper_bgcolor = bg)
+  })
 }
 shinyApp(ui, server)
