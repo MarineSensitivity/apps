@@ -34,7 +34,7 @@ dir_data       <- ifelse(
   "~/My Drive/projects/msens/data")
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif       <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-sdm_dd         <- glue("{dir_data}/derived/sdm.duckdb")
+sdm_db         <- glue("{dir_data}/derived/sdm.duckdb")
 pa_gpkg        <- glue("{dir_data}/derived/ply_planareas_2025.gpkg")
 er_gpkg        <- glue("{dir_data}/derived/ply_ecoregions_2025.gpkg")
 lyrs_csv       <- glue("{dir_data}/derived/layers.csv")
@@ -55,7 +55,7 @@ librarian::shelf(
   mapgl)
 
 # database ----
-con_sdm <- dbConnect(duckdb(), dbdir = sdm_dd, read_only = T)
+con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 # dbListTables(con_sdm)
 # duckdb_shutdown(duckdb()); rm(con_sdm)
 
@@ -632,7 +632,7 @@ server <- function(input, output, session) {
           filter = pa_filter) |>
         mapgl::add_legend(
           get_lyr_name(input$sel_lyr),
-          values   = rng_pa,
+          values   = round(rng_pa, 1),
           colors   = cols_pa,
           position = "bottom-right") |>
         mapgl::fit_bounds(sr_bb, animate = T)

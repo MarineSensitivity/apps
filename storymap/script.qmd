@@ -1,0 +1,27 @@
+---
+title: "script"
+format: html
+embed-resources: true
+---
+
+## Welcome! {#welcome}
+
+Welcome to the _**Storymap**_ that explains BOEM's **Marine Sensitivity Toolkit**.
+
+Simply scroll down to continue. You can always zoom, pan and click on
+the map as you go.
+
+## Scores by Cell {#scores_cell}
+
+Let's start by looking at the overall **scores**. 
+Note that:
+
+- The **study area** is the entire EEZ (exclusive economic zone) of the United States, including Alaska, Hawaii and the US territories (Puerto Rico and Pacific Island Territories).
+- The **values** range from 0 to 89 (blue to red), per the legend in the lower right.
+- The **cells** are 0.05° decimal degrees, or roughly 4 km (average of 5 km in the lower 48 states, and 3.2 km in Alaska).
+
+## Scores by Planning Area {#scores_pa}
+
+Alternatively, you can view by BOEM Planning Area, which aggregates the cell scores to the planning area level.
+
+In the rest of the Storymap, we'll learn how these scores get calculated...
