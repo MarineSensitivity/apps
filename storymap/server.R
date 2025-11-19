@@ -15,11 +15,11 @@ function(input, output, session) {
         id     = "r_src",
         data   = r0,
         colors = cols_r) |>
-      add_fullscreen_control() |>
       add_navigation_control() |>
-      add_scale_control() |>
-      # add_layers_control() |>
-      add_geocoder_control(placeholder = "Go to location")
+      add_scale_control() # |>
+    # add_fullscreen_control() |>
+    # add_layers_control() |>
+      # add_geocoder_control(placeholder = "Go to location")
   })
 
   # on: scores_cell ----
