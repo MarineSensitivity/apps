@@ -2,7 +2,7 @@
 
 # * libraries ----
 librarian::shelf(
-  dplyr, duckdb, glue, here, htmltools, litedown, readr, sf, shiny, terra)
+  bsicons, dplyr, duckdb, glue, here, htmltools, litedown, readr, sf, shiny, terra)
 options(readr.show_col_types = F)
 
 # * raster ----
