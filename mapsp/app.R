@@ -104,7 +104,7 @@ ui <- page_sidebar(
   tags$head(tags$style(HTML(
     ".mapboxgl-popup-content{color:black;}"
   ))),
-  titlePanel("BOEM Marine Sensitivity - Species Distribution"),
+  titlePanel("BOEM Marine Sensitivity - Species Distribution (v2)"),
 
   sidebar = sidebar(
     open = F,

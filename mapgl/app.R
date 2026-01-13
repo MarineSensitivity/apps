@@ -529,7 +529,7 @@ ui <- page_sidebar(
        height: 300px;
      }"
   ))),
-  title = "BOEM Marine Sensitivity",
+  title = "BOEM Marine Sensitivity (v2)",
   sidebar = sidebar(
     selectInput(
       "sel_subregion",
