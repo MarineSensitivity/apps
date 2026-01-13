@@ -42,7 +42,7 @@ dir_data <- ifelse(
 )
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-sdm_db <- glue("{dir_data}/derived/sdm.duckdb")
+sdm_db <- glue("{dir_data}/derived/sdm_2026.duckdb")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
 librarian::shelf(
@@ -240,14 +240,26 @@ server <- function(input, output, session) {
         id = "er_src",
         url = "https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025"
       ) |>
+      # add_vector_source(
+      #   id = "pa_src",
+      #   url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025"
+      # ) |>
       add_vector_source(
-        id = "pa_src",
-        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025"
+        id = "pra_src",
+        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_programareas_2026"
       ) |>
+      # add_line_layer(
+      #   id = "pa_ln",
+      #   source = "pa_src",
+      #   source_layer = "public.ply_planareas_2025",
+      #   line_color = "white",
+      #   line_opacity = 1,
+      #   line_width = 1
+      # ) |>
       add_line_layer(
-        id = "pa_ln",
-        source = "pa_src",
-        source_layer = "public.ply_planareas_2025",
+        id = "pra_ln",
+        source = "pra_src",
+        source_layer = "public.ply_programareas_2026",
         line_color = "white",
         line_opacity = 1,
         line_width = 1
@@ -259,13 +271,18 @@ server <- function(input, output, session) {
         line_color = "black",
         line_opacity = 1,
         line_width = 3,
-        before_id = "pa_ln"
+        before_id = "pra_ln"
       ) |>
       add_fullscreen_control() |>
       add_navigation_control() |>
       add_scale_control() |>
       add_geocoder_control() |>
-      add_globe_minimap(position = "top-left") # |>
+      add_globe_minimap(position = "bottom-left") |>
+      add_layers_control(
+        layers = list(
+          "Program Area outlines" = "pra_ln",
+          "Ecoregions outlines"   = "er_ln",
+          "Raster cell values"    = "r_lyr"))
     # add_fill_layer(
     #   id           = "er_ply",
     #   source       = "er_src",
@@ -326,7 +343,7 @@ server <- function(input, output, session) {
           default = "#cccccc"
         ),
         fill_opacity = 0.5,
-        before_id = "pa_ln"
+        before_id = "pra_ln"
       )
   }
 
@@ -375,7 +392,13 @@ server <- function(input, output, session) {
       fit_bounds(
         bbox = trim(r) |> st_bbox() |> as.numeric(),
         animate = T
-      )
+      ) |>
+      clear_controls("layers") |>
+      add_layers_control(
+        layers = list(
+          "Program Area outlines" = "pra_ln",
+          "Ecoregion outlines"    = "er_ln",
+          "Raster cell values"    = "r_lyr"))
 
     # Add ecoregion fill layer if er_clr parameter was provided
     er_clr <- rx_er_clr()
