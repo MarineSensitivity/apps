@@ -62,9 +62,11 @@ d_spp <- tbl(con_sdm, "taxon") |>
   collect() |>
   mutate(
     common_name = case_match(
+      # TODO: update common names in DB
       scientific_name,
-      "Eubalaena glacialis" ~ "North Atlantic right whale", # OLD: black right whale
-      "Megaptera novaeangliae" ~ "humpback whale", # OLD: hump
+      "Eubalaena glacialis"    ~ "North Atlantic right whale", # OLD: black right whale
+      "Megaptera novaeangliae" ~ "humpback whale",             # OLD: hump
+      "Balaena mysticetus"     ~ "bowhead whale",              # OLD: Arctic right whale
       .default = common_name
     ),
     lbl_cmn = ifelse(

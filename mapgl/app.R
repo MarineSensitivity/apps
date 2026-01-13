@@ -1395,9 +1395,11 @@ server <- function(input, output, session) {
           )
         ),
         sp_common = case_match(
+          # TODO: update common names in DB
           sp_scientific,
-          "Eubalaena glacialis" ~ "North Atlantic right whale", # OLD: black right whale
-          "Megaptera novaeangliae" ~ "humpback whale", # OLD: hump
+          "Eubalaena glacialis"    ~ "North Atlantic right whale", # OLD: black right whale
+          "Megaptera novaeangliae" ~ "humpback whale",             # OLD: hump
+          "Balaena mysticetus"     ~ "bowhead whale",              # OLD: Arctic right whale
           .default = sp_common
         )
       ) |>
