@@ -1384,7 +1384,7 @@ server <- function(input, output, session) {
     d_spp |>
       mutate(
         model_url = glue(
-          "https://shiny.marinesensitivity.org/mapsp/?mdl_seq={mdl_seq}"
+          "https://shiny.marinesensitivity.org/mapsp2/?mdl_seq={mdl_seq}"
         ),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(
