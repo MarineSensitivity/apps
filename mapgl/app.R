@@ -913,6 +913,7 @@ server <- function(input, output, session) {
           sp_scientific,
           "Eubalaena glacialis"    ~ "North Atlantic right whale",  # OLD: black right whale
           "Megaptera novaeangliae" ~ "humpback whale",              # OLD: hump
+          "Balaena mysticetus"     ~ "bowhead whale",               # OLD: Arctic right whale
           .default = sp_common) ) |>
       # TODO: construct URL
       # Search: "Limosa lapponica" taxon_id: 22693158
