@@ -236,26 +236,77 @@ server <- function(input, output, session) {
   output$species_info <- renderUI({
     req(input$sel_sp)
 
-    # sp_key <- input$sel_sp
     mdl_seq <- input$sel_sp
     d_sp <- d_spp |>
       filter(mdl_seq == !!mdl_seq)
 
-    with(
-      d_sp,
-      {
-        tagList(
-          h5(scientific_name),
-          tags$ul(
-            tags$li(HTML(glue("Scientific name: {scientific_name}"))),
-            tags$li(glue("Common name: {common_name}")),
-            tags$li(glue("Category: {sp_cat}")),
-            tags$li(glue("Extinction risk (IUCN RedList): {redlist_code}")),
-            tags$li(HTML(glue("MarineSpecies.org: {worms_url}"))) #,
-            # tags$li(HTML(glue("GBIF.org: {gbif_url}")))
-          )
+    # model display names
+    mdl_names <- c(
+      "am_0.05"  = "AquaMaps SDM",
+      "ch_nmfs"  = "NMFS Critical Habitat",
+      "ch_fws"   = "FWS Critical Habitat",
+      "rng_fws"  = "FWS Range",
+      "bl"       = "BirdLife",
+      "rng_iucn" = "IUCN Range")
+
+    # determine which models are present
+    has_iucn <- !is.na(d_sp$rng_iucn)
+    n_ds     <- d_sp$n_ds
+
+    # helper to create model link
+    make_link <- function(ds_key) {
+      ds_mdl_seq <- d_sp[[ds_key]]
+      if (is.na(ds_mdl_seq)) return(NULL)
+      HTML(glue('<a href="?mdl_seq={ds_mdl_seq}">{mdl_names[ds_key]}</a>'))
+    }
+
+    # value models (all except rng_iucn which is mask-only)
+    ds_keys_values <- c("am_0.05", "ch_nmfs", "ch_fws", "rng_fws", "bl")
+    value_models <- ds_keys_values[!is.na(sapply(ds_keys_values, function(k) d_sp[[k]]))]
+
+    # mask models (only relevant when has_iucn)
+    ds_keys_mask <- c("rng_iucn", "ch_nmfs", "ch_fws", "rng_fws")
+    mask_models  <- ds_keys_mask[!is.na(sapply(ds_keys_mask, function(k) d_sp[[k]]))]
+
+    # build values section
+    if (length(value_models) == 1 && !has_iucn) {
+      # single model, no merge needed
+      values_ui <- tags$ul(tags$li(make_link(value_models[1])))
+    } else {
+      # merged model with sub-items
+      merge_label <- if (has_iucn) "Merged Model (IUCN masked)" else "Merged Model"
+      sub_items <- lapply(value_models, function(k) tags$li(make_link(k)))
+      values_ui <- tags$ul(
+        tags$li(
+          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}"><b>{merge_label}</b></a>')),
+          tags$ul(sub_items)
         )
-      }
+      )
+    }
+
+    # build mask section (only if has_iucn)
+    mask_ui <- if (has_iucn) {
+      mask_items <- lapply(mask_models, function(k) {
+        suffix <- if (k == "rng_iucn") " (required)" else ""
+        tags$li(make_link(k), suffix)
+      })
+      tagList(
+        h6("Mask (to constrain extent)"),
+        tags$ul(mask_items)
+      )
+    } else NULL
+
+    tagList(
+      h5(d_sp$scientific_name),
+      tags$ul(
+        tags$li(glue("Common name: {d_sp$common_name}")),
+        tags$li(glue("Category: {d_sp$sp_cat}")),
+        tags$li(glue("IUCN RedList: {d_sp$redlist_code}")),
+        tags$li(HTML(glue("WoRMS: {d_sp$worms_url}")))
+      ),
+      h6("Values"),
+      values_ui,
+      mask_ui
     )
   })
 
