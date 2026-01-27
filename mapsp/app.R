@@ -275,10 +275,11 @@ server <- function(input, output, session) {
     } else {
       # merged model with sub-items
       merge_label <- if (has_iucn) "Merged Model (IUCN masked)" else "Merged Model"
+      # merge_label <- if (has_iucn) "Merged Model"
       sub_items <- lapply(value_models, function(k) tags$li(make_link(k)))
       values_ui <- tags$ul(
         tags$li(
-          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}"><b>{merge_label}</b></a>')),
+          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}"><b>{merge_label}</b></a><br><em>(maximum of):</em>')),
           tags$ul(sub_items)
         )
       )
@@ -287,11 +288,11 @@ server <- function(input, output, session) {
     # build mask section (only if has_iucn)
     mask_ui <- if (has_iucn) {
       mask_items <- lapply(mask_models, function(k) {
-        suffix <- if (k == "rng_iucn") " (required)" else ""
+        suffix <- if (k == "rng_iucn") em(" (required)") else ""
         tags$li(make_link(k), suffix)
       })
       tagList(
-        h6("Mask (to constrain extent)"),
+        span(strong("Mask"), br(), em("(to constrain extent)"),":"),
         tags$ul(mask_items)
       )
     } else NULL
@@ -304,7 +305,7 @@ server <- function(input, output, session) {
         tags$li(glue("IUCN RedList: {d_sp$redlist_code}")),
         tags$li(HTML(glue("WoRMS: {d_sp$worms_url}")))
       ),
-      h6("Values"),
+      span(strong("Values"),":"),
       values_ui,
       mask_ui
     )
