@@ -50,6 +50,51 @@ librarian::shelf(
   quiet = T
 )
 
+# helper functions ----
+
+#' Add raster with fixed color range to mapgl map
+#'
+#' Colors are drawn from a fixed scale but truncated to the data's actual range,
+#' ensuring consistent color mapping across multiple rasters.
+#'
+#' @param map A mapgl map object
+#' @param r A SpatRaster
+#' @param id Layer ID
+#' @param fixed_range Numeric vector c(min, max) defining the full color scale
+#' @param colors Color palette vector spanning the full fixed_range
+#' @param ... Additional arguments passed to add_raster_layer()
+add_fixed_range_raster <- function(
+  map,
+  data,
+  id,
+  fixed_range = c(1, 100),
+  colors = viridisLite::viridis(256),
+  ...) {
+
+  # Get raster data range, test if within fixed range
+  dr <- terra::minmax(data) |> as.numeric()
+  stopifnot(dr[1] >= fixed_range[1] & dr[2] <= fixed_range[2])
+
+  # Expand colors to full fixed range, then truncate to data range
+  n_clrs  <- diff(fixed_range) + 1
+  clrs    <- colorRampPalette(colors)(n_clrs)
+  clrs_dr <- clrs[seq.int(dr[1], dr[2])]
+
+  map |>
+    add_image_source(
+      id     = paste0(id, "_source"),
+      data   = terra::clamp(data, lower = fixed_range[1], upper = fixed_range[2], values = TRUE),
+      colors = clrs_dr) |>
+    add_raster_layer(
+      id     = id,
+      source = paste0(id, "_source"),
+      ...)
+}
+# Usage
+# maplibre() |>
+#   add_fixed_range_raster(raster1, "layer1", range = c(1, 100),  colors = viridisLite::viridis(256), raster_opacity = 0.7)
+
+
 # database ----
 # source(here("../workflows/libs/db.R")) # con
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
@@ -554,7 +599,8 @@ server <- function(input, output, session) {
 
     n_cols <- 11
     cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-    rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
+    # rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
+    rng_r  <- c(1,100)
 
     # get species name and layer name for legend
     sp_name    <- get_name()
@@ -566,18 +612,26 @@ server <- function(input, output, session) {
       clear_layer("r_lyr") |>
       clear_layer("r_src") |>
       clear_legend() |>
-      add_image_source(
-        id     = "r_src",
+      # add_image_source(
+      #   id     = "r_src",
+      #   data   = r,
+      #   colors = cols_r
+      # ) |>
+      # add_raster_layer(
+      #   id                = "r_lyr",
+      #   source            = "r_src",
+      #   raster_opacity    = 0.8,
+      #   raster_resampling = "nearest",
+      #   before_id         = "er_ln"
+      # ) |>
+      # add_fixed_range_raster() ----
+      add_fixed_range_raster(
         data   = r,
-        colors = cols_r
-      ) |>
-      add_raster_layer(
-        id                = "r_lyr",
-        source            = "r_src",
+        id     = "r_lyr",
+        colors = cols_r,
         raster_opacity    = 0.8,
         raster_resampling = "nearest",
-        before_id         = "er_ln"
-      ) |>
+        before_id         = "er_ln") |>
       add_legend(
         title_str,
         values   = rng_r,
@@ -631,13 +685,16 @@ server <- function(input, output, session) {
 
     cell_id <- extracted$cell
     val     <- extracted$value
+    if (verbose)
+      message("map_click: cell_id=", cell_id, ", val=", val)
 
     if (is.na(val) || is.na(cell_id)) return()
 
     # calculate background color based on value
     n_cols <- 11
     cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-    rng_r  <- minmax(r) |> as.numeric()
+    # rng_r  <- minmax(r) |> as.numeric()
+    rng_r  <- c(1,100)
 
     # scale value to color index
     if (rng_r[2] > rng_r[1]) {
