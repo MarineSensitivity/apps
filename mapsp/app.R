@@ -178,8 +178,9 @@ server <- function(input, output, session) {
   # rx_er_clr ----
   rx_er_clr <- reactiveVal(NULL)
   # rx_ds_layer: store ds_layer from URL to apply after species loads
-
   rx_ds_layer <- reactiveVal(NULL)
+  # rx_marker_clicked: flag to prevent map_click from recreating marker when marker is clicked
+  rx_marker_clicked <- reactiveVal(FALSE)
 
   # url parameters ----
   observe({
@@ -249,19 +250,28 @@ server <- function(input, output, session) {
       "bl"       = "BirdLife",
       "rng_iucn" = "IUCN Range")
 
+    # model explanations
+    mdl_info = c(
+      "ch_nmfs"  = "EN:90, TN:70",
+      "rng_iucn" = "CR:100, EN:80, VU:60, NT:40, LC:20, DD:20")
+
     # determine which models are present
     has_iucn <- !is.na(d_sp$rng_iucn)
     n_ds     <- d_sp$n_ds
 
     # helper to create model link
-    make_link <- function(ds_key) {
+    make_link <- function(ds_key, type = "value") {
       ds_mdl_seq <- d_sp[[ds_key]]
       if (is.na(ds_mdl_seq)) return(NULL)
-      HTML(glue('<a href="?mdl_seq={ds_mdl_seq}">{mdl_names[ds_key]}</a>'))
+      str_info = ifelse(
+        type == "value",
+        glue("<br><em>({mdl_info[ds_key]})</em>"),
+        "")
+      HTML(glue('<a href="?mdl_seq={ds_mdl_seq}">{mdl_names[ds_key]}</a>{str_info}'))
     }
 
     # value models (all except rng_iucn which is mask-only)
-    ds_keys_values <- c("am_0.05", "ch_nmfs", "ch_fws", "rng_fws", "bl")
+    ds_keys_values <- c("am_0.05", "ch_nmfs", "ch_fws", "rng_fws", "bl", "rng_iucn")
     value_models <- ds_keys_values[!is.na(sapply(ds_keys_values, function(k) d_sp[[k]]))]
 
     # mask models (only relevant when has_iucn)
@@ -289,7 +299,7 @@ server <- function(input, output, session) {
     mask_ui <- if (has_iucn) {
       mask_items <- lapply(mask_models, function(k) {
         suffix <- if (k == "rng_iucn") em(" (required)") else ""
-        tags$li(make_link(k), suffix)
+        tags$li(make_link(k, type = "mask"), suffix)
       })
       tagList(
         span(strong("Mask"), br(), em("(to constrain extent)"),":"),
@@ -521,6 +531,9 @@ server <- function(input, output, session) {
 
     map_proxy <- mapboxgl_proxy("map")
 
+    # clear existing marker when species/layer changes
+    map_proxy |> clear_markers()
+
     r <- get_rast()
 
     # handle case when layer not available
@@ -553,11 +566,11 @@ server <- function(input, output, session) {
         colors = cols_r
       ) |>
       add_raster_layer(
-        id               = "r_lyr",
-        source           = "r_src",
-        raster_opacity   = 0.8,
+        id                = "r_lyr",
+        source            = "r_src",
+        raster_opacity    = 0.8,
         raster_resampling = "nearest",
-        before_id        = "er_ln"
+        before_id         = "er_ln"
       ) |>
       add_legend(
         title_str,
@@ -588,7 +601,16 @@ server <- function(input, output, session) {
   observeEvent(input$map_click, {
     click <- input$map_click
 
-    # extract cell value at clicked location
+    # skip if marker was clicked (allow popup to show)
+    if (rx_marker_clicked()) {
+      rx_marker_clicked(FALSE)
+      return()
+    }
+
+    r <- get_rast()
+    if (is.null(r)) return()
+
+    # create point and handle longitude wrapping
     pt <- vect(
       data.frame(x = click$lng, y = click$lat),
       geom = c("x", "y"),
@@ -597,21 +619,63 @@ server <- function(input, output, session) {
       st_as_sf() |>
       st_shift_longitude()
 
-    r <- get_rast()
-    if (!is.null(r)) {
-      sp_name <- get_name()
+    # extract value and cell info
+    extracted <- terra::extract(r, pt, cells = TRUE)
+    if (nrow(extracted) == 0) return()
 
-      val <- terra::extract(r, pt) |> pull(value)
-      if (!is.na(val)) {
-        showNotification(
-          glue(
-            "{sp_name} ({round(click$lng, 3)}, {round(click$lat, 3)}): {round(val, 3)}"
-          ),
-          duration = 3,
-          type = "message"
-        )
-      }
+    cell_id <- extracted$cell
+    val     <- extracted$value
+
+    if (is.na(val) || is.na(cell_id)) return()
+
+    # calculate background color based on value
+    n_cols <- 11
+    cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+    rng_r  <- minmax(r) |> as.numeric()
+
+    # scale value to color index
+    if (rng_r[2] > rng_r[1]) {
+      val_scaled <- (val - rng_r[1]) / (rng_r[2] - rng_r[1])
+    } else {
+      val_scaled <- 0.5
     }
+    val_scaled <- max(0, min(1, val_scaled))  # clamp to [0, 1]
+    col_idx    <- round(val_scaled * (n_cols - 1)) + 1
+    bg_color   <- cols_r[col_idx]
+
+    # calculate text color for contrast (luminance-based)
+    rgb_vals  <- col2rgb(bg_color)
+    luminance <- (0.299 * rgb_vals[1] + 0.587 * rgb_vals[2] + 0.114 * rgb_vals[3]) / 255
+    txt_color <- ifelse(luminance > 0.5, "black", "white")
+
+    sp_name <- get_name()
+
+    popup_html <- glue(
+      '<div style="background-color: {bg_color}; color: {txt_color}; ',
+      'padding: 8px; border-radius: 4px;">',
+      '<b>{sp_name}</b><br>',
+      'Cell ID: {cell_id}<br>',
+      'Lon: {round(click$lng, 3)}<br>',
+      'Lat: {round(click$lat, 3)}<br>',
+      'Value: {round(val, 3)}',
+      '</div>'
+    )
+
+    mapboxgl_proxy("map") |>
+      clear_markers() |>
+      add_markers(
+        data      = c(click$lng, click$lat),
+        popup     = popup_html,
+        marker_id = "click_marker",
+        color     = bg_color
+      )
+  })
+
+  # marker_click: set flag so map_click doesn't recreate marker ----
+
+  observeEvent(input$map_marker_click_marker, {
+    # browser()
+    rx_marker_clicked(TRUE)
   })
 }
 
