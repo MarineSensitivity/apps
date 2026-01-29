@@ -63,7 +63,7 @@ d_spp <- tbl(con_sdm, "taxon") |>
   select(
     taxon_id, scientific_name, common_name, sp_cat, n_ds, mdl_seq,
     `am_0.05`, ch_nmfs, ch_fws, rng_fws, bl, rng_iucn,
-    worms_id, redlist_code) |>
+    worms_id, redlist_code, esa_code) |>
   collect() |>
   mutate(
     common_name = case_match(
@@ -312,6 +312,7 @@ server <- function(input, output, session) {
       tags$ul(
         tags$li(glue("Common name: {d_sp$common_name}")),
         tags$li(glue("Category: {d_sp$sp_cat}")),
+        tags$li(glue("ESA Listing: {d_sp$esa_code}")),
         tags$li(glue("IUCN RedList: {d_sp$redlist_code}")),
         tags$li(HTML(glue("WoRMS: {d_sp$worms_url}")))
       ),
