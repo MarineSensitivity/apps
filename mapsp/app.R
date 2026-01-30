@@ -82,12 +82,12 @@ add_fixed_range_raster <- function(
 
   map |>
     add_image_source(
-      id     = paste0(id, "_source"),
+      id     = paste0(id, "_src"),
       data   = terra::clamp(data, lower = fixed_range[1], upper = fixed_range[2], values = TRUE),
       colors = clrs_dr) |>
     add_raster_layer(
       id     = id,
-      source = paste0(id, "_source"),
+      source = paste0(id, "_src"),
       ...)
 }
 # Usage
@@ -168,10 +168,15 @@ mdl_seq_lookup <- d_spp |>
 
 # ui ----
 ui <- page_sidebar(
-  tags$head(tags$style(HTML(
-    ".mapboxgl-popup-content{color:black;}"
-  ))),
-  titlePanel("BOEM Marine Sensitivity - Species Distribution (v2)"),
+  tags$head(
+    tags$style(HTML(".mapboxgl-popup-content{color:black;}")),
+    tags$script(HTML("
+      Shiny.addCustomMessageHandler('updateTitle', function(title) {
+        document.title = title;
+      });
+    "))
+  ),
+  titlePanel("BOEM Marine Sensitivity (v2) species distribution"),
 
   sidebar = sidebar(
     open = F,
@@ -226,9 +231,15 @@ server <- function(input, output, session) {
   rx_ds_layer <- reactiveVal(NULL)
   # rx_marker_clicked: flag to prevent map_click from recreating marker when marker is clicked
   rx_marker_clicked <- reactiveVal(FALSE)
+  # rx_url_initialized: flag to prevent re-processing URL after updateQueryString
+
+  rx_url_initialized <- reactiveVal(FALSE)
 
   # url parameters ----
   observe({
+    # only process URL params on initial load, not after updateQueryString
+    if (rx_url_initialized()) return()
+
     query <- parseQueryString(session$clientData$url_search)
     if (!is.null(query$mdl_seq)) {
       url_mdl_seq <- as.integer(query$mdl_seq)
@@ -276,6 +287,9 @@ server <- function(input, output, session) {
     } else {
       rx_er_clr(NULL)
     }
+
+    # mark URL initialization complete
+    rx_url_initialized(TRUE)
   })
 
   # * species_info ----
@@ -591,7 +605,7 @@ server <- function(input, output, session) {
     if (is.null(r)) {
       map_proxy |>
         clear_layer("r_lyr") |>
-        clear_layer("r_src") |>
+        clear_layer("r_lyr_src") |>
         clear_legend()
       showNotification("Selected layer not available for this species", type = "warning")
       return()
@@ -602,15 +616,27 @@ server <- function(input, output, session) {
     # rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
     rng_r  <- c(1,100)
 
-    # get species name and layer name for legend
-    sp_name    <- get_name()
-    layer_name <- layer_names[input$ds_layer]
-    title_str  <- glue("{sp_name} - {layer_name}")
+    # get species info for legend and browser title
+    sp_row        <- d_spp |> filter(mdl_seq == input$sel_sp)
+    sp_name       <- sp_row$scientific_name
+    layer_name    <- layer_names[input$ds_layer]
+    layer_mdl_seq <- sp_row[[input$ds_layer]]
+    title_str     <- glue("{sp_name} - {layer_name}")
+
+    # update browser title and URL
+    sp_cat_cmn <- ifelse(
+      is.na(sp_row$common_name) || sp_row$common_name == "",
+      glue("{sp_row$sp_cat}"),
+      glue("{sp_row$sp_cat}: {sp_row$common_name}"))
+    browser_title <- glue(
+      "{sp_name} distribution ({sp_cat_cmn}; mdl_seq: {layer_mdl_seq}) from {layer_name} | BOEM Marine Sensitivity")
+    session$sendCustomMessage("updateTitle", browser_title)
+    updateQueryString(glue("?mdl_seq={layer_mdl_seq}"), mode = "replace", session = session)
 
     # update raster
     map_proxy |>
       clear_layer("r_lyr") |>
-      clear_layer("r_src") |>
+      clear_layer("r_lyr_src") |>
       clear_legend() |>
       # add_image_source(
       #   id     = "r_src",
