@@ -169,7 +169,10 @@ mdl_seq_lookup <- d_spp |>
 # ui ----
 ui <- page_sidebar(
   tags$head(
-    tags$style(HTML(".mapboxgl-popup-content{color:black;}")),
+    tags$style(HTML("
+      .mapboxgl-popup-content{color:black;}
+      #ds_layer_container {display: none;}
+    ")),
     tags$script(HTML("
       Shiny.addCustomMessageHandler('updateTitle', function(title) {
         document.title = title;
@@ -180,13 +183,6 @@ ui <- page_sidebar(
 
   sidebar = sidebar(
     open = F,
-    # selectizeInput(
-    #   "sel_sp",
-    #   "Select Species",
-    #   choices = NULL),
-    # choices = spp_choices,
-    # selected = sel_sp_default),
-    # TODO: show comparison of old to new species map
     input_switch(
       "tgl_sphere",
       "Sphere",
@@ -204,19 +200,24 @@ ui <- page_sidebar(
     choices = NULL,
     width = "100%"
   ),
-  radioButtons(
-    "ds_layer",
-    "Display Layer",
-    choices  = c(
-      "Merged Model"    = "mdl_seq",
-      "AquaMaps SDM"    = "am_0.05",
-      "IUCN Range"      = "rng_iucn",
-      "NMFS Crit. Hab." = "ch_nmfs",
-      "FWS Crit. Hab."  = "ch_fws",
-      "FWS Range"       = "rng_fws",
-      "BirdLife"        = "bl"),
-    selected = "mdl_seq",
-    inline   = TRUE
+  uiOutput("current_layer_info"),
+  # hidden radioButtons to maintain ds_layer input
+  div(
+    id = "ds_layer_container",
+    radioButtons(
+      "ds_layer",
+      "Display Layer",
+      choices  = c(
+        "Merged Model"    = "mdl_seq",
+        "AquaMaps SDM"    = "am_0.05",
+        "IUCN Range"      = "rng_iucn",
+        "NMFS Crit. Hab." = "ch_nmfs",
+        "FWS Crit. Hab."  = "ch_fws",
+        "FWS Range"       = "rng_fws",
+        "BirdLife"        = "bl"),
+      selected = "mdl_seq",
+      inline   = TRUE
+    )
   ),
   card(
     mapboxglOutput("map")
@@ -234,6 +235,16 @@ server <- function(input, output, session) {
   # rx_url_initialized: flag to prevent re-processing URL after updateQueryString
 
   rx_url_initialized <- reactiveVal(FALSE)
+
+  # layer names for display
+  layer_names <- c(
+    "mdl_seq"  = "Merged Model",
+    "am_0.05"  = "AquaMaps SDM",
+    "rng_iucn" = "IUCN Range",
+    "ch_nmfs"  = "NMFS Critical Habitat",
+    "ch_fws"   = "FWS Critical Habitat",
+    "rng_fws"  = "FWS Range",
+    "bl"       = "BirdLife Range")
 
   # url parameters ----
   observe({
@@ -292,9 +303,23 @@ server <- function(input, output, session) {
     rx_url_initialized(TRUE)
   })
 
+  # * current_layer_info ----
+  output$current_layer_info <- renderUI({
+    req(input$sel_sp, input$ds_layer)
+
+    sp_row     <- d_spp |> filter(mdl_seq == input$sel_sp)
+    layer_name <- layer_names[input$ds_layer]
+    mdl_seq    <- sp_row[[input$ds_layer]]
+
+    tags$p(
+      tags$em(glue("Displaying: {layer_name} (mdl_seq: {mdl_seq})")),
+      style = "margin-top: -10px; margin-bottom: 10px; color: #888;"
+    )
+  })
+
   # * species_info ----
   output$species_info <- renderUI({
-    req(input$sel_sp)
+    req(input$sel_sp, input$ds_layer)
 
     mdl_seq <- input$sel_sp
     d_sp <- d_spp |>
@@ -318,15 +343,24 @@ server <- function(input, output, session) {
     has_iucn <- !is.na(d_sp$rng_iucn)
     n_ds     <- d_sp$n_ds
 
-    # helper to create model link
+    # current layer being displayed
+    current_layer <- input$ds_layer
+
+    # helper to create model link (bold if currently displayed)
     make_link <- function(ds_key, type = "value") {
       ds_mdl_seq <- d_sp[[ds_key]]
       if (is.na(ds_mdl_seq)) return(NULL)
-      str_info = ifelse(
-        type == "value",
+      str_info <- ifelse(
+        type == "value" && !is.na(mdl_info[ds_key]),
         glue("<br><em>({mdl_info[ds_key]})</em>"),
         "")
-      HTML(glue('<a href="?mdl_seq={ds_mdl_seq}">{mdl_names[ds_key]}</a>{str_info}'))
+      is_active <- (ds_key == current_layer)
+      link_text <- if (is_active) {
+        glue("<b>{mdl_names[ds_key]}</b>")
+      } else {
+        mdl_names[ds_key]
+      }
+      HTML(glue('<a href="?mdl_seq={ds_mdl_seq}">{link_text}</a>{str_info}'))
     }
 
     # value models (all except rng_iucn which is mask-only)
@@ -343,12 +377,12 @@ server <- function(input, output, session) {
       values_ui <- tags$ul(tags$li(make_link(value_models[1])))
     } else {
       # merged model with sub-items
-      merge_label <- if (has_iucn) "Merged Model (IUCN masked)" else "Merged Model"
-      # merge_label <- if (has_iucn) "Merged Model"
-      sub_items <- lapply(value_models, function(k) tags$li(make_link(k)))
-      values_ui <- tags$ul(
+      merge_base  <- if (has_iucn) "Merged Model (IUCN masked)" else "Merged Model"
+      merge_label <- if (current_layer == "mdl_seq") glue("<b>{merge_base}</b>") else merge_base
+      sub_items   <- lapply(value_models, function(k) tags$li(make_link(k)))
+      values_ui   <- tags$ul(
         tags$li(
-          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}"><b>{merge_label}</b></a><br><em>(maximum of):</em>')),
+          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}">{merge_label}</a><br><em>(maximum of):</em>')),
           tags$ul(sub_items)
         )
       )
@@ -547,16 +581,6 @@ server <- function(input, output, session) {
         before_id = "pra_ln"
       )
   }
-
-  # layer names for display
-  layer_names <- c(
-    "mdl_seq"  = "Merged Model",
-    "am_0.05"  = "AquaMaps SDM",
-    "rng_iucn" = "IUCN Range (Mask)",
-    "ch_nmfs"  = "NMFS Critical Habitat (Mask)",
-    "ch_fws"   = "FWS Critical Habitat (Mask)",
-    "rng_fws"  = "FWS Range (Mask)",
-    "bl"       = "BirdLife Range")
 
   # * input$sel_sp -> update layer choices ----
   observeEvent(input$sel_sp, {
