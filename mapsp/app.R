@@ -102,14 +102,37 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 # data prep ----
 r_cell <- rast(cell_tif)
 
-# query taxon table with all dataset columns
+# query dataset metadata once at startup
+d_datasets <- tbl(con_sdm, "dataset") |>
+  select(ds_key, name_display, value_info, is_mask, sort_order) |>
+  collect() |>
+  arrange(sort_order)
+
+# derive what was previously hardcoded
+ds_keys      <- d_datasets |> filter(!ds_key %in% c("ms_merge")) |> pull(ds_key)
+layer_names  <- c(
+  "mdl_seq" = "Merged Model",
+  deframe(d_datasets |> filter(ds_key != "ms_merge") |> select(ds_key, name_display)))
+mdl_names    <- deframe(d_datasets |> filter(ds_key != "ms_merge") |> select(ds_key, name_display))
+mdl_info     <- deframe(d_datasets |> filter(!is.na(value_info)) |> select(ds_key, value_info))
+ds_keys_mask <- d_datasets |> filter(is_mask) |> pull(ds_key)
+
+# query taxon base data (no per-dataset columns)
 d_spp <- tbl(con_sdm, "taxon") |>
   filter(is_ok, !is.na(mdl_seq)) |>
   select(
     taxon_id, scientific_name, common_name, sp_cat, n_ds, mdl_seq,
-    `am_0.05`, ch_nmfs, ch_fws, rng_fws, bl, rng_iucn,
     worms_id, redlist_code, esa_code, esa_source) |>
+  collect()
+
+# pivot taxon_model to wide format, join to taxon
+d_tm <- tbl(con_sdm, "taxon_model") |>
+  filter(taxon_id %in% !!d_spp$taxon_id) |>
   collect() |>
+  pivot_wider(names_from = ds_key, values_from = mdl_seq)
+
+d_spp <- d_spp |>
+  left_join(d_tm, by = "taxon_id") |>
   mutate(
     common_name = case_match(
       # TODO: update common names in DB
@@ -125,7 +148,6 @@ d_spp <- tbl(con_sdm, "taxon") |>
       ""
     ),
     label = glue("{sp_cat}: {scientific_name}{lbl_cmn}"),
-    #   key_url   = glue('<a href="https://shiny.marinesensitivity.org/mapsp/?sp_key={sp_key}" target="_blank">{sp_key}</a>'),
     worms_url = ifelse(
       is.na(worms_id),
       NA,
@@ -133,10 +155,7 @@ d_spp <- tbl(con_sdm, "taxon") |>
         '<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms_id}" target="_blank">{worms_id}</a>'
       )
     )
-  ) #,
-#   gbif_url  = ifelse(
-#     is.na(gbif_id), NA,
-#     glue('<a href="https://www.gbif.org/species/{gbif_id}" target="_blank">{gbif_id}</a>')))
+  )
 
 spp_choices <- d_spp |>
   arrange(sp_cat, label) |>
@@ -152,11 +171,10 @@ sel_sp_default <- d_spp |>
   pull(mdl_seq)
 
 # build reverse lookup: any mdl_seq -> (merged mdl_seq, ds_layer)
-ds_cols <- c("am_0.05", "ch_nmfs", "ch_fws", "rng_fws", "bl", "rng_iucn")
 mdl_seq_lookup <- d_spp |>
-  select(merged_mdl_seq = mdl_seq, all_of(ds_cols)) |>
+  select(merged_mdl_seq = mdl_seq, any_of(ds_keys)) |>
   pivot_longer(
-    cols      = all_of(ds_cols),
+    cols      = any_of(ds_keys),
     names_to  = "ds_layer",
     values_to = "input_mdl_seq") |>
   filter(!is.na(input_mdl_seq)) |>
@@ -208,13 +226,8 @@ ui <- page_sidebar(
       "ds_layer",
       "Display Layer",
       choices  = c(
-        "Merged Model"    = "mdl_seq",
-        "AquaMaps SDM"    = "am_0.05",
-        "IUCN Range"      = "rng_iucn",
-        "NMFS Crit. Hab." = "ch_nmfs",
-        "FWS Crit. Hab."  = "ch_fws",
-        "FWS Range"       = "rng_fws",
-        "BirdLife"        = "bl"),
+        "Merged Model" = "mdl_seq",
+        setNames(ds_keys, d_datasets$name_display[match(ds_keys, d_datasets$ds_key)])),
       selected = "mdl_seq",
       inline   = TRUE
     )
@@ -235,16 +248,6 @@ server <- function(input, output, session) {
   # rx_url_initialized: flag to prevent re-processing URL after updateQueryString
 
   rx_url_initialized <- reactiveVal(FALSE)
-
-  # layer names for display
-  layer_names <- c(
-    "mdl_seq"  = "Merged Model",
-    "am_0.05"  = "AquaMaps SDM",
-    "rng_iucn" = "IUCN Range",
-    "ch_nmfs"  = "NMFS Critical Habitat",
-    "ch_fws"   = "FWS Critical Habitat",
-    "rng_fws"  = "FWS Range",
-    "bl"       = "BirdLife Range")
 
   # url parameters ----
   observe({
@@ -325,22 +328,8 @@ server <- function(input, output, session) {
     d_sp <- d_spp |>
       filter(mdl_seq == !!mdl_seq)
 
-    # model display names
-    mdl_names <- c(
-      "am_0.05"  = "AquaMaps SDM",
-      "ch_nmfs"  = "NMFS Critical Habitat",
-      "ch_fws"   = "FWS Critical Habitat",
-      "rng_fws"  = "FWS Range",
-      "bl"       = "BirdLife",
-      "rng_iucn" = "IUCN Range")
-
-    # model explanations
-    mdl_info = c(
-      "ch_nmfs"  = "EN:90, TN:70",
-      "rng_iucn" = "CR:100, EN:80, VU:60, NT:40, LC:20, DD:20")
-
     # determine which models are present
-    has_iucn <- !is.na(d_sp$rng_iucn)
+    has_iucn <- "rng_iucn" %in% names(d_sp) && !is.na(d_sp$rng_iucn)
     n_ds     <- d_sp$n_ds
 
     # current layer being displayed
@@ -348,6 +337,7 @@ server <- function(input, output, session) {
 
     # helper to create model link (bold if currently displayed)
     make_link <- function(ds_key, type = "value") {
+      if (!ds_key %in% names(d_sp)) return(NULL)
       ds_mdl_seq <- d_sp[[ds_key]]
       if (is.na(ds_mdl_seq)) return(NULL)
       str_info <- ifelse(
@@ -363,13 +353,13 @@ server <- function(input, output, session) {
       HTML(glue('<a href="?mdl_seq={ds_mdl_seq}">{link_text}</a>{str_info}'))
     }
 
-    # value models (all except rng_iucn which is mask-only)
-    ds_keys_values <- c("am_0.05", "ch_nmfs", "ch_fws", "rng_fws", "bl", "rng_iucn")
-    value_models <- ds_keys_values[!is.na(sapply(ds_keys_values, function(k) d_sp[[k]]))]
+    # value models (all non-merge datasets present for this species)
+    value_models <- ds_keys[
+      sapply(ds_keys, function(k) k %in% names(d_sp) && !is.na(d_sp[[k]]))]
 
     # mask models (only relevant when has_iucn)
-    ds_keys_mask <- c("rng_iucn", "ch_nmfs", "ch_fws", "rng_fws")
-    mask_models  <- ds_keys_mask[!is.na(sapply(ds_keys_mask, function(k) d_sp[[k]]))]
+    mask_models <- ds_keys_mask[
+      sapply(ds_keys_mask, function(k) k %in% names(d_sp) && !is.na(d_sp[[k]]))]
 
     # build values section
     if (length(value_models) == 1 && !has_iucn) {
@@ -590,13 +580,12 @@ server <- function(input, output, session) {
 
     # determine which layers are available
     available <- c()
-    if (!is.na(sp_row$mdl_seq))     available <- c(available, "Merged Model"    = "mdl_seq")
-    if (!is.na(sp_row$`am_0.05`))   available <- c(available, "AquaMaps SDM"    = "am_0.05")
-    if (!is.na(sp_row$rng_iucn))    available <- c(available, "IUCN Range"      = "rng_iucn")
-    if (!is.na(sp_row$ch_nmfs))     available <- c(available, "NMFS Crit. Hab." = "ch_nmfs")
-    if (!is.na(sp_row$ch_fws))      available <- c(available, "FWS Crit. Hab."  = "ch_fws")
-    if (!is.na(sp_row$rng_fws))     available <- c(available, "FWS Range"       = "rng_fws")
-    if (!is.na(sp_row$bl))          available <- c(available, "BirdLife"        = "bl")
+    if (!is.na(sp_row$mdl_seq)) available <- c(available, "Merged Model" = "mdl_seq")
+    for (dk in ds_keys) {
+      if (dk %in% names(sp_row) && !is.na(sp_row[[dk]])) {
+        available <- c(available, setNames(dk, d_datasets$name_display[d_datasets$ds_key == dk]))
+      }
+    }
 
     # check if URL specified a layer to select
     url_layer <- rx_ds_layer()
