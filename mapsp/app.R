@@ -29,6 +29,10 @@ options(
 
 # variables ----
 verbose <- T
+
+# version ----
+v_int <- 3
+v_sfx <- paste0("_v", v_int)
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -463,7 +467,7 @@ server <- function(input, output, session) {
     ) |>
       add_vector_source(
         id = "er_src",
-        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025"
+        url = glue("https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025{v_sfx}")
       ) |>
       # add_vector_source(
       #   id = "pa_src",
@@ -471,7 +475,7 @@ server <- function(input, output, session) {
       # ) |>
       add_vector_source(
         id = "pra_src",
-        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_programareas_2026"
+        url = glue("https://api.marinesensitivity.org/tilejson?table=public.ply_programareas_2026{v_sfx}")
       ) |>
       # add_line_layer(
       #   id = "pa_ln",
@@ -484,7 +488,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "pra_ln",
         source = "pra_src",
-        source_layer = "public.ply_programareas_2026",
+        source_layer = glue("public.ply_programareas_2026{v_sfx}"),
         line_color = "white",
         line_opacity = 1,
         line_width = 1
@@ -492,7 +496,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "er_ln",
         source = "er_src",
-        source_layer = "public.ply_ecoregions_2025",
+        source_layer = glue("public.ply_ecoregions_2025{v_sfx}"),
         line_color = "black",
         line_opacity = 1,
         line_width = 3,
@@ -560,7 +564,7 @@ server <- function(input, output, session) {
       add_fill_layer(
         id = "er_ply",
         source = "er_src",
-        source_layer = "public.ply_ecoregions_2025",
+        source_layer = glue("public.ply_ecoregions_2025{v_sfx}"),
         fill_color = match_expr(
           column = "ecoregion_key",
           values = parsed$values,
