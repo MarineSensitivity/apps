@@ -124,7 +124,7 @@ get_rast <- function(m_key, subregion_key = "USA") {
       # limit to zone
       tbl(con_sdm, "zone") |>
         filter(
-          tbl == glue("ply_subregions_2026{v_sfx}"),
+          tbl == !!glue("ply_subregions_2026{v_sfx}"),
           fld == "subregion_key",
           value == !!subregion_key
         ) |> #   by input$sel_subregion
@@ -417,7 +417,7 @@ if (!file.exists(sr_pra_csv)) {
   # subregion cells
   tbl_sr_cell <- tbl(con_sdm, "zone") |>
     filter(
-      tbl == glue("ply_subregions_2026{v_sfx}"),
+      tbl == !!glue("ply_subregions_2026{v_sfx}"),
       fld == "subregion_key") |>
     select(sr_key = value, zone_seq) |>
     inner_join(
@@ -533,7 +533,7 @@ ui <- page_sidebar(
        height: 300px;
      }"
   ))),
-  title = "BOEM Marine Sensitivity (v2)",
+  title = glue("BOEM Marine Sensitivity (v{v_int})"),
   sidebar = sidebar(
     selectInput(
       "sel_subregion",
@@ -1247,7 +1247,7 @@ server <- function(input, output, session) {
 
       d_spp <- tbl(con_sdm, glue("zone_taxon{v_sfx}")) |>
         filter(
-          zone_tbl == glue("ply_subregions_2026{v_sfx}"),
+          zone_tbl == !!glue("ply_subregions_2026{v_sfx}"),
           zone_fld == "subregion_key",
           zone_value == sr_key
         ) |>

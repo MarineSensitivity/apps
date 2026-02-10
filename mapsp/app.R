@@ -201,7 +201,8 @@ ui <- page_sidebar(
       });
     "))
   ),
-  titlePanel("BOEM Marine Sensitivity (v3) species distribution"),
+  titlePanel(
+    glue("BOEM Marine Sensitivity (v{v_int}) species distribution")),
 
   sidebar = sidebar(
     open = F,
