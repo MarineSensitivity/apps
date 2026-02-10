@@ -1245,13 +1245,14 @@ server <- function(input, output, session) {
       rx$spp_tbl_hdr <- glue("Species in {sr_lbl}")
       rx$spp_tbl_filename <- glue("species_{sr_key}")
 
-      d_spp <- tbl(con_sdm, glue("zone_taxon{v_sfx}")) |>
+      d_spp <- tbl(con_sdm, "zone_taxon") |>
         filter(
           zone_tbl == !!glue("ply_subregions_2026{v_sfx}"),
           zone_fld == "subregion_key",
           zone_value == sr_key
         ) |>
-        collect()
+        collect() |>
+        mutate(rl_score = er_score / 100)
     }
 
     # ** cell ----
@@ -1376,12 +1377,13 @@ server <- function(input, output, session) {
         "species_programarea-{str_replace(pra_name, ' ', '-') |> str_to_lower()}"
       )
 
-      d_spp <- tbl(con_sdm, glue("zone_taxon{v_sfx}")) |>
+      d_spp <- tbl(con_sdm, "zone_taxon") |>
         filter(
           zone_fld == "programarea_key",
           zone_value == !!pra_key
         ) |>
-        collect()
+        collect() |>
+        mutate(rl_score = er_score / 100)
     }
 
     # rename columns
