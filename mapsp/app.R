@@ -46,6 +46,7 @@ dir_data <- ifelse(
 )
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
+mask_tif <- glue("{dir_data}/derived/r_metrics_2026{v_sfx}.tif")
 sdm_db <- glue("{dir_data}/derived/sdm{v_sfx}.duckdb")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
@@ -105,6 +106,7 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 
 # data prep ----
 r_cell <- rast(cell_tif)
+r_mask <- rast(mask_tif, lyrs = "programarea_key")
 
 # query dataset metadata once at startup
 d_datasets <- tbl(con_sdm, "dataset") |>
@@ -456,6 +458,7 @@ server <- function(input, output, session) {
 
     r <- init(r_cell[[1]], NA)
     r[d$cell_id] <- d$value
+    r <- mask(r, r_mask) # mask to Program Areas
     names(r) <- "value"
 
     r
