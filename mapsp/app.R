@@ -459,6 +459,10 @@ server <- function(input, output, session) {
     r <- init(r_cell[[1]], NA)
     r[d$cell_id] <- d$value
     r <- mask(r, r_mask) # mask to Program Areas
+
+    # species range may fall entirely outside program areas
+    if (all(is.na(values(r)))) return(NULL)
+
     names(r) <- "value"
 
     r
@@ -641,7 +645,9 @@ server <- function(input, output, session) {
         clear_layer("r_lyr") |>
         clear_layer("r_lyr_src") |>
         clear_legend()
-      showNotification("Selected layer not available for this species", type = "warning")
+      showNotification(
+        "No data to display \u2014 species may lack this layer or fall outside program areas",
+        type = "warning")
       return()
     }
 
