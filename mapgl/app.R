@@ -1219,12 +1219,14 @@ server <- function(input, output, session) {
           - `taxon` taxonomic identifier from Birds of the World (botw) or World Registry of Marine Species (worms) for non-bird species
           - `scientific` scientific name
           - `common` common name, if available
-          - `rl_code` IUCN Red List code: CR (Critically Endangered), EN (Endangered), VU (Vulnerable), TN (Threatened), NT (Near Threatened), LC (Least Concern), DD (Data Deficient), NA (Not Available)
-          - `rl_score` IUCN Red List score: 1 = CR, 0.8 = EN, 0.6 = VU|TN, 0.4 = NT, 0.2 = LC|DD|NA
+          - `er_code` extinction risk code with authority prefix: `NMFS` (National Marine Fisheries Service), `FWS` (Fish & Wildlife Service), or `IUCN` (International Union for Conservation of Nature), followed by status code — CR (Critically Endangered), EN (Endangered), VU (Vulnerable), TN (Threatened), NT (Near Threatened), LC (Least Concern), Data Deficient (DD). US national listings (NMFS, FWS) take precedence over IUCN.
+          - `er_score` extinction risk score (1-100%): derived from the max of extinction risk codes (NMFS|FWS:EN=100, NMFS|FWS:TN=50, IUCN:CR=50, IUCN:EN=25, IUCN:VU=5, IUCN:NT=2, IUCN:LC|DD=1) and if protected under MMPA (20) or MBTA (10).
+          - `is_mmpa` whether the species is protected under the Marine Mammal Protection Act (MMPA)
+          - `is_mbta` whether the species is protected under the Migratory Bird Treaty Act (MBTA)
           - `model` model identifier; click to visit species distribution in seperate app
-          - `area_km2` area of cells with non-zero value for distribution, within selected area (USA, Planning Area or Cell)
+          - `area_km2` area of cells with non-zero value for distribution, within selected area (USA, Program Area or Cell)
           - `avg_suit` average suitability across all non-zero cells, ranging from 1 to 100%
-          - `pct_cat` percent contribution of the species (`rl_score * avg_suit * area_km2`) towards the total summed category (`cat`) within selected area (USA, Planning Area or Cell).
+          - `pct_cat` percent contribution of the species (`er_score * avg_suit * area_km2`) towards the total summed category (`cat`) within selected area (USA, Program Area or Cell).
              Note rescaling by Ecoregion min/max that contributes to the component and overall scores is not captured by this simpler metric."
       ))
     ))
@@ -1251,8 +1253,14 @@ server <- function(input, output, session) {
           zone_fld == "subregion_key",
           zone_value == sr_key
         ) |>
+        left_join(
+          tbl(con_sdm, "taxon") |>
+            select(taxon_id, is_mmpa, is_mbta),
+          by = "taxon_id"
+        ) |>
         collect() |>
-        mutate(rl_score = er_score / 100)
+        rename(er_code = rl_code) |>
+        mutate(er_score = er_score / 100)
     }
 
     # ** cell ----
@@ -1275,28 +1283,14 @@ server <- function(input, output, session) {
           sp_common = common_name,
           sp_scientific = scientific_name,
           taxon_id,
-          taxon_authority, # TODO: in app, sp_taxon: [{taxon_authority}:{taxon_id}](https://...)
-          rl_code = redlist_code,
+          taxon_authority,
+          er_code = extrisk_code,
+          er_score,
+          is_mmpa,
+          is_mbta,
           mdl_seq
         ) |>
-        # arrange(sp_cat, common_name) |>
-        mutate(
-          rl_score = case_match(
-            rl_code,
-            # NEW: EX (extinct): is_ok = F
-            # NEW: NE (not evaluated), DD (data deficient), <NA> (not available) -> LC
-            # https://oceanhealthindex.org/images/htmls/Supplement.html#62_Biodiversity
-            "CR" ~ 1, #  - CR: Critically Endangered
-            "EN" ~ 0.8, #  - EN: Endangered (+ESA)
-            "VU" ~ 0.6, #  - VU: Vulnerable
-            "TN" ~ 0.6, #  - TN: Threatened (ESA only)
-            "NT" ~ 0.4, #  - NT: Near Threatened
-            "LC" ~ 0.2, #  - LC: Least Concern
-            .default = 0.2
-          )
-        ) |> #  - NEW: assume LC for NAs and the rest
-        relocate(rl_score, .after = rl_code) # |>
-      # collect()  # 17,379 × 8
+        mutate(er_score = er_score / 100)
 
       d_spp <- tbl(con_sdm, "model_cell") |>
         filter(cell_id == !!cell_id) |>
@@ -1316,8 +1310,10 @@ server <- function(input, output, session) {
           sp_scientific,
           taxon_id,
           taxon_authority,
-          rl_code,
-          rl_score
+          er_code,
+          er_score,
+          is_mmpa,
+          is_mbta
         ) |>
         summarize(
           area_km2 = sum(area_km2, na.rm = T),
@@ -1326,16 +1322,16 @@ server <- function(input, output, session) {
         ) |>
         collect() |>
         mutate(
-          suit_rl = avg_suit * rl_score,
-          suit_rl_area = avg_suit * rl_score * area_km2
+          suit_er      = avg_suit * er_score,
+          suit_er_area = avg_suit * er_score * area_km2
         ) |>
         group_by(sp_cat) |>
         mutate(
-          cat_suit_rl_area = sum(suit_rl_area, na.rm = T)
+          cat_suit_er_area = sum(suit_er_area, na.rm = T)
         ) |>
         ungroup() |>
         mutate(
-          pct_cat = suit_rl_area / cat_suit_rl_area
+          pct_cat = suit_er_area / cat_suit_er_area
         )
     }
 
@@ -1382,8 +1378,14 @@ server <- function(input, output, session) {
           zone_fld == "programarea_key",
           zone_value == !!pra_key
         ) |>
+        left_join(
+          tbl(con_sdm, "taxon") |>
+            select(taxon_id, is_mmpa, is_mbta),
+          by = "taxon_id"
+        ) |>
         collect() |>
-        mutate(rl_score = er_score / 100)
+        rename(er_code = rl_code) |>
+        mutate(er_score = er_score / 100)
     }
 
     spp_sci_cmn_fixes <- tribble(
@@ -1432,8 +1434,10 @@ server <- function(input, output, session) {
         taxon_url,
         scientific = sp_scientific,
         common = sp_common,
-        rl_code,
-        rl_score,
+        er_code,
+        er_score,
+        is_mmpa,
+        is_mbta,
         model_id = mdl_seq,
         model_url,
         area_km2,
@@ -1457,7 +1461,7 @@ server <- function(input, output, session) {
           model = glue('<a href="{model_url}" target="_blank">{model_id}</a>'),
         ) |>
         relocate(taxon, .after = component) |>
-        relocate(model, .after = rl_score) |>
+        relocate(model, .after = er_score) |>
         select(
           -taxon_id,
           -taxon_authority,
@@ -1487,7 +1491,7 @@ server <- function(input, output, session) {
         ) |>
         formatPercentage(
           c(
-            "rl_score"
+            "er_score"
           ),
           0
         ) |>

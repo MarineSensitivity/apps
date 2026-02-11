@@ -126,7 +126,8 @@ d_spp <- tbl(con_sdm, "taxon") |>
   filter(is_ok, !is.na(mdl_seq)) |>
   select(
     taxon_id, scientific_name, common_name, sp_cat, n_ds, mdl_seq,
-    worms_id, redlist_code, esa_code, esa_source) |>
+    worms_id, redlist_code, esa_code, esa_source,
+    is_mmpa, is_mbta) |>
   collect()
 
 # pivot taxon_model to wide format, join to taxon
@@ -405,6 +406,12 @@ server <- function(input, output, session) {
       "NA",
       glue("{d_sp$esa_code} ({d_sp$esa_source |> str_replace('ch_','') |> str_to_upper()})"))
 
+    # protection flags (only show if TRUE)
+    prot_items <- tagList(
+      if (isTRUE(d_sp$is_mmpa)) tags$li("MMPA: Protected"),
+      if (isTRUE(d_sp$is_mbta)) tags$li("MBTA: Protected")
+    )
+
     tagList(
       h5(d_sp$scientific_name),
       tags$ul(
@@ -412,7 +419,8 @@ server <- function(input, output, session) {
         tags$li(glue("Category: {d_sp$sp_cat}")),
         tags$li(glue("ESA Listing: {esa_str}")),
         tags$li(glue("IUCN RedList: {d_sp$redlist_code}")),
-        tags$li(HTML(glue("WoRMS: {d_sp$worms_url}")))
+        tags$li(HTML(glue("WoRMS: {d_sp$worms_url}"))),
+        prot_items
       ),
       span(strong("Values"),":"),
       values_ui,
