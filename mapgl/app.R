@@ -1253,8 +1253,9 @@ server <- function(input, output, session) {
           zone_fld == "subregion_key",
           zone_value == sr_key
         ) |>
-        left_join(
+        inner_join(
           tbl(con_sdm, "taxon") |>
+            filter(is_ok, !is.na(mdl_seq)) |>
             select(taxon_id, is_mmpa, is_mbta),
           by = "taxon_id"
         ) |>
