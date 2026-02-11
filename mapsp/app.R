@@ -46,7 +46,7 @@ dir_data <- ifelse(
 )
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-sdm_db <- glue("{dir_data}/derived/sdm_2026.duckdb")
+sdm_db <- glue("{dir_data}/derived/sdm{v_sfx}.duckdb")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
 librarian::shelf(

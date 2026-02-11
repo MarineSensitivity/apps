@@ -61,7 +61,7 @@ dir_data <- ifelse(
 )
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-sdm_db <- glue("{dir_data}/derived/sdm_2026.duckdb")
+sdm_db <- glue("{dir_data}/derived/sdm{v_sfx}.duckdb")
 # pa_gpkg <- glue("{dir_data}/derived/ply_planareas_2025{v_sfx}.gpkg")
 er_gpkg     <- glue("{dir_data}/derived/ply_ecoregions_2025{v_sfx}.gpkg")
 lyrs_csv    <- glue("{dir_data}/derived/layers_2026{v_sfx}.csv")
@@ -1247,7 +1247,7 @@ server <- function(input, output, session) {
 
       d_spp <- tbl(con_sdm, "zone_taxon") |>
         filter(
-          zone_tbl == !!glue("ply_subregions_2026{v_sfx}"),
+          zone_tbl == "ply_subregions_2026",
           zone_fld == "subregion_key",
           zone_value == sr_key
         ) |>
