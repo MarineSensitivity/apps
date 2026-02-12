@@ -33,6 +33,7 @@ verbose <- T
 # version ----
 v_int <- 3
 v_sfx <- paste0("_v", v_int)
+v_dir <- paste0("v", v_int)
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -44,10 +45,16 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
+dir_v   <- glue("{dir_data}/derived/{v_dir}")
+dir_big <- ifelse(
+  is_server,
+  dir_v,
+  glue("~/_big/msens/derived/{v_dir}"))
+
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-mask_tif <- glue("{dir_data}/derived/r_metrics{v_sfx}.tif")
-sdm_db <- glue("{dir_data}/derived/sdm{v_sfx}.duckdb")
+mask_tif <- glue("{dir_v}/r_metrics{v_sfx}.tif")
+sdm_db   <- glue("{dir_big}/sdm.duckdb")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
 librarian::shelf(
