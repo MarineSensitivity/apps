@@ -59,7 +59,7 @@ dir_data <- ifelse(
 dir_v   <- glue("{dir_data}/derived/{v_dir}")
 dir_big <- ifelse(
   is_server,
-  dir_v,
+  glue("/share/data/big/{v_dir}"),
   glue("~/_big/msens/derived/{v_dir}"))
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
