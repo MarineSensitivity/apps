@@ -43,7 +43,8 @@ options(readr.show_col_types = F)
 #   profvis::profvis(shiny::runApp(here::here("mapgl")))
 
 # variables ----
-verbose <- interactive()
+verbose   <- interactive()
+v_dir     <- "v2"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -55,17 +56,20 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
+dir_v   <- glue("{dir_data}/derived/{v_dir}")
+dir_big <- ifelse(
+  is_server,
+  dir_v,
+  glue("~/_big/msens/derived/{v_dir}"))
+
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
-cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-sdm_db <- glue("{dir_data}/derived/sdm_2026.duckdb")
-# pa_gpkg <- glue("{dir_data}/derived/ply_planareas_2025.gpkg")
-er_gpkg <- glue("{dir_data}/derived/ply_ecoregions_2025.gpkg")
-lyrs_csv <- glue("{dir_data}/derived/layers_2026.csv")
-metrics_tif <- glue("{dir_data}/derived/r_metrics_2026.tif")
-# sr_gpkg <- glue("{dir_data}/derived/ply_subregions_2025.gpkg")
-# sr_pa_csv <- glue("{dir_data}/derived/subregion_planareas.csv")
-pra_gpkg <- glue("{dir_data}/derived/ply_programareas_2026.gpkg")
-sr_pra_csv <- glue("{dir_data}/derived/subregion_programareas.csv")
+sdm_db      <- glue("{dir_big}/sdm.duckdb")
+cell_tif    <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
+er_gpkg     <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
+lyrs_csv    <- glue("{dir_v}/layers.csv")
+metrics_tif <- glue("{dir_v}/r_metrics.tif")
+pra_gpkg    <- glue("{dir_v}/ply_programareas_2026.gpkg")
+sr_pra_csv  <- glue("{dir_v}/subregion_programareas.csv")
 sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
 init_tif <- here("mapgl/cache/r_init.tif")
 taxonomy_csv <- here(
