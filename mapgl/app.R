@@ -44,7 +44,11 @@ options(readr.show_col_types = F)
 
 # variables ----
 verbose <- interactive()
-v_dir   <- "v1"
+
+# version ----
+v_int <- 3
+v_sfx <- paste0("_v", v_int)
+v_dir <- paste0("v", v_int)
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -65,16 +69,28 @@ dir_big <- ifelse(
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif    <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
 sdm_db      <- glue("{dir_big}/sdm.duckdb")
-pa_gpkg     <- glue("{dir_v}/ply_planareas_2025.gpkg")
-er_gpkg     <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
-lyrs_csv    <- glue("{dir_v}/layers.csv")
-metrics_tif <- glue("{dir_v}/r_metrics.tif")
-sr_gpkg     <- glue("{dir_v}/ply_subregions_2025.gpkg")
-sr_pa_csv   <- glue("{dir_v}/subregion_planareas.csv")
+er_gpkg     <- glue("{dir_v}/ply_ecoregions_2025{v_sfx}.gpkg")
+lyrs_csv    <- glue("{dir_v}/layers{v_sfx}.csv")
+metrics_tif <- glue("{dir_v}/r_metrics{v_sfx}.tif")
+pra_gpkg    <- glue("{dir_v}/ply_programareas_2026{v_sfx}.gpkg")
+sr_pra_csv  <- glue("{dir_v}/subregion_programareas.csv")
+sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
 init_tif <- here("mapgl/cache/r_init.tif")
 taxonomy_csv <- here(
   "../workflows/data/taxonomic_hierarchy_worms_2025-10-30.csv"
 )
+stopifnot(all(file.exists(c(
+  mapbox_tkn_txt,
+  cell_tif,
+  sdm_db,
+  er_gpkg,
+  lyrs_csv,
+  metrics_tif,
+  pra_gpkg,
+  sr_pra_csv,
+  # init_tif,
+  taxonomy_csv
+))))
 
 # spp_global_csv <- glue("{dir_data}/derived/spp_global_cache.csv")
 
@@ -96,7 +112,7 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 # helper functions ----
 get_rast <- function(m_key, subregion_key = "USA") {
   # m_key         = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"
-  # subregion_key = "AK"
+  # m_key = "extrisk_mammal"; subregion_key = "L48"
 
   d <- tbl(con_sdm, "metric") |> # get metric.metric_seq
     filter(metric_key == !!m_key) |> #   by input$sel_lyr
@@ -112,6 +128,7 @@ get_rast <- function(m_key, subregion_key = "USA") {
       # limit to zone
       tbl(con_sdm, "zone") |>
         filter(
+          tbl == !!glue("ply_subregions_2026{v_sfx}"),
           fld == "subregion_key",
           value == !!subregion_key
         ) |> #   by input$sel_subregion
@@ -126,10 +143,11 @@ get_rast <- function(m_key, subregion_key = "USA") {
     ) |>
     collect()
 
-  r <- init(r_cell[[1]], NA)
+  r <- init(r_cell[[1]], NA) # plot(r)
   r[d$cell_id] <- d$value
 
   r <- trim(r) # plot(r)
+
   r
 }
 
@@ -207,7 +225,7 @@ plot_flower <- function(
     "mammal",
     "other",
     "primprod",
-    "reptile",
+    "turtle",
     "bird",
     "coral",
     "fish"
@@ -276,12 +294,17 @@ plot_flower <- function(
 # data prep ----
 
 # * sr_choices ----
+# sr_choices <- c(
+#   "All USA" = "USA",
+#   "Mainland USA" = "L48",
+#   "Alaska" = "AK",
+#   "Mainland USA & Alaska" = "AKL48")
+# TODO: version subregions
 sr_choices <- c(
-  "All USA" = "USA",
-  "Mainland USA" = "L48",
-  "Alaska" = "AK",
-  "Mainland USA & Alaska" = "AKL48"
-)
+  "All USA"         = "USA",
+  "Alaska"          = "AK",
+  "Gulf of America" = "GA",
+  "Pacific"         = "PA")
 # TODO: add other subregions:
 # - `HI`  : Hawaii
 # - `HIPI`: Hawaii & Pacific Island Territories
@@ -291,8 +314,9 @@ sr_choices <- c(
 # - `ATL` : Mainland Atlantic
 # - `ATL` : Atlantic & Gulf of America, incl. Puerto Rico
 
-# * check cached: cell_tif, pa|er_gpkg, metricss_tif, lyrs_csv ----
-v_f <- file_exists(c(cell_tif, pa_gpkg, er_gpkg, lyrs_csv, metrics_tif))
+# * check cached: cell_tif, pra|er_gpkg, metrics_tif, lyrs_csv ----
+# v_f <- file_exists(c(cell_tif, pa_gpkg, er_gpkg, lyrs_csv, metrics_tif))
+v_f <- file_exists(c(cell_tif, pra_gpkg, er_gpkg, lyrs_csv, metrics_tif))
 if (any(!v_f)) {
   stop(glue(
     "Required cached files do not exist:
@@ -306,14 +330,14 @@ r_cell <- rast(cell_tif)
 # * lyrs ----
 d_lyrs <- read_csv(lyrs_csv)
 
-
 # ** test lyrs (eval = F for performance) ----
 if (F) {
   source(here("../workflows/libs/db.R")) # con
   # dbDisconnect(con, shutdown = T)
 
   # confirm all layers available for both planareas and cell metrics
-  lyrs_pa <- dbListFields(con, "ply_planareas_2025")
+  # lyrs_pa <- dbListFields(con, "ply_planareas_2025")
+  lyrs_pra <- dbListFields(con, glue("ply_programareas_2026{v_sfx}"))
   lyrs_cell <- tbl(con_sdm, "metric") |>
     semi_join(
       tbl(con_sdm, "cell_metric") |>
@@ -321,7 +345,8 @@ if (F) {
       by = "metric_seq"
     ) |>
     pull(metric_key)
-  stopifnot(all(d_lyrs$lyr %in% lyrs_pa))
+  # stopifnot(all(d_lyrs$lyr %in% lyrs_pa))
+  stopifnot(all(d_lyrs$lyr %in% lyrs_pra))
   stopifnot(all(d_lyrs$lyr %in% lyrs_cell))
 }
 
@@ -337,15 +362,67 @@ lyr_choices <- d_lyrs |>
 
 lyr_default <- d_lyrs$lyr[1]
 
-# * planareas by subregion ----
+# * planareas by subregion ---
 
-if (!file.exists(sr_pa_csv)) {
-  # calculate subregion - planarea cells
-  message(glue("Calculating subregion - planarea cells..."))
+# if (!file.exists(sr_pa_csv)) {
+#   # calculate subregion - planarea cells
+#   message(glue("Calculating subregion - planarea cells..."))
+#
+#   # subregion cells
+#   tbl_sr_cell <- tbl(con_sdm, "zone") |>
+#     filter(fld == "subregion_key") |>
+#     select(sr_key = value, zone_seq) |>
+#     inner_join(
+#       tbl(con_sdm, "zone_cell") |>
+#         select(zone_seq, cell_id),
+#       by = join_by(zone_seq)
+#     ) |>
+#     select(sr_key, cell_id)
+#
+#   # planarea cells
+#   tbl_pa_cell <- tbl(con_sdm, "zone") |>
+#     filter(fld == "planarea_key") |>
+#     select(pa_key = value, zone_seq) |>
+#     inner_join(
+#       tbl(con_sdm, "zone_cell") |>
+#         select(zone_seq, cell_id),
+#       by = join_by(zone_seq)
+#     ) |>
+#     select(pa_key, cell_id)
+#
+#   # planareas per subregion
+#   d_sr_pa <- tbl_sr_cell |>
+#     inner_join(
+#       tbl_pa_cell,
+#       by = join_by(cell_id)
+#     ) |>
+#     group_by(sr_key, pa_key) |>
+#     summarise(n_cells = n(), .groups = "drop") |>
+#     arrange(sr_key, pa_key) |>
+#     select(
+#       subregion_key = sr_key,
+#       planarea_key = pa_key
+#     ) |>
+#     collect()
+#
+#   # write to csv
+#   write_csv(d_sr_pa, sr_pa_csv)
+# } else {
+#   d_sr_pa <- read_csv(sr_pa_csv)
+# }
+# sr <- read_sf(sr_gpkg)
+
+# * programareas by subregion ----
+
+if (!file.exists(sr_pra_csv)) {
+  # calculate subregion - programarea cells
+  message(glue("Calculating subregion - programarea cells..."))
 
   # subregion cells
   tbl_sr_cell <- tbl(con_sdm, "zone") |>
-    filter(fld == "subregion_key") |>
+    filter(
+      tbl == !!glue("ply_subregions_2026{v_sfx}"),
+      fld == "subregion_key") |>
     select(sr_key = value, zone_seq) |>
     inner_join(
       tbl(con_sdm, "zone_cell") |>
@@ -354,45 +431,84 @@ if (!file.exists(sr_pa_csv)) {
     ) |>
     select(sr_key, cell_id)
 
-  # planarea cells
-  tbl_pa_cell <- tbl(con_sdm, "zone") |>
-    filter(fld == "planarea_key") |>
-    select(pa_key = value, zone_seq) |>
+  # programarea cells
+  tbl_pra_cell <- tbl(con_sdm, "zone") |>
+    filter(fld == "programarea_key") |>
+    select(pra_key = value, zone_seq) |>
     inner_join(
       tbl(con_sdm, "zone_cell") |>
         select(zone_seq, cell_id),
       by = join_by(zone_seq)
     ) |>
-    select(pa_key, cell_id)
+    select(pra_key, cell_id)
 
-  # planareas per subregion
-  d_sr_pa <- tbl_sr_cell |>
+  # programareas per subregion
+  d_sr_pra <- tbl_sr_cell |>
     inner_join(
-      tbl_pa_cell,
+      tbl_pra_cell,
       by = join_by(cell_id)
     ) |>
-    group_by(sr_key, pa_key) |>
+    group_by(sr_key, pra_key) |>
     summarise(n_cells = n(), .groups = "drop") |>
-    arrange(sr_key, pa_key) |>
+    arrange(sr_key, pra_key) |>
     select(
       subregion_key = sr_key,
-      planarea_key = pa_key
+      programarea_key = pra_key
     ) |>
     collect()
 
   # write to csv
-  write_csv(d_sr_pa, sr_pa_csv)
-} else {
-  d_sr_pa <- read_csv(sr_pa_csv)
+  write_csv(d_sr_pra, sr_pra_csv)
 }
-sr <- read_sf(sr_gpkg)
+d_sr_pra <- read_csv(sr_pra_csv)
 
-# * r_init ----
+# * r_metrics ----
+r_metrics <- rast(metrics_tif)
+
+# * r_init (cached) ----
 if (!file_exists(init_tif)) {
-  get_rast(lyr_default, subregion_key = sr_choices[[1]]) |>
-    writeRaster(init_tif)
+  # writing r_init
+  r_init <- get_rast(lyr_default, subregion_key = sr_choices[[1]])
+
+  if (verbose){
+    message(glue("Writing cached: {basename(init_tif)}"))
+    # show extent of raster
+    print(ext(r_init))
+  }
+
+  writeRaster(r_init, init_tif, overwrite = T)
+  # plot(r_init)
 }
 r_init <- rast(init_tif)
+
+# * d_sr_bb (cached) ----
+get_sr_bbox <- function(sr_key) {
+  # sr_key = "GA" # sr_key = "AK"
+  pra_sr <- d_sr_pra |> filter(subregion_key == !!sr_key) |> pull(programarea_key)
+  r <- init(r_cell[[1]], NA)
+  plot(r_metrics[["programarea_key"]])
+  r_sr <- r_metrics[["programarea_key"]] %in% pra_sr
+  r_sr <- mask(r_sr, r_sr, maskvalues = F) |> trim()
+  r_sr |> st_bbox() |> as.numeric()
+}
+if (!file_exists(sr_bb_csv)) {
+  for (sr_key in unique(d_sr_pra$subregion_key)) { # sr_key = "GA"
+    bbox <- get_sr_bbox(sr_key)
+    d_bb_sr <- tibble(
+      subregion_key = sr_key,
+      xmin = bbox[1],
+      ymin = bbox[2],
+      xmax = bbox[3],
+      ymax = bbox[4])
+    if (!exists("d_sr_bb")) {
+      d_sr_bb <- d_bb_sr
+    } else {
+      d_sr_bb <- bind_rows(d_sr_bb, d_bb_sr)
+    }
+  }
+  write_csv(d_sr_bb, sr_bb_csv)
+}
+d_sr_bb <- read_csv(sr_bb_csv)
 
 # * d_taxonomy ----
 d_taxonomy <- read_csv(taxonomy_csv, guess_max = Inf)
@@ -421,7 +537,7 @@ ui <- page_sidebar(
        height: 300px;
      }"
   ))),
-  title = "BOEM Marine Sensitivity",
+  title = glue("BOEM Marine Sensitivity (v{v_int})"),
   sidebar = sidebar(
     selectInput(
       "sel_subregion",
@@ -433,7 +549,8 @@ ui <- page_sidebar(
       "Spatial units",
       choices = c(
         "Raster cells (0.05°)" = "cell",
-        "Planning areas" = "pa"
+        # "Planning areas"       = "pa",
+        "Program areas"        = "pra"
       )
     ),
     selectInput(
@@ -523,15 +640,15 @@ server <- function(input, output, session) {
 
   # reactive values ----
   rx <- reactiveValues(
-    clicked_pa = NULL,
-    clicked_cell = NULL,
-    spp_tbl = NULL,
-    spp_tbl_hdr = NULL,
-    spp_tbl_filename = NULL
-  )
+    clicked_pa       = NULL,
+    clicked_pra      = NULL,
+    clicked_cell     = NULL,
+    spp_tbl          = NULL,
+    spp_tbl_hdr      = NULL,
+    spp_tbl_filename = NULL)
 
   output$flower_status <- reactive({
-    if (!is.null(rx$clicked_pa) || !is.null(rx$clicked_cell)) {
+    if (!is.null(rx$clicked_pa) || !is.null(rx$clicked_pra) || !is.null(rx$clicked_cell)) {
       return(T)
     }
     F
@@ -542,7 +659,7 @@ server <- function(input, output, session) {
   get_rast_rx <- reactive({
     req(input$sel_subregion, input$sel_unit, input$sel_lyr)
 
-    if (input$sel_unit == "pa") {
+    if (input$sel_unit %in% c("pa", "pra")) {
       return(NULL)
     }
 
@@ -584,21 +701,33 @@ server <- function(input, output, session) {
       fit_bounds(bbox) |>
       add_vector_source(
         id = "er_src",
-        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025"
+        url = glue("https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025{v_sfx}")
       ) |>
+      # add_vector_source(
+      #   id = "pa_src",
+      #   url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025"
+      # ) |>
       add_vector_source(
-        id = "pa_src",
-        url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025"
+        id = "pra_src",
+        url = glue("https://api.marinesensitivity.org/tilejson?table=public.ply_programareas_2026{v_sfx}")
       ) |>
       add_image_source(
         id = "r_src",
         data = r,
         colors = cols_r
       ) |>
+      # add_line_layer(
+      #   id = "pa_ln",
+      #   source = "pa_src",
+      #   source_layer = "public.ply_planareas_2025",
+      #   line_color = "white",
+      #   line_opacity = 1,
+      #   line_width = 1
+      # ) |>
       add_line_layer(
-        id = "pa_ln",
-        source = "pa_src",
-        source_layer = "public.ply_planareas_2025",
+        id = "pra_ln",
+        source = "pra_src",
+        source_layer = glue("public.ply_programareas_2026{v_sfx}"),
         line_color = "white",
         line_opacity = 1,
         line_width = 1
@@ -606,11 +735,11 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "er_ln",
         source = "er_src",
-        source_layer = "public.ply_ecoregions_2025",
+        source_layer = glue("public.ply_ecoregions_2025{v_sfx}"),
         line_color = "black",
         line_opacity = 1,
         line_width = 3,
-        before_id = "pa_ln"
+        before_id = "pra_ln"
       ) |>
       add_raster_layer(
         id = "r_lyr",
@@ -628,7 +757,11 @@ server <- function(input, output, session) {
       add_fullscreen_control() |>
       add_navigation_control() |>
       add_scale_control() |>
-      # add_layers_control() |>
+      add_layers_control(
+        layers = list(
+          "Program Area outlines" = "pra_ln",
+          "Ecoregions outlines"   = "er_ln",
+          "Raster cell values"    = "r_lyr")) |>
       # add_draw_control(position = "top-right") |>
       add_geocoder_control(placeholder = "Go to location")
   })
@@ -653,7 +786,8 @@ server <- function(input, output, session) {
           message(glue("update map cell - beg"))
         }
 
-        rx$clicked_pa <- NULL
+        # rx$clicked_pa <- NULL
+        rx$clicked_pra <- NULL
 
         # show raster layer
         r <- get_rast_rx()
@@ -663,7 +797,8 @@ server <- function(input, output, session) {
 
         # remove layers if exist
         map_proxy |>
-          clear_layer("pa_lyr") |>
+          # clear_layer("pa_lyr") |>
+          clear_layer("pra_lyr") |>
           clear_layer("r_lyr") |>
           clear_layer("r_src") |>
           clear_legend()
@@ -691,44 +826,135 @@ server <- function(input, output, session) {
           mapgl::fit_bounds(
             bbox = as.numeric(st_bbox(r)),
             animate = T
-          )
+          ) |>
+          clear_controls("layers") |>
+          add_layers_control(
+            layers = list(
+              "Program Area outlines" = "pra_ln",
+              "Ecoregion outlines"    = "er_ln",
+              "Raster cell values"    = "r_lyr"))
 
         if (verbose) {
           message(glue("update map cell - end"))
         }
-      } else {
-        # * planarea ----
+      # } else if (unit == "pa") {
+      #   # * planarea ---
+      #
+      #   if (verbose) {
+      #     message(glue("update map pa - beg"))
+      #   }
+      #
+      #   rx$clicked_cell <- NULL
+      #   rx$clicked_pra <- NULL
+      #
+      #   sr_bb <- sr |>
+      #     filter(subregion_key == !!sr_key) |>
+      #     st_shift_longitude() |>
+      #     st_bbox() |>
+      #     as.numeric()
+      #
+      #   pa_keys <- d_sr_pa |>
+      #     filter(subregion_key == !!sr_key) |>
+      #     pull(planarea_key)
+      #   pa_filter <- c("in", "planarea_key", pa_keys)
+      #   # TODO: consider filtering pa and er outlines too
+      #
+      #   # show planning area layer
+      #   n_cols <- 11
+      #   cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+      #
+      #   # get range of planning area values
+      #   rng_pa <- tbl(con_sdm, "zone") |>
+      #     filter(
+      #       fld == "planarea_key",
+      #       value %in% pa_keys
+      #     ) |>
+      #     select(planarea_key = value, zone_seq) |>
+      #     inner_join(tbl(con_sdm, "zone_metric"), by = join_by(zone_seq)) |> # zone_seq metric_seq  value
+      #     inner_join(
+      #       tbl(con_sdm, "metric") |>
+      #         filter(metric_key == !!lyr),
+      #       by = join_by(metric_seq)
+      #     ) |>
+      #     pull(value) |>
+      #     range()
+      #
+      #   # colors
+      #   cols_pa <- colorRampPalette(cols_r, space = "Lab")(n_cols)
+      #   brks_pa <- seq(rng_pa[1], rng_pa[2], length.out = n_cols)
+      #
+      #   # remove layers if exist
+      #   map_proxy |>
+      #     clear_layer("r_lyr") |>
+      #     clear_layer("pa_lyr") |>
+      #     clear_layer("pra_lyr") |>
+      #     clear_legend()
+      #
+      #   # add planning area fill layer
+      #   map_proxy |>
+      #     add_fill_layer(
+      #       id = "pa_lyr",
+      #       source = "pa_src",
+      #       source_layer = "public.ply_planareas_2025",
+      #       fill_color = interpolate(
+      #         column = lyr,
+      #         values = brks_pa,
+      #         stops = cols_pa,
+      #         na_color = "lightgrey"
+      #       ),
+      #       fill_outline_color = "white",
+      #       tooltip = concat("Value: ", get_column(lyr)),
+      #       hover_options = list(
+      #         fill_color = "purple",
+      #         fill_opacity = 1
+      #       ),
+      #       before_id = "pa_ln",
+      #       filter = pa_filter
+      #     ) |>
+      #     mapgl::add_legend(
+      #       get_lyr_name(input$sel_lyr),
+      #       values = round(rng_pa, 1),
+      #       colors = cols_pa,
+      #       position = "bottom-right"
+      #     ) |>
+      #     mapgl::fit_bounds(sr_bb, animate = T)
+      #   # TODO: sr_bb is odd when AK included
+      #
+      #   if (verbose) {
+      #     message(glue("update map pa - end"))
+      #   }
+      } else if (unit == "pra") {
+        # * programarea ----
 
         if (verbose) {
-          message(glue("update map pa - beg"))
+          message(glue("update map pra - beg"))
         }
 
         rx$clicked_cell <- NULL
+        # rx$clicked_pa <- NULL
 
-        sr_bb <- sr |>
+        sr_bb <- d_sr_bb |>
           filter(subregion_key == !!sr_key) |>
-          st_shift_longitude() |>
-          st_bbox() |>
+          select(xmin, ymin, xmax, ymax) |>
           as.numeric()
+        if (verbose)
+          message(glue("sr_bb: {paste(round(sr_bb,2), collapse = ', ')}"))
 
-        pa_keys <- d_sr_pa |>
-          filter(subregion_key == !!sr_key) |>
-          pull(planarea_key)
-        pa_filter <- c("in", "planarea_key", pa_keys)
-        # TODO: consider filtering pa and er outlines too
+        pra_keys <- d_sr_pra |> filter(subregion_key == !!sr_key) |> pull(programarea_key)
+        pra_filter <- c("in", "programarea_key", pra_keys)
 
-        # show planning area layer
+        # show program area layer
         n_cols <- 11
         cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
 
-        # get range of planning area values
-        rng_pa <- tbl(con_sdm, "zone") |>
+        # get range of program area values
+        rng_pra <- tbl(con_sdm, "zone") |>
           filter(
-            fld == "planarea_key",
-            value %in% pa_keys
+            fld == "programarea_key",
+            value %in% pra_keys
           ) |>
-          select(planarea_key = value, zone_seq) |>
-          inner_join(tbl(con_sdm, "zone_metric"), by = join_by(zone_seq)) |> # zone_seq metric_seq  value
+          select(programarea_key = value, zone_seq) |>
+          inner_join(tbl(con_sdm, "zone_metric"), by = join_by(zone_seq)) |>
           inner_join(
             tbl(con_sdm, "metric") |>
               filter(metric_key == !!lyr),
@@ -738,25 +964,26 @@ server <- function(input, output, session) {
           range()
 
         # colors
-        cols_pa <- colorRampPalette(cols_r, space = "Lab")(n_cols)
-        brks_pa <- seq(rng_pa[1], rng_pa[2], length.out = n_cols)
+        cols_pra <- colorRampPalette(cols_r, space = "Lab")(n_cols)
+        brks_pra <- seq(rng_pra[1], rng_pra[2], length.out = n_cols)
 
-        # remove raster layer if exists
+        # remove layers if exist
         map_proxy |>
           clear_layer("r_lyr") |>
-          clear_layer("pa_lyr") |>
+          # clear_layer("pa_lyr") |>
+          clear_layer("pra_lyr") |>
           clear_legend()
 
-        # add planning area fill layer
+        # add program area fill layer
         map_proxy |>
           add_fill_layer(
-            id = "pa_lyr",
-            source = "pa_src",
-            source_layer = "public.ply_planareas_2025",
+            id = "pra_lyr",
+            source = "pra_src",
+            source_layer = glue("public.ply_programareas_2026{v_sfx}"),
             fill_color = interpolate(
               column = lyr,
-              values = brks_pa,
-              stops = cols_pa,
+              values = brks_pra,
+              stops = cols_pra,
               na_color = "lightgrey"
             ),
             fill_outline_color = "white",
@@ -765,20 +992,25 @@ server <- function(input, output, session) {
               fill_color = "purple",
               fill_opacity = 1
             ),
-            before_id = "pa_ln",
-            filter = pa_filter
+            before_id = "pra_ln",
+            filter = pra_filter
           ) |>
           mapgl::add_legend(
             get_lyr_name(input$sel_lyr),
-            values = round(rng_pa, 1),
-            colors = cols_pa,
+            values = round(rng_pra, 1),
+            colors = cols_pra,
             position = "bottom-right"
           ) |>
-          mapgl::fit_bounds(sr_bb, animate = T)
-        # TODO: sr_bb is odd when AK included
+          mapgl::fit_bounds(sr_bb, animate = T) |>
+          clear_controls("layers") |>
+          add_layers_control(
+            layers = list(
+              "Program Area outlines" = "pra_ln",
+              "Ecoregion outlines"    = "er_ln",
+              "Program Area values"   = "pra_lyr"))
 
         if (verbose) {
-          message(glue("update map pa - end"))
+          message(glue("update map pra - end"))
         }
       }
     },
@@ -816,12 +1048,24 @@ server <- function(input, output, session) {
           lyr = input$sel_lyr
         )
       }
-    } else {
+    } else if (input$sel_unit == "pa") {
       # handle planning area click
       rx$clicked_cell <- NULL
+      rx$clicked_pra <- NULL
 
       if (!is.null(input$map_feature_click)) {
         rx$clicked_pa <- list(
+          id = input$map_feature_click$id,
+          properties = input$map_feature_click$properties
+        )
+      }
+    } else if (input$sel_unit == "pra") {
+      # handle program area click
+      rx$clicked_cell <- NULL
+      rx$clicked_pa <- NULL
+
+      if (!is.null(input$map_feature_click)) {
+        rx$clicked_pra <- list(
           id = input$map_feature_click$id,
           properties = input$map_feature_click$properties
         )
@@ -835,10 +1079,14 @@ server <- function(input, output, session) {
     height <- "100%"
 
     if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
+
       # get data for cell
       cell_id <- rx$clicked_cell$cell_id
       lng <- rx$clicked_cell$lng |> round(3)
       lat <- rx$clicked_cell$lat |> round(3)
+
+      if (verbose)
+        message(glue("Rendering flower plot for cell id: {cell_id}"))
 
       # get species group scores for the cell
       d_fl <- tbl(con_sdm, "metric") |>
@@ -869,12 +1117,47 @@ server <- function(input, output, session) {
             title = glue("Cell ID: {cell_id} (x: {lng}, y: {lat})")
           )
       }
-    } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
-      # get data for planning area
-      pa_name <- rx$clicked_pa$properties$planarea_name
-      pa_key <- rx$clicked_pa$properties$planarea_key
+    # } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
+    #   # get data for planning area
+    #   pa_name <- rx$clicked_pa$properties$planarea_name
+    #   pa_key <- rx$clicked_pa$properties$planarea_key
+    #
+    #   l <- rx$clicked_pa$properties
+    #   l <- l[str_detect(names(l), "_ecoregion_rescaled$")]
+    #
+    #   d_fl <- tibble(
+    #     metric_key = names(l),
+    #     score = unlist(l)
+    #   ) |>
+    #     mutate(
+    #       component = metric_key |>
+    #         str_replace("extrisk_", "") |>
+    #         str_replace("_ecoregion_rescaled", "") |>
+    #         str_replace("_", " "),
+    #       even = 1
+    #     ) |>
+    #     filter(component != "all")
+    #
+    #   if (nrow(d_fl) > 0) {
+    #     d_fl |>
+    #       plot_flower(
+    #         fld_category = component,
+    #         fld_height = score,
+    #         fld_width = even,
+    #         tooltip_expr = "{component}: {round(score, 2)}",
+    #         title = pa_name
+    #       )
+    #   }
+    } else if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
 
-      l <- rx$clicked_pa$properties
+      # get data for program area
+      pra_name <- rx$clicked_pra$properties$programarea_name
+      pra_key <- rx$clicked_pra$properties$programarea_key
+
+      if (verbose)
+        message(glue("Rendering flower plot for Program Area: {pra_name}"))
+
+      l <- rx$clicked_pra$properties
       l <- l[str_detect(names(l), "_ecoregion_rescaled$")]
 
       d_fl <- tibble(
@@ -897,7 +1180,7 @@ server <- function(input, output, session) {
             fld_height = score,
             fld_width = even,
             tooltip_expr = "{component}: {round(score, 2)}",
-            title = pa_name
+            title = pra_name
           )
       }
     }
@@ -914,6 +1197,8 @@ server <- function(input, output, session) {
       )
     } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
       cat("Planning Area:", rx$clicked_pa$feature$properties$planarea_name)
+    } else if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
+      cat("Program Area:", rx$clicked_pra$feature$properties$programarea_name)
     }
   })
 
@@ -938,12 +1223,14 @@ server <- function(input, output, session) {
           - `taxon` taxonomic identifier from Birds of the World (botw) or World Registry of Marine Species (worms) for non-bird species
           - `scientific` scientific name
           - `common` common name, if available
-          - `rl_code` IUCN Red List code: CR (Critically Endangered), EN (Endangered), VU (Vulnerable), TN (Threatened), NT (Near Threatened), LC (Least Concern), DD (Data Deficient), NA (Not Available)
-          - `rl_score` IUCN Red List score: 1 = CR, 0.8 = EN, 0.6 = VU|TN, 0.4 = NT, 0.2 = LC|DD|NA
+          - `er_code` extinction risk code with authority prefix: `NMFS` (National Marine Fisheries Service), `FWS` (Fish & Wildlife Service), or `IUCN` (International Union for Conservation of Nature), followed by status code — CR (Critically Endangered), EN (Endangered), VU (Vulnerable), TN (Threatened), NT (Near Threatened), LC (Least Concern), Data Deficient (DD). US national listings (NMFS, FWS) take precedence over IUCN.
+          - `er_score` extinction risk score (1-100%): derived from the max of extinction risk codes (NMFS|FWS:EN=100, NMFS|FWS:TN=50, IUCN:CR=50, IUCN:EN=25, IUCN:VU=5, IUCN:NT=2, IUCN:LC|DD=1) and if protected under MMPA (20) or MBTA (10).
+          - `is_mmpa` whether the species is protected under the Marine Mammal Protection Act (MMPA)
+          - `is_mbta` whether the species is protected under the Migratory Bird Treaty Act (MBTA)
           - `model` model identifier; click to visit species distribution in seperate app
-          - `area_km2` area of cells with non-zero value for distribution, within selected area (USA, Planning Area or Cell)
+          - `area_km2` area of cells with non-zero value for distribution, within selected area (USA, Program Area or Cell)
           - `avg_suit` average suitability across all non-zero cells, ranging from 1 to 100%
-          - `pct_cat` percent contribution of the species (`rl_score * avg_suit * area_km2`) towards the total summed category (`cat`) within selected area (USA, Planning Area or Cell).
+          - `pct_cat` percent contribution of the species (`er_score * avg_suit * area_km2`) towards the total summed category (`cat`) within selected area (USA, Program Area or Cell).
              Note rescaling by Ecoregion min/max that contributes to the component and overall scores is not captured by this simpler metric."
       ))
     ))
@@ -953,19 +1240,32 @@ server <- function(input, output, session) {
   # * get_spp_tbl ----
   get_spp_tbl <- reactive({
     # ** subregion ----
-    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa)) {
+    # if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa) && is.null(rx$clicked_pra)) {
+    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
       sr_key <- input$sel_subregion
       sr_lbl <- names(sr_choices)[sr_choices == sr_key]
+
+      if (verbose)
+        message(glue("Getting species table for subregion: {sr_lbl} ({sr_key})"))
 
       rx$spp_tbl_hdr <- glue("Species in {sr_lbl}")
       rx$spp_tbl_filename <- glue("species_{sr_key}")
 
       d_spp <- tbl(con_sdm, "zone_taxon") |>
         filter(
+          zone_tbl == "ply_subregions_2026",
           zone_fld == "subregion_key",
           zone_value == sr_key
         ) |>
-        collect()
+        inner_join(
+          tbl(con_sdm, "taxon") |>
+            filter(is_ok, !is.na(mdl_seq)) |>
+            select(taxon_id, is_mmpa, is_mbta),
+          by = "taxon_id"
+        ) |>
+        collect() |>
+        rename(er_code = rl_code) |>
+        mutate(er_score = er_score / 100)
     }
 
     # ** cell ----
@@ -973,6 +1273,10 @@ server <- function(input, output, session) {
       # see original: https://github.com/MarineSensitivity/workflows/blob/76d711aed5ea319bde44158efade00a02c1031e4/ingest_aquamaps_to_sdm_duckdb.qmd#L1817-L1954
 
       cell_id <- rx$clicked_cell$cell_id
+
+      if (verbose)
+        message(glue("Getting species table for cell id: {cell_id}"))
+
       # cell_id <- 4151839
       rx$spp_tbl_hdr <- glue("Species for Cell ID: {cell_id}")
       rx$spp_tbl_filename <- glue("species_cellid-{cell_id}")
@@ -984,28 +1288,14 @@ server <- function(input, output, session) {
           sp_common = common_name,
           sp_scientific = scientific_name,
           taxon_id,
-          taxon_authority, # TODO: in app, sp_taxon: [{taxon_authority}:{taxon_id}](https://...)
-          rl_code = redlist_code,
+          taxon_authority,
+          er_code = extrisk_code,
+          er_score,
+          is_mmpa,
+          is_mbta,
           mdl_seq
         ) |>
-        # arrange(sp_cat, common_name) |>
-        mutate(
-          rl_score = case_match(
-            rl_code,
-            # NEW: EX (extinct): is_ok = F
-            # NEW: NE (not evaluated), DD (data deficient), <NA> (not available) -> LC
-            # https://oceanhealthindex.org/images/htmls/Supplement.html#62_Biodiversity
-            "CR" ~ 1, #  - CR: Critically Endangered
-            "EN" ~ 0.8, #  - EN: Endangered (+ESA)
-            "VU" ~ 0.6, #  - VU: Vulnerable
-            "TN" ~ 0.6, #  - TN: Threatened (ESA only)
-            "NT" ~ 0.4, #  - NT: Near Threatened
-            "LC" ~ 0.2, #  - LC: Least Concern
-            .default = 0.2
-          )
-        ) |> #  - NEW: assume LC for NAs and the rest
-        relocate(rl_score, .after = rl_code) # |>
-      # collect()  # 17,379 × 8
+        mutate(er_score = er_score / 100)
 
       d_spp <- tbl(con_sdm, "model_cell") |>
         filter(cell_id == !!cell_id) |>
@@ -1025,8 +1315,10 @@ server <- function(input, output, session) {
           sp_scientific,
           taxon_id,
           taxon_authority,
-          rl_code,
-          rl_score
+          er_code,
+          er_score,
+          is_mmpa,
+          is_mbta
         ) |>
         summarize(
           area_km2 = sum(area_km2, na.rm = T),
@@ -1035,49 +1327,84 @@ server <- function(input, output, session) {
         ) |>
         collect() |>
         mutate(
-          suit_rl = avg_suit * rl_score,
-          suit_rl_area = avg_suit * rl_score * area_km2
+          suit_er      = avg_suit * er_score,
+          suit_er_area = avg_suit * er_score * area_km2
         ) |>
         group_by(sp_cat) |>
         mutate(
-          cat_suit_rl_area = sum(suit_rl_area, na.rm = T)
+          cat_suit_er_area = sum(suit_er_area, na.rm = T)
         ) |>
         ungroup() |>
         mutate(
-          pct_cat = suit_rl_area / cat_suit_rl_area
+          pct_cat = suit_er_area / cat_suit_er_area
         )
     }
 
-    # ** pa ----
-    if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
-      pa_key <- rx$clicked_pa$properties$planarea_key
-      pa_name <- rx$clicked_pa$properties$planarea_name
+    # ** pa ---
+    # if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
+    #   pa_key <- rx$clicked_pa$properties$planarea_key
+    #   pa_name <- rx$clicked_pa$properties$planarea_name
+    #
+    #   rx$spp_tbl_hdr <- glue("Species for Planning Area: {pa_name}")
+    #   rx$spp_tbl_filename <- glue(
+    #     "species_planarea-{str_replace(pa_name, ' ', '-') |> str_to_lower()}"
+    #   )
+    #
+    #   # debug #  pa_key = "CGA"; pa_name = "Central Gulf of America"
+    #
+    #   # model stats in given zone
+    #   # ℹ In argument: `value == "WAO"`
+    #   # Caused by error:
+    #   #   ! Object `value` not found.
+    #
+    #   d_spp <- tbl(con_sdm, "zone_taxon") |>
+    #     filter(
+    #       zone_fld == "planarea_key",
+    #       zone_value == !!pa_key
+    #     ) |>
+    #     collect()
+    # }
 
-      rx$spp_tbl_hdr <- glue("Species for Planning Area: {pa_name}")
+    # ** pra ----
+    if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
+      pra_key <- rx$clicked_pra$properties$programarea_key
+      pra_name <- rx$clicked_pra$properties$programarea_name
+
+      if (verbose)
+        message(glue("Getting species table for Program Area: {pra_name}"))
+
+      rx$spp_tbl_hdr <- glue("Species for Program Area: {pra_name}")
       rx$spp_tbl_filename <- glue(
-        "species_planarea-{str_replace(pa_name, ' ', '-') |> str_to_lower()}"
+        "species_programarea-{str_replace(pra_name, ' ', '-') |> str_to_lower()}"
       )
-
-      # debug #  pa_key = "CGA"; pa_name = "Central Gulf of America"
-
-      # model stats in given zone
-      # ℹ In argument: `value == "WAO"`
-      # Caused by error:
-      #   ! Object `value` not found.
 
       d_spp <- tbl(con_sdm, "zone_taxon") |>
         filter(
-          zone_fld == "planarea_key",
-          zone_value == !!pa_key
+          zone_fld == "programarea_key",
+          zone_value == !!pra_key
         ) |>
-        collect()
+        left_join(
+          tbl(con_sdm, "taxon") |>
+            select(taxon_id, is_mmpa, is_mbta),
+          by = "taxon_id"
+        ) |>
+        collect() |>
+        rename(er_code = rl_code) |>
+        mutate(er_score = er_score / 100)
     }
+
+    spp_sci_cmn_fixes <- tribble(
+      ~scientific_name,         ~common_name,
+      "Eubalaena glacialis",    "North Atlantic right whale", # OLD: black right whale
+      "Megaptera novaeangliae", "humpback whale",             # OLD: hump
+      "Balaena mysticetus",     "bowhead whale"               # OLD: Arctic right whale
+    )
 
     # rename columns
     d_spp |>
       mutate(
         model_url = glue(
-          "https://shiny.marinesensitivity.org/mapsp_2025/?mdl_seq={mdl_seq}"
+          "https://shiny.marinesensitivity.org/mapsp/?mdl_seq={mdl_seq}"
         ),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(
@@ -1087,13 +1414,12 @@ server <- function(input, output, session) {
             "https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}"
           )
         ),
-        sp_common = case_match(
+        sp_common = recode_values(
+          # TODO: update common names in DB
           sp_scientific,
-          "Eubalaena glacialis" ~ "North Atlantic right whale", # OLD: black right whale
-          "Megaptera novaeangliae" ~ "humpback whale", # OLD: hump
-          "Balaena mysticetus" ~ "bowhead whale", # OLD: Arctic right whale
-          .default = sp_common
-        )
+          from = spp_sci_cmn_fixes$scientific_name,
+          to   = spp_sci_cmn_fixes$common_name,
+          default = sp_common)
       ) |>
       # TODO: construct URL
       # Search: "Limosa lapponica" taxon_id: 22693158
@@ -1113,8 +1439,10 @@ server <- function(input, output, session) {
         taxon_url,
         scientific = sp_scientific,
         common = sp_common,
-        rl_code,
-        rl_score,
+        er_code,
+        er_score,
+        is_mmpa,
+        is_mbta,
         model_id = mdl_seq,
         model_url,
         area_km2,
@@ -1138,7 +1466,7 @@ server <- function(input, output, session) {
           model = glue('<a href="{model_url}" target="_blank">{model_id}</a>'),
         ) |>
         relocate(taxon, .after = component) |>
-        relocate(model, .after = rl_score) |>
+        relocate(model, .after = er_score) |>
         select(
           -taxon_id,
           -taxon_authority,
@@ -1168,7 +1496,7 @@ server <- function(input, output, session) {
         ) |>
         formatPercentage(
           c(
-            "rl_score"
+            "er_score"
           ),
           0
         ) |>
