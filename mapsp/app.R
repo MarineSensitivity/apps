@@ -117,18 +117,30 @@ r_mask <- rast(mask_tif, lyrs = "programarea_key")
 
 # query dataset metadata once at startup
 d_datasets <- tbl(con_sdm, "dataset") |>
-  select(ds_key, name_display, value_info, is_mask, sort_order) |>
+  select(ds_key, name_display, value_info, is_mask, is_suit, is_er, sort_order) |>
   collect() |>
   arrange(sort_order)
 
-# derive what was previously hardcoded
-ds_keys      <- d_datasets |> filter(!ds_key %in% c("ms_merge")) |> pull(ds_key)
-layer_names  <- c(
-  "mdl_seq" = "Merged Model",
+# derived dataset keys (excluded from "input" list)
+ds_keys_derived <- c("ms_merge", "ms_suit", "ms_er", "ms_endemism")
+
+# all non-merge dataset keys (input + derived intermediate layers)
+ds_keys <- d_datasets |>
+  filter(!ds_key %in% "ms_merge") |>
+  pull(ds_key)
+
+# layer names for display (merged model + all layers)
+layer_names <- c(
+  "mdl_seq" = "Final Merged Model",
   deframe(d_datasets |> filter(ds_key != "ms_merge") |> select(ds_key, name_display)))
 mdl_names    <- deframe(d_datasets |> filter(ds_key != "ms_merge") |> select(ds_key, name_display))
 mdl_info     <- deframe(d_datasets |> filter(!is.na(value_info)) |> select(ds_key, value_info))
 ds_keys_mask <- d_datasets |> filter(is_mask) |> pull(ds_key)
+
+# input dataset keys (for sidebar grouping)
+ds_keys_input <- d_datasets |>
+  filter(!ds_key %in% ds_keys_derived) |>
+  pull(ds_key)
 
 # query taxon base data (no per-dataset columns)
 d_spp <- tbl(con_sdm, "taxon") |>
@@ -246,7 +258,7 @@ ui <- page_sidebar(
       "ds_layer",
       "Display Layer",
       choices  = c(
-        "Merged Model" = "mdl_seq",
+        "Final Merged Model" = "mdl_seq",
         setNames(ds_keys, d_datasets$name_display[match(ds_keys, d_datasets$ds_key)])),
       selected = "mdl_seq",
       inline   = TRUE
@@ -373,42 +385,54 @@ server <- function(input, output, session) {
       HTML(glue('<a href="?mdl_seq={ds_mdl_seq}">{link_text}</a>{str_info}'))
     }
 
-    # value models (all non-merge datasets present for this species)
-    value_models <- ds_keys[
+    # categorize available models for this species
+    sp_ds <- ds_keys[
       sapply(ds_keys, function(k) k %in% names(d_sp) && !is.na(d_sp[[k]]))]
+    input_models   <- intersect(sp_ds, ds_keys_input)
+    derived_models <- intersect(sp_ds, c("ms_suit", "ms_er", "ms_endemism"))
+    mask_models    <- intersect(sp_ds, ds_keys_mask)
 
-    # mask models (only relevant when has_iucn)
-    mask_models <- ds_keys_mask[
-      sapply(ds_keys_mask, function(k) k %in% names(d_sp) && !is.na(d_sp[[k]]))]
+    # build model hierarchy ----
 
-    # build values section
-    if (length(value_models) == 1 && !has_iucn) {
-      # single model, no merge needed
-      values_ui <- tags$ul(tags$li(make_link(value_models[1])))
-    } else {
-      # merged model with sub-items
-      merge_base  <- if (has_iucn) "Merged Model (IUCN masked)" else "Merged Model"
-      merge_label <- if (current_layer == "mdl_seq") glue("<b>{merge_base}</b>") else merge_base
-      sub_items   <- lapply(value_models, function(k) tags$li(make_link(k)))
-      values_ui   <- tags$ul(
-        tags$li(
-          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}">{merge_label}</a><br><em>(maximum of):</em>')),
-          tags$ul(sub_items)
-        )
-      )
-    }
+    # final merged model (top level)
+    merge_base  <- "Final Merged Model"
+    merge_label <- if (current_layer == "mdl_seq") glue("<b>{merge_base}</b>") else merge_base
+    merge_link  <- HTML(glue(
+      '<a href="?mdl_seq={d_sp$mdl_seq}">{merge_label}</a>',
+      '<br><em>(ms_suit &times; ms_er / 100)</em>'
+    ))
 
-    # build mask section (only if has_iucn)
+    # derived layers
+    derived_items <- lapply(derived_models, function(k) tags$li(make_link(k)))
+
+    # input layers
+    input_items <- lapply(input_models, function(k) tags$li(make_link(k)))
+
+    # mask models (only if has_iucn)
     mask_ui <- if (has_iucn) {
       mask_items <- lapply(mask_models, function(k) {
         suffix <- if (k == "rng_iucn") em(" (required)") else ""
         tags$li(make_link(k, type = "mask"), suffix)
       })
       tagList(
-        span(strong("Mask"), br(), em("(to constrain extent)"),":"),
+        span(strong("Mask"), br(), em("(to constrain extent)"), ":"),
         tags$ul(mask_items)
       )
     } else NULL
+
+    # assemble values section
+    values_ui <- tagList(
+      span(strong("Final Model"), ":"),
+      tags$ul(tags$li(merge_link)),
+      if (length(derived_models) > 0) tagList(
+        span(strong("Derived"), ":"),
+        tags$ul(derived_items)
+      ),
+      if (length(input_models) > 0) tagList(
+        span(strong("Input"), ":"),
+        tags$ul(input_items)
+      )
+    )
 
     esa_str <- ifelse(
       is.na(d_sp$esa_code),
@@ -431,7 +455,6 @@ server <- function(input, output, session) {
         tags$li(HTML(glue("WoRMS: {d_sp$worms_url}"))),
         prot_items
       ),
-      span(strong("Values"),":"),
       values_ui,
       mask_ui
     )
