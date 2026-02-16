@@ -429,8 +429,8 @@ server <- function(input, output, session) {
 
     # protection flags (only show if TRUE)
     prot_items <- tagList(
-      if (isTRUE(d_sp$is_mmpa)) tags$li("MMPA: Protected"),
-      if (isTRUE(d_sp$is_mbta)) tags$li("MBTA: Protected")
+      if (isTRUE(d_sp$is_mmpa)) tags$li("MMPA: Protected (20)"),
+      if (isTRUE(d_sp$is_mbta)) tags$li("MBTA: Protected (10)")
     )
 
     tagList(
