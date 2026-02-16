@@ -245,8 +245,8 @@ ui <- page_sidebar(
       selectInput(
         "sel_mask",
         "Mask:",
-        choices  = c("Program Areas" = "programarea_key",
-                     "Ecoregions"    = "ecoregion_key"),
+        choices  = c("Program Areas (white outlines)" = "programarea_key",
+                     "Ecoregions (black outlines)"    = "ecoregion_key"),
         selected = "programarea_key",
         width    = "100%"))
   ),
