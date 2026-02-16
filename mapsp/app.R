@@ -113,7 +113,9 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 
 # data prep ----
 r_cell <- rast(cell_tif)
-r_mask <- rast(mask_tif, lyrs = "programarea_key")
+r_masks <- list(
+  programarea_key = rast(mask_tif, lyrs = "programarea_key"),
+  ecoregion_key   = rast(mask_tif, lyrs = "ecoregion_key"))
 
 # query dataset metadata once at startup
 d_datasets <- tbl(con_sdm, "dataset") |>
@@ -232,11 +234,21 @@ ui <- page_sidebar(
     ),
     uiOutput("species_info")
   ),
-  selectizeInput(
-    "sel_sp",
-    "Select Species",
-    choices = NULL,
-    width = "100%"
+  fluidRow(
+    column(9,
+      selectizeInput(
+        "sel_sp",
+        "Species:",
+        choices = NULL,
+        width   = "100%")),
+    column(3,
+      selectInput(
+        "sel_mask",
+        "Mask:",
+        choices  = c("Program Areas" = "programarea_key",
+                     "Ecoregions"    = "ecoregion_key"),
+        selected = "programarea_key",
+        width    = "100%"))
   ),
   uiOutput("current_layer_info"),
   # hidden radioButtons to maintain ds_layer input
@@ -439,7 +451,7 @@ server <- function(input, output, session) {
 
   # * get_rast ----
   get_rast <- reactive({
-    req(input$sel_sp, input$ds_layer)
+    req(input$sel_sp, input$ds_layer, input$sel_mask)
 
     # mdl_seq = 18232 # Balaenoptera ricei
     # mdl_seq = 18513 # Haliotis cracherodii (rng_iucn)
@@ -465,7 +477,8 @@ server <- function(input, output, session) {
 
     r <- init(r_cell[[1]], NA)
     r[d$cell_id] <- d$value
-    r <- mask(r, r_mask) # mask to Program Areas
+    r_mask <- r_masks[[input$sel_mask]]
+    r <- mask(r, r_mask)
 
     # species range may fall entirely outside program areas
     if (all(is.na(values(r)))) return(NULL)
@@ -632,7 +645,7 @@ server <- function(input, output, session) {
   })
 
   # * input$sel_sp or ds_layer -> update map ----
-  observeEvent(list(input$sel_sp, input$ds_layer), {
+  observeEvent(list(input$sel_sp, input$ds_layer, input$sel_mask), {
     req(input$sel_sp, input$ds_layer)
 
     if (verbose) {
