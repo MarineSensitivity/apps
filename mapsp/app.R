@@ -325,7 +325,7 @@ server <- function(input, output, session) {
     )$
     step(
       title    = "Species Map",
-      text     = "The map shows the species distribution model. Cell values range from 1 (low suitability) to 100 (high suitability). Click cells for details.",
+      text     = "The map shows the species distribution model. Cell values range from 1 (low sensitivity) to 100 (high sensitivity). Click cells for details.",
       el       = "#map",
       position = "top"
     )$
