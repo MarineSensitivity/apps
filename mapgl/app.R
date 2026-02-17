@@ -69,7 +69,7 @@ dir_big <- ifelse(
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif    <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
 sdm_db      <- glue("{dir_big}/sdm.duckdb")
-er_gpkg     <- glue("{dir_v}/ply_ecoregions_2025{v_sfx}.gpkg")
+er_gpkg     <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
 lyrs_csv    <- glue("{dir_v}/layers{v_sfx}.csv")
 metrics_tif <- glue("{dir_v}/r_metrics{v_sfx}.tif")
 pra_gpkg    <- glue("{dir_v}/ply_programareas_2026{v_sfx}.gpkg")
