@@ -14,6 +14,7 @@
 librarian::shelf(
   bsicons,
   bslib,
+  etiennebacher/conductor,
   DBI,
   dplyr,
   duckdb,
@@ -537,28 +538,31 @@ ui <- page_sidebar(
        height: 300px;
      }"
   ))),
+  useConductor(),
   title = glue("BOEM Marine Sensitivity (v{v_int})"),
   sidebar = sidebar(
-    selectInput(
-      "sel_subregion",
-      "Study area",
-      choices = sr_choices
-    ),
-    selectInput(
-      "sel_unit",
-      "Spatial units",
-      choices = c(
-        "Raster cells (0.05°)" = "cell",
-        # "Planning areas"       = "pa",
-        "Program areas"        = "pra"
-      )
-    ),
-    selectInput(
-      "sel_lyr",
-      "Layer",
-      choices = lyr_choices,
-      selected = lyr_default
-    ),
+    tags$div(
+      id = "tour_subregion",
+      selectInput(
+        "sel_subregion",
+        "Study area",
+        choices = sr_choices)),
+    tags$div(
+      id = "tour_unit",
+      selectInput(
+        "sel_unit",
+        "Spatial units",
+        choices = c(
+          "Raster cells (0.05°)" = "cell",
+          # "Planning areas"       = "pa",
+          "Program areas"        = "pra"))),
+    tags$div(
+      id = "tour_lyr",
+      selectInput(
+        "sel_lyr",
+        "Layer",
+        choices = lyr_choices,
+        selected = lyr_default)),
     input_switch(
       "tgl_sphere",
       "Sphere",
@@ -637,6 +641,87 @@ server <- function(input, output, session) {
   # observe(session$setCurrentTheme(
   #   if (isTRUE(input$tgl_dark)) dark else light
   # ))
+
+  # welcome modal ----
+  showModal(modalDialog(
+    title     = "Welcome to BOEM Marine Sensitivity",
+    size      = "m",
+    easyClose = TRUE,
+    tags$div(
+      style = "text-align: center;",
+      tags$img(
+        src   = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
+        style = "max-width: 80%; height: auto; max-height: 300px; margin-bottom: 10px;",
+        alt   = "Marine Sensitivity Methods Overview"),
+      tags$p(
+        "Explore composite sensitivity scores across US waters,",
+        "view species categories, and drill into program area details."),
+      tags$p(
+        "Also see the ",
+        tags$a(
+          href   = "https://app.marinesensitivity.org/mapsp/",
+          target = "_blank",
+          "Species Distribution app"), " for individual species maps."),
+      tags$p(
+        "For full methodology, see the ",
+        tags$a(
+          href   = "https://marinesensitivity.org/docs/",
+          target = "_blank",
+          "project documentation"), ".")
+    ),
+    footer = tagList(
+      actionButton("btn_tour", "Take a Tour", icon = icon("route")),
+      modalButton("Explore"))
+  ))
+
+  # conductor tour ----
+  tour <- Conductor$new()$
+    step(
+      title    = "Study Area",
+      text     = "Select a study area to focus on a specific subregion of US waters.",
+      el       = "#tour_subregion",
+      position = "right"
+    )$
+    step(
+      title    = "Spatial Units",
+      text     = "Toggle between raster cells (0.05\u00b0) and program area aggregations.",
+      el       = "#tour_unit",
+      position = "right"
+    )$
+    step(
+      title    = "Layer Selection",
+      text     = "Choose which sensitivity metric to display: composite score, individual species categories, or primary productivity.",
+      el       = "#tour_lyr",
+      position = "right"
+    )$
+    step(
+      title    = "Map View",
+      text     = "The map displays sensitivity scores across US waters. Click a program area to see its detailed score breakdown.",
+      el       = "#map",
+      position = "top"
+    )$
+    step(
+      title    = "Flower Plot",
+      text     = "When a program area is selected, the flower plot shows scores by species category. Petal length = score, center = weighted mean.",
+      el       = "#flower_panel",
+      position = "right"
+    )$
+    step(
+      title    = "Species Tab",
+      text     = "Switch to the Species tab to see a sortable table of all species in the selected area with extinction risk details."
+    )
+  tour$init()
+  if (verbose) message("conductor tour initialized")
+
+  observe({
+    if (verbose) message("starting conductor tour")
+    removeModal()
+    session$onFlushed(function() {
+      tour$start()
+      if (verbose) message("conductor tour started")
+    }, once = TRUE)
+  }) |>
+    bindEvent(input$btn_tour)
 
   # reactive values ----
   rx <- reactiveValues(
@@ -1404,7 +1489,7 @@ server <- function(input, output, session) {
     d_spp |>
       mutate(
         model_url = glue(
-          "https://shiny.marinesensitivity.org/mapsp/?mdl_seq={mdl_seq}"
+          "https://app.marinesensitivity.org/mapsp/?mdl_seq={mdl_seq}"
         ),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(

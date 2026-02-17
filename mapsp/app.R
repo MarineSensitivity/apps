@@ -1,6 +1,7 @@
 # packages ----
 librarian::shelf(
   bslib,
+  etiennebacher/conductor,
   DBI,
   dplyr,
   duckdb,
@@ -218,6 +219,7 @@ ui <- page_sidebar(
       });
     "))
   ),
+  useConductor(),
   titlePanel(
     glue("BOEM Marine Sensitivity (v{v_int}) species distribution")),
 
@@ -236,19 +238,23 @@ ui <- page_sidebar(
   ),
   fluidRow(
     column(9,
-      selectizeInput(
-        "sel_sp",
-        "Species:",
-        choices = NULL,
-        width   = "100%")),
+      tags$div(
+        id = "tour_sp",
+        selectizeInput(
+          "sel_sp",
+          "Species:",
+          choices = NULL,
+          width   = "100%"))),
     column(3,
-      selectInput(
-        "sel_mask",
-        "Mask:",
-        choices  = c("Program Areas (white outlines)" = "programarea_key",
-                     "Ecoregions (black outlines)"    = "ecoregion_key"),
-        selected = "programarea_key",
-        width    = "100%"))
+      tags$div(
+        id = "tour_mask",
+        selectInput(
+          "sel_mask",
+          "Mask:",
+          choices  = c("Program Areas (white outlines)" = "programarea_key",
+                       "Ecoregions (black outlines)"    = "ecoregion_key"),
+          selected = "programarea_key",
+          width    = "100%")))
   ),
   uiOutput("current_layer_info"),
   # hidden radioButtons to maintain ds_layer input
@@ -271,6 +277,77 @@ ui <- page_sidebar(
 
 # server ----
 server <- function(input, output, session) {
+  # welcome modal ----
+  showModal(modalDialog(
+    title     = "Welcome to BOEM Marine Sensitivity",
+    size      = "m",
+    easyClose = TRUE,
+    tags$div(
+      style = "text-align: center;",
+      tags$img(
+        src   = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
+        style = "max-width: 80%; height: auto; max-height: 300px; margin-bottom: 10px;",
+        alt   = "Marine Sensitivity Methods Overview"),
+      tags$p(
+        "Explore individual species distribution models across US waters.",
+        "Search by common or scientific name and view habitat suitability maps."),
+      tags$p(
+        "Also see the ",
+        tags$a(
+          href   = "https://app.marinesensitivity.org/mapgl/",
+          target = "_blank",
+          "Composite Scores app"), " for aggregated sensitivity maps."),
+      tags$p(
+        "For full methodology, see the ",
+        tags$a(
+          href   = "https://marinesensitivity.org/docs/",
+          target = "_blank",
+          "project documentation"), ".")
+    ),
+    footer = tagList(
+      actionButton("btn_tour", "Take a Tour", icon = icon("route")),
+      modalButton("Explore"))
+  ))
+
+  # conductor tour ----
+  tour <- Conductor$new()$
+    step(
+      title    = "Select a Species",
+      text     = "Search by common or scientific name. Results are grouped by category (bird, fish, mammal, etc.).",
+      el       = "#tour_sp",
+      position = "bottom"
+    )$
+    step(
+      title    = "Mask Selection",
+      text     = "Choose whether to overlay BOEM Program Area or Ecoregion boundaries on the map.",
+      el       = "#tour_mask",
+      position = "bottom"
+    )$
+    step(
+      title    = "Species Map",
+      text     = "The map shows the species distribution model. Cell values range from 1 (low suitability) to 100 (high suitability). Click cells for details.",
+      el       = "#map",
+      position = "top"
+    )$
+    step(
+      title    = "Species Info",
+      text     = "Open the sidebar to see ESA listing, IUCN status, MMPA/MBTA flags, and extinction risk score for the selected species.",
+      el       = ".bslib-sidebar-toggle",
+      position = "right"
+    )
+  tour$init()
+  if (verbose) message("conductor tour initialized")
+
+  observe({
+    if (verbose) message("starting conductor tour")
+    removeModal()
+    session$onFlushed(function() {
+      tour$start()
+      if (verbose) message("conductor tour started")
+    }, once = TRUE)
+  }) |>
+    bindEvent(input$btn_tour)
+
   # rx_er_clr ----
   rx_er_clr <- reactiveVal(NULL)
   # rx_ds_layer: store ds_layer from URL to apply after species loads
