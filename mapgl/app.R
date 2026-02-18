@@ -47,9 +47,7 @@ options(readr.show_col_types = F)
 verbose <- interactive()
 
 # version ----
-v_int <- 3
-v_sfx <- paste0("_v", v_int)
-v_dir <- paste0("v", v_int)
+ver <- "v3"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -61,25 +59,29 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
-dir_v   <- glue("{dir_data}/derived/{v_dir}")
+dir_v   <- glue("{dir_data}/derived/{ver}")
 dir_big <- ifelse(
   is_server,
-  glue("/share/data/big/{v_dir}"),
-  glue("~/_big/msens/derived/{v_dir}"))
+  glue("/share/data/big/{ver}"),
+  glue("~/_big/msens/derived/{ver}"))
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif    <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
 sdm_db      <- glue("{dir_big}/sdm.duckdb")
 er_gpkg     <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
-lyrs_csv    <- glue("{dir_v}/layers{v_sfx}.csv")
-metrics_tif <- glue("{dir_v}/r_metrics{v_sfx}.tif")
-pra_gpkg    <- glue("{dir_v}/ply_programareas_2026{v_sfx}.gpkg")
+lyrs_csv    <- glue("{dir_v}/layers_{ver}.csv")
+metrics_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
+pra_gpkg    <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
 sr_pra_csv  <- glue("{dir_v}/subregion_programareas.csv")
 sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
 init_tif <- here("mapgl/cache/r_init.tif")
 taxonomy_csv <- here(
   "../workflows/data/taxonomic_hierarchy_worms_2025-10-30.csv"
 )
+tbl_er <- glue("ply_ecoregions_2025")
+tbl_sr <- glue("ply_subregions_2026_{ver}")
+tbl_pra <- glue("ply_programareas_2026_{ver}")
+
 stopifnot(all(file.exists(c(
   mapbox_tkn_txt,
   cell_tif,
@@ -129,7 +131,7 @@ get_rast <- function(m_key, subregion_key = "USA") {
       # limit to zone
       tbl(con_sdm, "zone") |>
         filter(
-          tbl == !!glue("ply_subregions_2026{v_sfx}"),
+          tbl == !!tbl_sr,
           fld == "subregion_key",
           value == !!subregion_key
         ) |> #   by input$sel_subregion
@@ -338,7 +340,7 @@ if (F) {
 
   # confirm all layers available for both planareas and cell metrics
   # lyrs_pa <- dbListFields(con, "ply_planareas_2025")
-  lyrs_pra <- dbListFields(con, glue("ply_programareas_2026{v_sfx}"))
+  lyrs_pra <- dbListFields(con, tbl_pra)
   lyrs_cell <- tbl(con_sdm, "metric") |>
     semi_join(
       tbl(con_sdm, "cell_metric") |>
@@ -422,7 +424,7 @@ if (!file.exists(sr_pra_csv)) {
   # subregion cells
   tbl_sr_cell <- tbl(con_sdm, "zone") |>
     filter(
-      tbl == !!glue("ply_subregions_2026{v_sfx}"),
+      tbl == !!tbl_sr,
       fld == "subregion_key") |>
     select(sr_key = value, zone_seq) |>
     inner_join(
@@ -539,7 +541,7 @@ ui <- page_sidebar(
      }"
   ))),
   useConductor(),
-  title = glue("BOEM Marine Sensitivity (v{v_int})"),
+  title = glue("BOEM Marine Sensitivity ({ver})"),
   sidebar = sidebar(
     tags$div(
       id = "tour_subregion",
@@ -786,15 +788,11 @@ server <- function(input, output, session) {
       fit_bounds(bbox) |>
       add_vector_source(
         id = "er_src",
-        url = glue("https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025{v_sfx}")
+        url = glue("https://api.marinesensitivity.org/tilejson?table=public.{tbl_er}")
       ) |>
-      # add_vector_source(
-      #   id = "pa_src",
-      #   url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025"
-      # ) |>
       add_vector_source(
         id = "pra_src",
-        url = glue("https://api.marinesensitivity.org/tilejson?table=public.ply_programareas_2026{v_sfx}")
+        url = glue("https://api.marinesensitivity.org/tilejson?table=public.{tbl_pra}")
       ) |>
       add_image_source(
         id = "r_src",
@@ -812,7 +810,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "pra_ln",
         source = "pra_src",
-        source_layer = glue("public.ply_programareas_2026{v_sfx}"),
+        source_layer = glue("public.{tbl_pra}"),
         line_color = "white",
         line_opacity = 1,
         line_width = 1
@@ -820,7 +818,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "er_ln",
         source = "er_src",
-        source_layer = glue("public.ply_ecoregions_2025{v_sfx}"),
+        source_layer = glue("public.{tbl_er}"),
         line_color = "black",
         line_opacity = 1,
         line_width = 3,
@@ -1064,7 +1062,7 @@ server <- function(input, output, session) {
           add_fill_layer(
             id = "pra_lyr",
             source = "pra_src",
-            source_layer = glue("public.ply_programareas_2026{v_sfx}"),
+            source_layer = glue("public.{tbl_pra}"),
             fill_color = interpolate(
               column = lyr,
               values = brks_pra,
@@ -1337,8 +1335,9 @@ server <- function(input, output, session) {
       rx$spp_tbl_filename <- glue("species_{sr_key}")
 
       d_spp <- tbl(con_sdm, "zone_taxon") |>
+        select(-is_mmpa, -is_mbta) |>
         filter(
-          zone_tbl == "ply_subregions_2026",
+          zone_tbl == !!tbl_sr,
           zone_fld == "subregion_key",
           zone_value == sr_key
         ) |>
@@ -1464,6 +1463,7 @@ server <- function(input, output, session) {
       )
 
       d_spp <- tbl(con_sdm, "zone_taxon") |>
+        select(-is_mmpa, -is_mbta) |>
         filter(
           zone_fld == "programarea_key",
           zone_value == !!pra_key
