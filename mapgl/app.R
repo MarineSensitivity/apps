@@ -77,8 +77,7 @@ sr_pra_csv <- glue("{dir_v}/subregion_programareas.csv")
 sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
 init_tif <- here("mapgl/cache/r_init.tif")
 taxonomy_csv <- here(
-  "../workflows/data/taxonomic_hierarchy_worms_2025-10-30.csv"
-)
+  "mapgl/data/taxonomic_hierarchy_worms_2025-10-30.csv")
 tbl_er <- glue("ply_ecoregions_2025")
 tbl_sr <- glue("ply_subregions_2026_{ver}")
 tbl_pra <- glue("ply_programareas_2026_{ver}")
