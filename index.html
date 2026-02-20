@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Marine Sensitivity Tool</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background: linear-gradient(135deg, #0b1a2e 0%, #0d3b66 50%, #1a5276 100%);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #e8f0f8;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 3rem;
+    }
+
+    header h1 {
+      font-size: 2.4rem;
+      font-weight: 300;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.5rem;
+    }
+
+    header p {
+      font-size: 1.05rem;
+      color: #8db8d8;
+      max-width: 480px;
+    }
+
+    .cards {
+      display: flex;
+      gap: 2rem;
+      flex-wrap: wrap;
+      justify-content: center;
+      padding: 0 1.5rem;
+    }
+
+    .card {
+      background: rgba(255, 255, 255, 0.07);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 16px;
+      width: 320px;
+      padding: 2.2rem 2rem;
+      text-decoration: none;
+      color: inherit;
+      transition: transform 0.25s ease, box-shadow 0.25s ease, border-color 0.25s ease;
+    }
+
+    .card:hover {
+      transform: translateY(-6px);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.35);
+      border-color: rgba(255, 255, 255, 0.25);
+    }
+
+    .card-icon {
+      font-size: 2.6rem;
+      margin-bottom: 1rem;
+      display: block;
+    }
+
+    .card h2 {
+      font-size: 1.35rem;
+      font-weight: 600;
+      margin-bottom: 0.5rem;
+    }
+
+    .card p {
+      font-size: 0.92rem;
+      line-height: 1.55;
+      color: #a8c8e0;
+    }
+
+    .card .tag {
+      display: inline-block;
+      margin-top: 1.2rem;
+      font-size: 0.78rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #5cb8ff;
+    }
+
+    footer {
+      margin-top: 3.5rem;
+      text-align: center;
+      font-size: 0.82rem;
+      color: #5a7d9a;
+    }
+
+    footer a {
+      color: #7baac8;
+      text-decoration: none;
+    }
+
+    footer a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Marine Sensitivity Tool</h1>
+    <p>Interactive applications for exploring marine species sensitivity to offshore energy development</p>
+  </header>
+
+  <div class="cards">
+
+    <a class="card" href="https://app.marinesensitivity.org/mapgl/">
+      <span class="card-icon">&#x1f5fa;&#xfe0f;</span>
+      <h2>Composite Scores</h2>
+      <p>
+        Explore composite sensitivity scores across BOEM Program Areas.
+        Visualize extinction risk-weighted species presence with flower plots
+        and interactive maps.
+      </p>
+      <span class="tag">mapgl &rarr;</span>
+    </a>
+
+    <a class="card" href="https://app.marinesensitivity.org/mapsp/">
+      <span class="card-icon">&#x1f420;</span>
+      <h2>Species Distributions</h2>
+      <p>
+        View individual species distribution models, compare data sources,
+        and examine regulatory status including ESA, IUCN, MMPA and MBTA listings.
+      </p>
+      <span class="tag">mapsp &rarr;</span>
+    </a>
+
+  </div>
+
+  <footer>
+    <a href="https://marinesensitivity.org">marinesensitivity.org</a>
+  </footer>
+
+</body>
+</html>
