@@ -14,7 +14,7 @@
 librarian::shelf(
   bsicons,
   bslib,
-  etiennebacher/conductor,
+  etiennebacher / conductor,
   DBI,
   dplyr,
   duckdb,
@@ -59,20 +59,21 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
-dir_v   <- glue("{dir_data}/derived/{ver}")
+dir_v <- glue("{dir_data}/derived/{ver}")
 dir_big <- ifelse(
   is_server,
   glue("/share/data/big/{ver}"),
-  glue("~/_big/msens/derived/{ver}"))
+  glue("~/_big/msens/derived/{ver}")
+)
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
-cell_tif    <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-sdm_db      <- glue("{dir_big}/sdm.duckdb")
-er_gpkg     <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
-lyrs_csv    <- glue("{dir_v}/layers_{ver}.csv")
+cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
+sdm_db <- glue("{dir_big}/sdm.duckdb")
+er_gpkg <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
+lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")
 metrics_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
-pra_gpkg    <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
-sr_pra_csv  <- glue("{dir_v}/subregion_programareas.csv")
+pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
+sr_pra_csv <- glue("{dir_v}/subregion_programareas.csv")
 sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
 init_tif <- here("mapgl/cache/r_init.tif")
 taxonomy_csv <- here(
@@ -82,7 +83,7 @@ tbl_er <- glue("ply_ecoregions_2025")
 tbl_sr <- glue("ply_subregions_2026_{ver}")
 tbl_pra <- glue("ply_programareas_2026_{ver}")
 
-stopifnot(all(file.exists(c(
+v_required <- c(
   mapbox_tkn_txt,
   cell_tif,
   sdm_db,
@@ -93,7 +94,13 @@ stopifnot(all(file.exists(c(
   sr_pra_csv,
   # init_tif,
   taxonomy_csv
-))))
+)
+v_missing <- v_required[!file.exists(v_required)]
+if (length(v_missing) > 0) {
+  stop(glue(
+    "Required files missing:\n  {paste(v_missing, collapse = '\n  ')}"
+  ))
+}
 
 # spp_global_csv <- glue("{dir_data}/derived/spp_global_cache.csv")
 
@@ -304,10 +311,11 @@ plot_flower <- function(
 #   "Mainland USA & Alaska" = "AKL48")
 # TODO: version subregions
 sr_choices <- c(
-  "All USA"         = "USA",
-  "Alaska"          = "AK",
+  "All USA" = "USA",
+  "Alaska" = "AK",
   "Gulf of America" = "GA",
-  "Pacific"         = "PA")
+  "Pacific" = "PA"
+)
 # TODO: add other subregions:
 # - `HI`  : Hawaii
 # - `HIPI`: Hawaii & Pacific Island Territories
@@ -425,7 +433,8 @@ if (!file.exists(sr_pra_csv)) {
   tbl_sr_cell <- tbl(con_sdm, "zone") |>
     filter(
       tbl == !!tbl_sr,
-      fld == "subregion_key") |>
+      fld == "subregion_key"
+    ) |>
     select(sr_key = value, zone_seq) |>
     inner_join(
       tbl(con_sdm, "zone_cell") |>
@@ -473,7 +482,7 @@ if (!file_exists(init_tif)) {
   # writing r_init
   r_init <- get_rast(lyr_default, subregion_key = sr_choices[[1]])
 
-  if (verbose){
+  if (verbose) {
     message(glue("Writing cached: {basename(init_tif)}"))
     # show extent of raster
     print(ext(r_init))
@@ -487,7 +496,9 @@ r_init <- rast(init_tif)
 # * d_sr_bb (cached) ----
 get_sr_bbox <- function(sr_key) {
   # sr_key = "GA" # sr_key = "AK"
-  pra_sr <- d_sr_pra |> filter(subregion_key == !!sr_key) |> pull(programarea_key)
+  pra_sr <- d_sr_pra |>
+    filter(subregion_key == !!sr_key) |>
+    pull(programarea_key)
   r <- init(r_cell[[1]], NA)
   plot(r_metrics[["programarea_key"]])
   r_sr <- r_metrics[["programarea_key"]] %in% pra_sr
@@ -495,14 +506,16 @@ get_sr_bbox <- function(sr_key) {
   r_sr |> st_bbox() |> as.numeric()
 }
 if (!file_exists(sr_bb_csv)) {
-  for (sr_key in unique(d_sr_pra$subregion_key)) { # sr_key = "GA"
+  for (sr_key in unique(d_sr_pra$subregion_key)) {
+    # sr_key = "GA"
     bbox <- get_sr_bbox(sr_key)
     d_bb_sr <- tibble(
       subregion_key = sr_key,
       xmin = bbox[1],
       ymin = bbox[2],
       xmax = bbox[3],
-      ymax = bbox[4])
+      ymax = bbox[4]
+    )
     if (!exists("d_sr_bb")) {
       d_sr_bb <- d_bb_sr
     } else {
@@ -548,7 +561,9 @@ ui <- page_sidebar(
       selectInput(
         "sel_subregion",
         "Study area",
-        choices = sr_choices)),
+        choices = sr_choices
+      )
+    ),
     tags$div(
       id = "tour_unit",
       selectInput(
@@ -557,14 +572,19 @@ ui <- page_sidebar(
         choices = c(
           "Raster cells (0.05°)" = "cell",
           # "Planning areas"       = "pa",
-          "Program areas"        = "pra"))),
+          "Program areas" = "pra"
+        )
+      )
+    ),
     tags$div(
       id = "tour_lyr",
       selectInput(
         "sel_lyr",
         "Layer",
         choices = lyr_choices,
-        selected = lyr_default)),
+        selected = lyr_default
+      )
+    ),
     input_switch(
       "tgl_sphere",
       "Sphere",
@@ -646,96 +666,111 @@ server <- function(input, output, session) {
 
   # welcome modal ----
   showModal(modalDialog(
-    title     = "Welcome to BOEM Marine Sensitivity",
-    size      = "m",
+    title = "Welcome to BOEM Marine Sensitivity",
+    size = "m",
     easyClose = TRUE,
     tags$div(
       style = "text-align: center;",
       tags$img(
-        src   = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
+        src = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
         style = "max-width: 80%; height: auto; max-height: 300px; margin-bottom: 10px;",
-        alt   = "Marine Sensitivity Methods Overview"),
+        alt = "Marine Sensitivity Methods Overview"
+      ),
       tags$p(
         "Explore composite sensitivity scores across US waters,",
-        "view species categories, and drill into program area details."),
+        "view species categories, and drill into program area details."
+      ),
       tags$p(
         "Also see the ",
         tags$a(
-          href   = "https://app.marinesensitivity.org/mapsp/",
+          href = "https://app.marinesensitivity.org/mapsp/",
           target = "_blank",
-          "Species Distribution app"), " for individual species maps."),
+          "Species Distribution app"
+        ),
+        " for individual species maps."
+      ),
       tags$p(
         "For full methodology, see the ",
         tags$a(
-          href   = "https://marinesensitivity.org/docs/",
+          href = "https://marinesensitivity.org/docs/",
           target = "_blank",
-          "project documentation"), ".")
+          "project documentation"
+        ),
+        "."
+      )
     ),
     footer = tagList(
       actionButton("btn_tour", "Take a Tour", icon = icon("route")),
-      modalButton("Explore"))
+      modalButton("Explore")
+    )
   ))
 
   # conductor tour ----
-  tour <- Conductor$new()$
-    step(
-      title    = "Study Area",
-      text     = "Select a study area to focus on a specific subregion of US waters.",
-      el       = "#tour_subregion",
-      position = "right"
-    )$
-    step(
-      title    = "Spatial Units",
-      text     = "Toggle between raster cells (0.05\u00b0) and program area aggregations.",
-      el       = "#tour_unit",
-      position = "right"
-    )$
-    step(
-      title    = "Layer Selection",
-      text     = "Choose which sensitivity metric to display: composite score, individual species categories, or primary productivity.",
-      el       = "#tour_lyr",
-      position = "right"
-    )$
-    step(
-      title    = "Map View",
-      text     = "The map displays sensitivity scores across US waters. Click a program area to see its detailed score breakdown.",
-      el       = "#map",
-      position = "top"
-    )$
-    step(
-      title    = "Flower Plot",
-      text     = "When a program area is selected, the flower plot shows scores by species category. Petal length = score, center = weighted mean.",
-      el       = "#flower_panel",
-      position = "right"
-    )$
-    step(
-      title    = "Species Tab",
-      text     = "Switch to the Species tab to see a sortable table of all species in the selected area with extinction risk details."
-    )
+  tour <- Conductor$new()$step(
+    title = "Study Area",
+    text = "Select a study area to focus on a specific subregion of US waters.",
+    el = "#tour_subregion",
+    position = "right"
+  )$step(
+    title = "Spatial Units",
+    text = "Toggle between raster cells (0.05\u00b0) and program area aggregations.",
+    el = "#tour_unit",
+    position = "right"
+  )$step(
+    title = "Layer Selection",
+    text = "Choose which sensitivity metric to display: composite score, individual species categories, or primary productivity.",
+    el = "#tour_lyr",
+    position = "right"
+  )$step(
+    title = "Map View",
+    text = "The map displays sensitivity scores across US waters. Click a program area to see its detailed score breakdown.",
+    el = "#map",
+    position = "top"
+  )$step(
+    title = "Flower Plot",
+    text = "When a program area is selected, the flower plot shows scores by species category. Petal length = score, center = weighted mean.",
+    el = "#flower_panel",
+    position = "right"
+  )$step(
+    title = "Species Tab",
+    text = "Switch to the Species tab to see a sortable table of all species in the selected area with extinction risk details."
+  )
   tour$init()
-  if (verbose) message("conductor tour initialized")
+  if (verbose) {
+    message("conductor tour initialized")
+  }
 
   observe({
-    if (verbose) message("starting conductor tour")
+    if (verbose) {
+      message("starting conductor tour")
+    }
     removeModal()
-    session$onFlushed(function() {
-      tour$start()
-      if (verbose) message("conductor tour started")
-    }, once = TRUE)
+    session$onFlushed(
+      function() {
+        tour$start()
+        if (verbose) message("conductor tour started")
+      },
+      once = TRUE
+    )
   }) |>
     bindEvent(input$btn_tour)
 
   # reactive values ----
   rx <- reactiveValues(
-    clicked_pa       = NULL,
-    clicked_pra      = NULL,
-    clicked_cell     = NULL,
-    spp_tbl          = NULL,
-    spp_tbl_hdr      = NULL,
-    spp_tbl_filename = NULL)
+    clicked_pa = NULL,
+    clicked_pra = NULL,
+    clicked_cell = NULL,
+    spp_tbl = NULL,
+    spp_tbl_hdr = NULL,
+    spp_tbl_filename = NULL
+  )
 
   output$flower_status <- reactive({
-    if (!is.null(rx$clicked_pa) || !is.null(rx$clicked_pra) || !is.null(rx$clicked_cell)) {
+    if (
+      !is.null(rx$clicked_pa) ||
+        !is.null(rx$clicked_pra) ||
+        !is.null(rx$clicked_cell)
+    ) {
       return(T)
     }
     F
@@ -788,11 +823,15 @@ server <- function(input, output, session) {
       fit_bounds(bbox) |>
       add_vector_source(
         id = "er_src",
-        url = glue("https://api.marinesensitivity.org/tilejson?table=public.{tbl_er}")
+        url = glue(
+          "https://api.marinesensitivity.org/tilejson?table=public.{tbl_er}"
+        )
       ) |>
       add_vector_source(
         id = "pra_src",
-        url = glue("https://api.marinesensitivity.org/tilejson?table=public.{tbl_pra}")
+        url = glue(
+          "https://api.marinesensitivity.org/tilejson?table=public.{tbl_pra}"
+        )
       ) |>
       add_image_source(
         id = "r_src",
@@ -843,8 +882,10 @@ server <- function(input, output, session) {
       add_layers_control(
         layers = list(
           "Program Area outlines" = "pra_ln",
-          "Ecoregions outlines"   = "er_ln",
-          "Raster cell values"    = "r_lyr")) |>
+          "Ecoregions outlines" = "er_ln",
+          "Raster cell values" = "r_lyr"
+        )
+      ) |>
       # add_draw_control(position = "top-right") |>
       add_geocoder_control(placeholder = "Go to location")
   })
@@ -914,98 +955,100 @@ server <- function(input, output, session) {
           add_layers_control(
             layers = list(
               "Program Area outlines" = "pra_ln",
-              "Ecoregion outlines"    = "er_ln",
-              "Raster cell values"    = "r_lyr"))
+              "Ecoregion outlines" = "er_ln",
+              "Raster cell values" = "r_lyr"
+            )
+          )
 
         if (verbose) {
           message(glue("update map cell - end"))
         }
-      # } else if (unit == "pa") {
-      #   # * planarea ---
-      #
-      #   if (verbose) {
-      #     message(glue("update map pa - beg"))
-      #   }
-      #
-      #   rx$clicked_cell <- NULL
-      #   rx$clicked_pra <- NULL
-      #
-      #   sr_bb <- sr |>
-      #     filter(subregion_key == !!sr_key) |>
-      #     st_shift_longitude() |>
-      #     st_bbox() |>
-      #     as.numeric()
-      #
-      #   pa_keys <- d_sr_pa |>
-      #     filter(subregion_key == !!sr_key) |>
-      #     pull(planarea_key)
-      #   pa_filter <- c("in", "planarea_key", pa_keys)
-      #   # TODO: consider filtering pa and er outlines too
-      #
-      #   # show planning area layer
-      #   n_cols <- 11
-      #   cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-      #
-      #   # get range of planning area values
-      #   rng_pa <- tbl(con_sdm, "zone") |>
-      #     filter(
-      #       fld == "planarea_key",
-      #       value %in% pa_keys
-      #     ) |>
-      #     select(planarea_key = value, zone_seq) |>
-      #     inner_join(tbl(con_sdm, "zone_metric"), by = join_by(zone_seq)) |> # zone_seq metric_seq  value
-      #     inner_join(
-      #       tbl(con_sdm, "metric") |>
-      #         filter(metric_key == !!lyr),
-      #       by = join_by(metric_seq)
-      #     ) |>
-      #     pull(value) |>
-      #     range()
-      #
-      #   # colors
-      #   cols_pa <- colorRampPalette(cols_r, space = "Lab")(n_cols)
-      #   brks_pa <- seq(rng_pa[1], rng_pa[2], length.out = n_cols)
-      #
-      #   # remove layers if exist
-      #   map_proxy |>
-      #     clear_layer("r_lyr") |>
-      #     clear_layer("pa_lyr") |>
-      #     clear_layer("pra_lyr") |>
-      #     clear_legend()
-      #
-      #   # add planning area fill layer
-      #   map_proxy |>
-      #     add_fill_layer(
-      #       id = "pa_lyr",
-      #       source = "pa_src",
-      #       source_layer = "public.ply_planareas_2025",
-      #       fill_color = interpolate(
-      #         column = lyr,
-      #         values = brks_pa,
-      #         stops = cols_pa,
-      #         na_color = "lightgrey"
-      #       ),
-      #       fill_outline_color = "white",
-      #       tooltip = concat("Value: ", get_column(lyr)),
-      #       hover_options = list(
-      #         fill_color = "purple",
-      #         fill_opacity = 1
-      #       ),
-      #       before_id = "pa_ln",
-      #       filter = pa_filter
-      #     ) |>
-      #     mapgl::add_legend(
-      #       get_lyr_name(input$sel_lyr),
-      #       values = round(rng_pa, 1),
-      #       colors = cols_pa,
-      #       position = "bottom-right"
-      #     ) |>
-      #     mapgl::fit_bounds(sr_bb, animate = T)
-      #   # TODO: sr_bb is odd when AK included
-      #
-      #   if (verbose) {
-      #     message(glue("update map pa - end"))
-      #   }
+        # } else if (unit == "pa") {
+        #   # * planarea ---
+        #
+        #   if (verbose) {
+        #     message(glue("update map pa - beg"))
+        #   }
+        #
+        #   rx$clicked_cell <- NULL
+        #   rx$clicked_pra <- NULL
+        #
+        #   sr_bb <- sr |>
+        #     filter(subregion_key == !!sr_key) |>
+        #     st_shift_longitude() |>
+        #     st_bbox() |>
+        #     as.numeric()
+        #
+        #   pa_keys <- d_sr_pa |>
+        #     filter(subregion_key == !!sr_key) |>
+        #     pull(planarea_key)
+        #   pa_filter <- c("in", "planarea_key", pa_keys)
+        #   # TODO: consider filtering pa and er outlines too
+        #
+        #   # show planning area layer
+        #   n_cols <- 11
+        #   cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+        #
+        #   # get range of planning area values
+        #   rng_pa <- tbl(con_sdm, "zone") |>
+        #     filter(
+        #       fld == "planarea_key",
+        #       value %in% pa_keys
+        #     ) |>
+        #     select(planarea_key = value, zone_seq) |>
+        #     inner_join(tbl(con_sdm, "zone_metric"), by = join_by(zone_seq)) |> # zone_seq metric_seq  value
+        #     inner_join(
+        #       tbl(con_sdm, "metric") |>
+        #         filter(metric_key == !!lyr),
+        #       by = join_by(metric_seq)
+        #     ) |>
+        #     pull(value) |>
+        #     range()
+        #
+        #   # colors
+        #   cols_pa <- colorRampPalette(cols_r, space = "Lab")(n_cols)
+        #   brks_pa <- seq(rng_pa[1], rng_pa[2], length.out = n_cols)
+        #
+        #   # remove layers if exist
+        #   map_proxy |>
+        #     clear_layer("r_lyr") |>
+        #     clear_layer("pa_lyr") |>
+        #     clear_layer("pra_lyr") |>
+        #     clear_legend()
+        #
+        #   # add planning area fill layer
+        #   map_proxy |>
+        #     add_fill_layer(
+        #       id = "pa_lyr",
+        #       source = "pa_src",
+        #       source_layer = "public.ply_planareas_2025",
+        #       fill_color = interpolate(
+        #         column = lyr,
+        #         values = brks_pa,
+        #         stops = cols_pa,
+        #         na_color = "lightgrey"
+        #       ),
+        #       fill_outline_color = "white",
+        #       tooltip = concat("Value: ", get_column(lyr)),
+        #       hover_options = list(
+        #         fill_color = "purple",
+        #         fill_opacity = 1
+        #       ),
+        #       before_id = "pa_ln",
+        #       filter = pa_filter
+        #     ) |>
+        #     mapgl::add_legend(
+        #       get_lyr_name(input$sel_lyr),
+        #       values = round(rng_pa, 1),
+        #       colors = cols_pa,
+        #       position = "bottom-right"
+        #     ) |>
+        #     mapgl::fit_bounds(sr_bb, animate = T)
+        #   # TODO: sr_bb is odd when AK included
+        #
+        #   if (verbose) {
+        #     message(glue("update map pa - end"))
+        #   }
       } else if (unit == "pra") {
         # * programarea ----
 
@@ -1020,10 +1063,13 @@ server <- function(input, output, session) {
           filter(subregion_key == !!sr_key) |>
           select(xmin, ymin, xmax, ymax) |>
           as.numeric()
-        if (verbose)
+        if (verbose) {
           message(glue("sr_bb: {paste(round(sr_bb,2), collapse = ', ')}"))
+        }
 
-        pra_keys <- d_sr_pra |> filter(subregion_key == !!sr_key) |> pull(programarea_key)
+        pra_keys <- d_sr_pra |>
+          filter(subregion_key == !!sr_key) |>
+          pull(programarea_key)
         pra_filter <- c("in", "programarea_key", pra_keys)
 
         # show program area layer
@@ -1089,8 +1135,10 @@ server <- function(input, output, session) {
           add_layers_control(
             layers = list(
               "Program Area outlines" = "pra_ln",
-              "Ecoregion outlines"    = "er_ln",
-              "Program Area values"   = "pra_lyr"))
+              "Ecoregion outlines" = "er_ln",
+              "Program Area values" = "pra_lyr"
+            )
+          )
 
         if (verbose) {
           message(glue("update map pra - end"))
@@ -1162,14 +1210,14 @@ server <- function(input, output, session) {
     height <- "100%"
 
     if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
-
       # get data for cell
       cell_id <- rx$clicked_cell$cell_id
       lng <- rx$clicked_cell$lng |> round(3)
       lat <- rx$clicked_cell$lat |> round(3)
 
-      if (verbose)
+      if (verbose) {
         message(glue("Rendering flower plot for cell id: {cell_id}"))
+      }
 
       # get species group scores for the cell
       d_fl <- tbl(con_sdm, "metric") |>
@@ -1200,45 +1248,45 @@ server <- function(input, output, session) {
             title = glue("Cell ID: {cell_id} (x: {lng}, y: {lat})")
           )
       }
-    # } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
-    #   # get data for planning area
-    #   pa_name <- rx$clicked_pa$properties$planarea_name
-    #   pa_key <- rx$clicked_pa$properties$planarea_key
-    #
-    #   l <- rx$clicked_pa$properties
-    #   l <- l[str_detect(names(l), "_ecoregion_rescaled$")]
-    #
-    #   d_fl <- tibble(
-    #     metric_key = names(l),
-    #     score = unlist(l)
-    #   ) |>
-    #     mutate(
-    #       component = metric_key |>
-    #         str_replace("extrisk_", "") |>
-    #         str_replace("_ecoregion_rescaled", "") |>
-    #         str_replace("_", " "),
-    #       even = 1
-    #     ) |>
-    #     filter(component != "all")
-    #
-    #   if (nrow(d_fl) > 0) {
-    #     d_fl |>
-    #       plot_flower(
-    #         fld_category = component,
-    #         fld_height = score,
-    #         fld_width = even,
-    #         tooltip_expr = "{component}: {round(score, 2)}",
-    #         title = pa_name
-    #       )
-    #   }
+      # } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
+      #   # get data for planning area
+      #   pa_name <- rx$clicked_pa$properties$planarea_name
+      #   pa_key <- rx$clicked_pa$properties$planarea_key
+      #
+      #   l <- rx$clicked_pa$properties
+      #   l <- l[str_detect(names(l), "_ecoregion_rescaled$")]
+      #
+      #   d_fl <- tibble(
+      #     metric_key = names(l),
+      #     score = unlist(l)
+      #   ) |>
+      #     mutate(
+      #       component = metric_key |>
+      #         str_replace("extrisk_", "") |>
+      #         str_replace("_ecoregion_rescaled", "") |>
+      #         str_replace("_", " "),
+      #       even = 1
+      #     ) |>
+      #     filter(component != "all")
+      #
+      #   if (nrow(d_fl) > 0) {
+      #     d_fl |>
+      #       plot_flower(
+      #         fld_category = component,
+      #         fld_height = score,
+      #         fld_width = even,
+      #         tooltip_expr = "{component}: {round(score, 2)}",
+      #         title = pa_name
+      #       )
+      #   }
     } else if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
-
       # get data for program area
       pra_name <- rx$clicked_pra$properties$programarea_name
       pra_key <- rx$clicked_pra$properties$programarea_key
 
-      if (verbose)
+      if (verbose) {
         message(glue("Rendering flower plot for Program Area: {pra_name}"))
+      }
 
       l <- rx$clicked_pra$properties
       l <- l[str_detect(names(l), "_ecoregion_rescaled$")]
@@ -1328,8 +1376,11 @@ server <- function(input, output, session) {
       sr_key <- input$sel_subregion
       sr_lbl <- names(sr_choices)[sr_choices == sr_key]
 
-      if (verbose)
-        message(glue("Getting species table for subregion: {sr_lbl} ({sr_key})"))
+      if (verbose) {
+        message(glue(
+          "Getting species table for subregion: {sr_lbl} ({sr_key})"
+        ))
+      }
 
       rx$spp_tbl_hdr <- glue("Species in {sr_lbl}")
       rx$spp_tbl_filename <- glue("species_{sr_key}")
@@ -1358,8 +1409,9 @@ server <- function(input, output, session) {
 
       cell_id <- rx$clicked_cell$cell_id
 
-      if (verbose)
+      if (verbose) {
         message(glue("Getting species table for cell id: {cell_id}"))
+      }
 
       # cell_id <- 4151839
       rx$spp_tbl_hdr <- glue("Species for Cell ID: {cell_id}")
@@ -1411,7 +1463,7 @@ server <- function(input, output, session) {
         ) |>
         collect() |>
         mutate(
-          suit_er      = avg_suit * er_score,
+          suit_er = avg_suit * er_score,
           suit_er_area = avg_suit * er_score * area_km2
         ) |>
         group_by(sp_cat) |>
@@ -1454,8 +1506,9 @@ server <- function(input, output, session) {
       pra_key <- rx$clicked_pra$properties$programarea_key
       pra_name <- rx$clicked_pra$properties$programarea_name
 
-      if (verbose)
+      if (verbose) {
         message(glue("Getting species table for Program Area: {pra_name}"))
+      }
 
       rx$spp_tbl_hdr <- glue("Species for Program Area: {pra_name}")
       rx$spp_tbl_filename <- glue(
@@ -1479,10 +1532,10 @@ server <- function(input, output, session) {
     }
 
     spp_sci_cmn_fixes <- tribble(
-      ~scientific_name,         ~common_name,
-      "Eubalaena glacialis",    "North Atlantic right whale", # OLD: black right whale
-      "Megaptera novaeangliae", "humpback whale",             # OLD: hump
-      "Balaena mysticetus",     "bowhead whale"               # OLD: Arctic right whale
+      ~scientific_name         , ~common_name                 ,
+      "Eubalaena glacialis"    , "North Atlantic right whale" , # OLD: black right whale
+      "Megaptera novaeangliae" , "humpback whale"             , # OLD: hump
+      "Balaena mysticetus"     , "bowhead whale" # OLD: Arctic right whale
     )
 
     # rename columns
@@ -1503,8 +1556,9 @@ server <- function(input, output, session) {
           # TODO: update common names in DB
           sp_scientific,
           from = spp_sci_cmn_fixes$scientific_name,
-          to   = spp_sci_cmn_fixes$common_name,
-          default = sp_common)
+          to = spp_sci_cmn_fixes$common_name,
+          default = sp_common
+        )
       ) |>
       # TODO: construct URL
       # Search: "Limosa lapponica" taxon_id: 22693158
