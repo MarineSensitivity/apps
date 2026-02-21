@@ -682,7 +682,7 @@ server <- function(input, output, session) {
       tags$p(
         "Also see the ",
         tags$a(
-          href = "https://app.marinesensitivity.org/mapsp/",
+          href = "../mapsp/",
           target = "_blank",
           "Species Distribution app"
         ),
@@ -1541,7 +1541,7 @@ server <- function(input, output, session) {
     d_spp |>
       mutate(
         model_url = glue(
-          "https://app.marinesensitivity.org/mapsp/?mdl_seq={mdl_seq}"
+          "../mapsp/?mdl_seq={mdl_seq}"
         ),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(

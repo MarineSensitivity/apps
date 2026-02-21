@@ -294,7 +294,7 @@ server <- function(input, output, session) {
       tags$p(
         "Also see the ",
         tags$a(
-          href   = "https://app.marinesensitivity.org/mapgl/",
+          href   = "../mapgl/",
           target = "_blank",
           "Composite Scores app"), " for aggregated sensitivity maps."),
       tags$p(
