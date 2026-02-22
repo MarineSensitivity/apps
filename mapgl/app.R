@@ -65,6 +65,11 @@ dir_big <- ifelse(
   glue("/share/data/big/{ver}"),
   glue("~/_big/msens/derived/{ver}")
 )
+is_prod <- Sys.getenv("MSENS_ENV") == "prod"
+pmtiles_base_url <- ifelse(
+  is_prod,
+  "/pmtiles",
+  "https://pmtiles.marinesensitivity.org")
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
@@ -78,7 +83,7 @@ sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
 init_tif <- here("mapgl/cache/r_init.tif")
 taxonomy_csv <- here(
   "mapgl/data/taxonomic_hierarchy_worms_2025-10-30.csv")
-tbl_er <- glue("ply_ecoregions_2025")
+tbl_er <- glue("ply_ecoregions_2025_{ver}")
 tbl_sr <- glue("ply_subregions_2026_{ver}")
 tbl_pra <- glue("ply_programareas_2026_{ver}")
 
@@ -820,17 +825,13 @@ server <- function(input, output, session) {
       projection = ifelse(input$tgl_sphere, "globe", "mercator")
     ) |>
       fit_bounds(bbox) |>
-      add_vector_source(
+      add_pmtiles_source(
         id = "er_src",
-        url = glue(
-          "https://api.marinesensitivity.org/tilejson?table=public.{tbl_er}"
-        )
+        url = glue("{pmtiles_base_url}/{tbl_er}.pmtiles")
       ) |>
-      add_vector_source(
+      add_pmtiles_source(
         id = "pra_src",
-        url = glue(
-          "https://api.marinesensitivity.org/tilejson?table=public.{tbl_pra}"
-        )
+        url = glue("{pmtiles_base_url}/{tbl_pra}.pmtiles")
       ) |>
       add_image_source(
         id = "r_src",
@@ -848,7 +849,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "pra_ln",
         source = "pra_src",
-        source_layer = glue("public.{tbl_pra}"),
+        source_layer = tbl_pra,
         line_color = "white",
         line_opacity = 1,
         line_width = 1
@@ -856,7 +857,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "er_ln",
         source = "er_src",
-        source_layer = glue("public.{tbl_er}"),
+        source_layer = tbl_er,
         line_color = "black",
         line_opacity = 1,
         line_width = 3,
@@ -1107,7 +1108,7 @@ server <- function(input, output, session) {
           add_fill_layer(
             id = "pra_lyr",
             source = "pra_src",
-            source_layer = glue("public.{tbl_pra}"),
+            source_layer = tbl_pra,
             fill_color = interpolate(
               column = lyr,
               values = brks_pra,

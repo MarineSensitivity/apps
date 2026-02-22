@@ -51,6 +51,11 @@ dir_big <- ifelse(
   is_server,
   glue("/share/data/big/{v_dir}"),
   glue("~/_big/msens/derived/{v_dir}"))
+is_prod <- Sys.getenv("MSENS_ENV") == "prod"
+pmtiles_base_url <- ifelse(
+  is_prod,
+  "/pmtiles",
+  "https://pmtiles.marinesensitivity.org")
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
@@ -583,17 +588,17 @@ server <- function(input, output, session) {
       zoom = 3.5,
       center = c(-106, 40.1)
     ) |>
-      add_vector_source(
+      add_pmtiles_source(
         id = "er_src",
-        url = glue("https://api.marinesensitivity.org/tilejson?table=public.ply_ecoregions_2025{v_sfx}")
+        url = glue("{pmtiles_base_url}/ply_ecoregions_2025{v_sfx}.pmtiles")
       ) |>
       # add_vector_source(
       #   id = "pa_src",
       #   url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025"
       # ) |>
-      add_vector_source(
+      add_pmtiles_source(
         id = "pra_src",
-        url = glue("https://api.marinesensitivity.org/tilejson?table=public.ply_programareas_2026{v_sfx}")
+        url = glue("{pmtiles_base_url}/ply_programareas_2026{v_sfx}.pmtiles")
       ) |>
       # add_line_layer(
       #   id = "pa_ln",
@@ -606,7 +611,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "pra_ln",
         source = "pra_src",
-        source_layer = glue("public.ply_programareas_2026{v_sfx}"),
+        source_layer = glue("ply_programareas_2026{v_sfx}"),
         line_color = "white",
         line_opacity = 1,
         line_width = 1
@@ -614,7 +619,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "er_ln",
         source = "er_src",
-        source_layer = glue("public.ply_ecoregions_2025{v_sfx}"),
+        source_layer = glue("ply_ecoregions_2025{v_sfx}"),
         line_color = "black",
         line_opacity = 1,
         line_width = 3,
@@ -682,7 +687,7 @@ server <- function(input, output, session) {
       add_fill_layer(
         id = "er_ply",
         source = "er_src",
-        source_layer = glue("public.ply_ecoregions_2025{v_sfx}"),
+        source_layer = glue("ply_ecoregions_2025{v_sfx}"),
         fill_color = match_expr(
           column = "ecoregion_key",
           values = parsed$values,
