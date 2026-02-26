@@ -69,7 +69,7 @@ is_prod <- Sys.getenv("MSENS_ENV") == "prod"
 pmtiles_base_url <- ifelse(
   is_prod,
   "/pmtiles",
-  "https://pmtiles.marinesensitivity.org")
+  "https://file.marinesensitivity.org/pmtiles")
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
@@ -83,7 +83,7 @@ sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
 init_tif <- here("mapgl/cache/r_init.tif")
 taxonomy_csv <- here(
   "mapgl/data/taxonomic_hierarchy_worms_2025-10-30.csv")
-tbl_er <- glue("ply_ecoregions_2025_{ver}")
+tbl_er <- "ply_ecoregions_2025"
 tbl_sr <- glue("ply_subregions_2026_{ver}")
 tbl_pra <- glue("ply_programareas_2026_{ver}")
 

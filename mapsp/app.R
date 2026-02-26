@@ -32,9 +32,7 @@ options(
 verbose <- T
 
 # version ----
-v_int <- 3
-v_sfx <- paste0("_v", v_int)
-v_dir <- paste0("v", v_int)
+ver <- "v3"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -46,20 +44,22 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
-dir_v   <- glue("{dir_data}/derived/{v_dir}")
+dir_v   <- glue("{dir_data}/derived/{ver}")
 dir_big <- ifelse(
   is_server,
-  glue("/share/data/big/{v_dir}"),
-  glue("~/_big/msens/derived/{v_dir}"))
+  glue("/share/data/big/{ver}"),
+  glue("~/_big/msens/derived/{ver}"))
 is_prod <- Sys.getenv("MSENS_ENV") == "prod"
 pmtiles_base_url <- ifelse(
   is_prod,
   "/pmtiles",
-  "https://pmtiles.marinesensitivity.org")
+  "https://file.marinesensitivity.org/pmtiles")
+tbl_er <- "ply_ecoregions_2025"
+tbl_pra <- glue("ply_programareas_2026_{ver}")
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
-mask_tif <- glue("{dir_v}/r_metrics{v_sfx}.tif")
+mask_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
 sdm_db   <- glue("{dir_big}/sdm.duckdb")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
@@ -226,7 +226,7 @@ ui <- page_sidebar(
   ),
   useConductor(),
   titlePanel(
-    glue("BOEM Marine Sensitivity (v{v_int}) species distribution")),
+    glue("BOEM Marine Sensitivity ({ver}) species distribution")),
 
   sidebar = sidebar(
     open = F,
@@ -590,28 +590,16 @@ server <- function(input, output, session) {
     ) |>
       add_pmtiles_source(
         id = "er_src",
-        url = glue("{pmtiles_base_url}/ply_ecoregions_2025{v_sfx}.pmtiles")
+        url = glue("{pmtiles_base_url}/{tbl_er}.pmtiles")
       ) |>
-      # add_vector_source(
-      #   id = "pa_src",
-      #   url = "https://api.marinesensitivity.org/tilejson?table=public.ply_planareas_2025"
-      # ) |>
       add_pmtiles_source(
         id = "pra_src",
-        url = glue("{pmtiles_base_url}/ply_programareas_2026{v_sfx}.pmtiles")
+        url = glue("{pmtiles_base_url}/{tbl_pra}.pmtiles")
       ) |>
-      # add_line_layer(
-      #   id = "pa_ln",
-      #   source = "pa_src",
-      #   source_layer = "public.ply_planareas_2025",
-      #   line_color = "white",
-      #   line_opacity = 1,
-      #   line_width = 1
-      # ) |>
       add_line_layer(
         id = "pra_ln",
         source = "pra_src",
-        source_layer = glue("ply_programareas_2026{v_sfx}"),
+        source_layer = tbl_pra,
         line_color = "white",
         line_opacity = 1,
         line_width = 1
@@ -619,7 +607,7 @@ server <- function(input, output, session) {
       add_line_layer(
         id = "er_ln",
         source = "er_src",
-        source_layer = glue("ply_ecoregions_2025{v_sfx}"),
+        source_layer = tbl_er,
         line_color = "black",
         line_opacity = 1,
         line_width = 3,
@@ -635,16 +623,6 @@ server <- function(input, output, session) {
           "Program Area outlines" = "pra_ln",
           "Ecoregions outlines"   = "er_ln",
           "Raster cell values"    = "r_lyr"))
-    # add_fill_layer(
-    #   id           = "er_ply",
-    #   source       = "er_src",
-    #   source_layer = "public.ply_ecoregions_2025",
-    #   fill_color = match_expr(
-    #     column  = "ecoregion_key",
-    #     values  = c("CAC", "EGOA", "NECS"),
-    #     stops   = c("#ff0000", "#00ff00", "#0000ff"),
-    #     default = "#cccccc"),
-    #   fill_opacity = 0.5)
   })
 
   # * parse_er_clr helper ----
@@ -687,7 +665,7 @@ server <- function(input, output, session) {
       add_fill_layer(
         id = "er_ply",
         source = "er_src",
-        source_layer = glue("ply_ecoregions_2025{v_sfx}"),
+        source_layer = tbl_er,
         fill_color = match_expr(
           column = "ecoregion_key",
           values = parsed$values,
