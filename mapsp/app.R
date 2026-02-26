@@ -153,22 +153,9 @@ d_tm <- tbl(con_sdm, "taxon_model") |>
   collect() |>
   pivot_wider(names_from = ds_key, values_from = mdl_seq)
 
-spp_sci_cmn_fixes <- tribble(
-  ~scientific_name,         ~common_name,
-  "Eubalaena glacialis",    "North Atlantic right whale", # OLD: black right whale
-  "Megaptera novaeangliae", "humpback whale",             # OLD: hump
-  "Balaena mysticetus",     "bowhead whale"               # OLD: Arctic right whale
-)
-
 d_spp <- d_spp |>
   left_join(d_tm, by = "taxon_id") |>
   mutate(
-    common_name = recode_values(
-      # TODO: update common names in DB
-      scientific_name,
-      from = spp_sci_cmn_fixes$scientific_name,
-      to   = spp_sci_cmn_fixes$common_name,
-      default = common_name),
     lbl_cmn = ifelse(
       !is.na(common_name),
       glue(" ({common_name})", .trim = F),

@@ -1531,13 +1531,6 @@ server <- function(input, output, session) {
         mutate(er_score = er_score / 100)
     }
 
-    spp_sci_cmn_fixes <- tribble(
-      ~scientific_name         , ~common_name                 ,
-      "Eubalaena glacialis"    , "North Atlantic right whale" , # OLD: black right whale
-      "Megaptera novaeangliae" , "humpback whale"             , # OLD: hump
-      "Balaena mysticetus"     , "bowhead whale" # OLD: Arctic right whale
-    )
-
     # rename columns
     d_spp |>
       mutate(
@@ -1551,13 +1544,6 @@ server <- function(input, output, session) {
           glue(
             "https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}"
           )
-        ),
-        sp_common = recode_values(
-          # TODO: update common names in DB
-          sp_scientific,
-          from = spp_sci_cmn_fixes$scientific_name,
-          to = spp_sci_cmn_fixes$common_name,
-          default = sp_common
         )
       ) |>
       # TODO: construct URL
