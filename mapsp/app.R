@@ -52,8 +52,8 @@ dir_big <- ifelse(
 is_prod <- Sys.getenv("MSENS_ENV") == "prod"
 pmtiles_base_url <- ifelse(
   is_prod,
-  "/pmtiles",
-  "https://file.marinesensitivity.org/pmtiles")
+  glue("/pmtiles/{ver}"),
+  glue("https://file.marinesensitivity.org/pmtiles/{ver}"))
 tbl_er <- "ply_ecoregions_2025"
 tbl_pra <- glue("ply_programareas_2026_{ver}")
 
