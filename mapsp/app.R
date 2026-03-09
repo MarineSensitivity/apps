@@ -32,7 +32,7 @@ options(
 verbose <- T
 
 # version ----
-ver <- "v3"
+ver <- "v4"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -52,8 +52,8 @@ dir_big <- ifelse(
 is_prod <- Sys.getenv("MSENS_ENV") == "prod"
 pmtiles_base_url <- ifelse(
   is_prod,
-  "/pmtiles",
-  "https://file.marinesensitivity.org/pmtiles")
+  glue("/pmtiles/{ver}"),
+  glue("https://file.marinesensitivity.org/pmtiles/{ver}"))
 tbl_er <- "ply_ecoregions_2025"
 tbl_pra <- glue("ply_programareas_2026_{ver}")
 
@@ -140,7 +140,7 @@ ds_keys_mask <- d_datasets |> filter(is_mask) |> pull(ds_key)
 
 # query taxon base data (no per-dataset columns)
 d_spp <- tbl(con_sdm, "taxon") |>
-  filter(is_ok, !is.na(mdl_seq)) |>
+  filter(!is.na(is_ok), is_ok == T, !is.na(mdl_seq)) |>
   select(
     taxon_id, scientific_name, common_name, sp_cat, n_ds, mdl_seq,
     worms_id, redlist_code, esa_code, esa_source,
