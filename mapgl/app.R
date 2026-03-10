@@ -1115,6 +1115,7 @@ server <- function(input, output, session) {
               stops = cols_pra,
               na_color = "lightgrey"
             ),
+            fill_opacity = 0.7,
             fill_outline_color = "white",
             tooltip = concat("Value: ", get_column(lyr)),
             hover_options = list(
