@@ -706,15 +706,17 @@ server <- function(input, output, session) {
           tags$li(tags$a(
             href   = "../mapsp/",
             target = "_blank",
-            "Species app"), " for viewing individual species distributions."),
+            "Species app"), " for mapping individual species distributions"),
           tags$li(tags$a(
             href   = "https://marinesensitivity.org/docs/",
             target = "_blank",
-            "Documentation"), " for methods and data sources."))),
+            "Documentation"), " for methods and data sources"))),
       footer = tagList(
         checkboxInput(
           "chk_show_splash",
-          "Show this welcome screen on startup",
+          tagList(
+            "Show this welcome screen on startup", br(),
+            helpText("Click About (upper right) to revisit this screen later")),
           value = TRUE),
         actionButton("btn_tour", "Take a Tour", icon = icon("route")),
         modalButton("Explore")

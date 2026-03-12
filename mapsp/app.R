@@ -297,22 +297,24 @@ server <- function(input, output, session) {
           alt   = "Marine Sensitivity Methods Overview"),
         tags$p(
           "Explore individual species distribution models across US waters.",
-          "Search by common or scientific name and view habitat suitability maps.",
+          "Search by common or scientific name and view merged model or any input distribution (range or suitability).",
           "Also see:"),
         tags$ul(
           tags$li(tags$a(
             href   = "../mapgl/",
             target = "_blank",
-            "Composite Scores app"), " for aggregated sensitivity maps."),
+            "Composite Scores app"), " for aggregated sensitivity maps"),
           tags$li(tags$a(
             href   = "https://marinesensitivity.org/docs/",
             target = "_blank",
-            "Documentation"), " for methods and data sources."))
+            "Documentation"), " for methods and data sources"))
       ),
       footer = tagList(
         checkboxInput(
           "chk_show_splash",
-          "Show this welcome screen on startup",
+          tagList(
+            "Show this welcome screen on startup", br(),
+            helpText("Click About (upper right) to revisit this screen later")),
           value = TRUE),
         actionButton("btn_tour", "Take a Tour", icon = icon("route")),
         modalButton("Explore"))
