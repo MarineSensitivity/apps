@@ -204,16 +204,34 @@ ui <- page_sidebar(
     tags$style(HTML("
       .mapboxgl-popup-content{color:black;}
       #ds_layer_container {display: none;}
+      .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+      .header-right .action-button { background: none; border: none; color: inherit; cursor: pointer; text-decoration: underline; font-size: 0.9em; padding: 0; }
+      .modal-footer { flex-wrap: wrap; justify-content: center; }
+      .modal-footer .form-group { width: 100%; margin-bottom: 0.5rem; }
     ")),
     tags$script(HTML("
       Shiny.addCustomMessageHandler('updateTitle', function(title) {
         document.title = title;
       });
+      $(document).on('shiny:connected', function() {
+        var show = localStorage.getItem('msens_mapsp_show_splash');
+        Shiny.setInputValue('show_splash_pref', show === null ? 'true' : show);
+      });
+      Shiny.addCustomMessageHandler('saveSplashPref', function(val) {
+        localStorage.setItem('msens_mapsp_show_splash', val);
+      });
     "))
   ),
   useConductor(),
-  titlePanel(
-    glue("BOEM Marine Sensitivity ({ver}) species distribution")),
+  title = div(
+    style = "display: flex; align-items: center; width: 100%;",
+    span(glue("BOEM Marine Sensitivity ({ver}) species distribution")),
+    div(
+      class = "header-right",
+      actionLink("btn_about", "About"),
+      input_dark_mode(id = "tgl_dark", mode = "dark")
+    )
+  ),
 
   sidebar = sidebar(
     open = F,
@@ -221,10 +239,6 @@ ui <- page_sidebar(
       "tgl_sphere",
       "Sphere",
       T
-    ),
-    input_dark_mode(
-      id = "tgl_dark",
-      mode = "dark"
     ),
     uiOutput("species_info")
   ),
@@ -269,37 +283,57 @@ ui <- page_sidebar(
 
 # server ----
 server <- function(input, output, session) {
-  # welcome modal ----
-  showModal(modalDialog(
-    title     = "Welcome to BOEM Marine Sensitivity",
-    size      = "m",
-    easyClose = TRUE,
-    tags$div(
-      style = "text-align: center;",
-      tags$img(
-        src   = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
-        style = "max-width: 80%; height: auto; max-height: 300px; margin-bottom: 10px;",
-        alt   = "Marine Sensitivity Methods Overview"),
-      tags$p(
-        "Explore individual species distribution models across US waters.",
-        "Search by common or scientific name and view habitat suitability maps."),
-      tags$p(
-        "Also see the ",
-        tags$a(
-          href   = "../mapgl/",
-          target = "_blank",
-          "Composite Scores app"), " for aggregated sensitivity maps."),
-      tags$p(
-        "For full methodology, see the ",
-        tags$a(
-          href   = "https://marinesensitivity.org/docs/",
-          target = "_blank",
-          "project documentation"), ".")
-    ),
-    footer = tagList(
-      actionButton("btn_tour", "Take a Tour", icon = icon("route")),
-      modalButton("Explore"))
-  ))
+  # show_welcome helper ----
+  show_welcome <- function() {
+    showModal(modalDialog(
+      title     = "Welcome to BOEM Marine Sensitivity",
+      size      = "m",
+      easyClose = TRUE,
+      tags$div(
+        style = "text-align: left;",
+        tags$img(
+          src   = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
+          style = "max-width: 80%; height: auto; max-height: 300px; margin-bottom: 10px;",
+          alt   = "Marine Sensitivity Methods Overview"),
+        tags$p(
+          "Explore individual species distribution models across US waters.",
+          "Search by common or scientific name and view habitat suitability maps.",
+          "Also see:"),
+        tags$ul(
+          tags$li(tags$a(
+            href   = "../mapgl/",
+            target = "_blank",
+            "Composite Scores app"), " for aggregated sensitivity maps."),
+          tags$li(tags$a(
+            href   = "https://marinesensitivity.org/docs/",
+            target = "_blank",
+            "Documentation"), " for methods and data sources."))
+      ),
+      footer = tagList(
+        checkboxInput(
+          "chk_show_splash",
+          "Show this welcome screen on startup",
+          value = TRUE),
+        actionButton("btn_tour", "Take a Tour", icon = icon("route")),
+        modalButton("Explore"))
+    ))
+  }
+
+  # welcome modal on startup ----
+  observe({
+    if (isTRUE(input$show_splash_pref == "true"))
+      show_welcome()
+  }) |> bindEvent(input$show_splash_pref, once = TRUE)
+
+  # about link ----
+  observe({ show_welcome() }) |> bindEvent(input$btn_about)
+
+  # save splash preference ----
+  observe({
+    session$sendCustomMessage(
+      "saveSplashPref",
+      tolower(as.character(input$chk_show_splash)))
+  }) |> bindEvent(input$chk_show_splash)
 
   # conductor tour ----
   tour <- Conductor$new()$

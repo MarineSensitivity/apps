@@ -538,27 +538,50 @@ light <- bs_theme()
 # dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
 dark <- bs_theme()
 ui <- page_sidebar(
-  tags$head(tags$style(HTML(
-    ".mapboxgl-popup-content{color:black;}
-     .bslib-full-screen .girafe_container_std {
-       height: calc(100vh - 120px) !important;
-       width: 100% !important;
-     }
-     .bslib-full-screen .card-body {
-       height: calc(100vh - 120px) !important;
-       display: flex;
-       flex-direction: column;
-     }
-     .bslib-full-screen #plot_flower {
-       height: 100% !important;
-       flex: 1;
-     }
-     #plot_flower {
-       height: 300px;
-     }"
-  ))),
+  tags$head(
+    tags$style(HTML("
+      .mapboxgl-popup-content{color:black;}
+      .bslib-full-screen .girafe_container_std {
+        height: calc(100vh - 120px) !important;
+        width: 100% !important;
+      }
+      .bslib-full-screen .card-body {
+        height: calc(100vh - 120px) !important;
+        display: flex;
+        flex-direction: column;
+      }
+      .bslib-full-screen #plot_flower {
+        height: 100% !important;
+        flex: 1;
+      }
+      #plot_flower {
+        height: 300px;
+      }
+      .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+      .header-right .action-button { background: none; border: none; color: inherit; cursor: pointer; text-decoration: underline; font-size: 0.9em; padding: 0; }
+      .modal-footer { flex-wrap: wrap; justify-content: center; }
+      .modal-footer .form-group { width: 100%; margin-bottom: 0.5rem; }
+    ")),
+    tags$script(HTML("
+      $(document).on('shiny:connected', function() {
+        var show = localStorage.getItem('msens_mapgl_show_splash');
+        Shiny.setInputValue('show_splash_pref', show === null ? 'true' : show);
+      });
+      Shiny.addCustomMessageHandler('saveSplashPref', function(val) {
+        localStorage.setItem('msens_mapgl_show_splash', val);
+      });
+    "))
+  ),
   useConductor(),
-  title = glue("BOEM Marine Sensitivity ({ver})"),
+  title = div(
+    style = "display: flex; align-items: center; width: 100%;",
+    span(glue("BOEM Marine Sensitivity ({ver})")),
+    div(
+      class = "header-right",
+      actionLink("btn_about", "About"),
+      input_dark_mode(id = "tgl_dark", mode = "dark")
+    )
+  ),
   sidebar = sidebar(
     tags$div(
       id = "tour_subregion",
@@ -594,10 +617,6 @@ ui <- page_sidebar(
       "Sphere",
       T
     ),
-    input_dark_mode(
-      id = "tgl_dark",
-      mode = "dark"
-    )
   ),
 
   navset_card_tab(
@@ -668,46 +687,56 @@ server <- function(input, output, session) {
   #   if (isTRUE(input$tgl_dark)) dark else light
   # ))
 
-  # welcome modal ----
-  showModal(modalDialog(
-    title = "Welcome to BOEM Marine Sensitivity",
-    size = "m",
-    easyClose = TRUE,
-    tags$div(
-      style = "text-align: center;",
-      tags$img(
-        src = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
-        style = "max-width: 80%; height: auto; max-height: 300px; margin-bottom: 10px;",
-        alt = "Marine Sensitivity Methods Overview"
-      ),
-      tags$p(
-        "Explore composite sensitivity scores across US waters,",
-        "view species categories, and drill into program area details."
-      ),
-      tags$p(
-        "Also see the ",
-        tags$a(
-          href = "../mapsp/",
-          target = "_blank",
-          "Species Distribution app"
-        ),
-        " for individual species maps."
-      ),
-      tags$p(
-        "For full methodology, see the ",
-        tags$a(
-          href = "https://marinesensitivity.org/docs/",
-          target = "_blank",
-          "project documentation"
-        ),
-        "."
+  # show_welcome helper ----
+  show_welcome <- function() {
+    showModal(modalDialog(
+      title     = "Welcome to BOEM Marine Sensitivity",
+      size      = "m",
+      easyClose = TRUE,
+      tags$div(
+        style = "text-align: left;",
+        tags$img(
+          src   = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
+          style = "max-width: 80%; height: auto; max-height: 300px; margin-bottom: 10px;",
+          alt   = "Marine Sensitivity Methods Overview"),
+        tags$p(
+          "Explore composite sensitivity scores across US Program Areas,",
+          "component scores, and species found in cells or Program Areas. Also see:"),
+        tags$ul(
+          tags$li(tags$a(
+            href   = "../mapsp/",
+            target = "_blank",
+            "Species app"), " for viewing individual species distributions."),
+          tags$li(tags$a(
+            href   = "https://marinesensitivity.org/docs/",
+            target = "_blank",
+            "Documentation"), " for methods and data sources."))),
+      footer = tagList(
+        checkboxInput(
+          "chk_show_splash",
+          "Show this welcome screen on startup",
+          value = TRUE),
+        actionButton("btn_tour", "Take a Tour", icon = icon("route")),
+        modalButton("Explore")
       )
-    ),
-    footer = tagList(
-      actionButton("btn_tour", "Take a Tour", icon = icon("route")),
-      modalButton("Explore")
-    )
-  ))
+    ))
+  }
+
+  # welcome modal on startup ----
+  observe({
+    if (isTRUE(input$show_splash_pref == "true"))
+      show_welcome()
+  }) |> bindEvent(input$show_splash_pref, once = TRUE)
+
+  # about link ----
+  observe({ show_welcome() }) |> bindEvent(input$btn_about)
+
+  # save splash preference ----
+  observe({
+    session$sendCustomMessage(
+      "saveSplashPref",
+      tolower(as.character(input$chk_show_splash)))
+  }) |> bindEvent(input$chk_show_splash)
 
   # conductor tour ----
   tour <- Conductor$new()$step(
