@@ -9,6 +9,7 @@ librarian::shelf(
   here,
   htmltools,
   RColorBrewer,
+  readr,
   scales,
   sf,
   shiny,
@@ -56,10 +57,12 @@ pmtiles_base_url <- ifelse(
   glue("https://file.marinesensitivity.org/pmtiles/{ver}"))
 tbl_er <- "ply_ecoregions_2025"
 tbl_pra <- glue("ply_programareas_2026_{ver}")
+tbl_pra_pm <- "ply_programareas_2026"
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
 mask_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
+pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
 sdm_db   <- glue("{dir_big}/sdm.duckdb")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
@@ -118,6 +121,24 @@ add_fixed_range_raster <- function(
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 
 # data prep ----
+
+# * pra_pts: program area label points (cached) ----
+pra_pts_csv <- here("mapsp/cache/pra_label_pts.csv")
+if (!file.exists(pra_pts_csv)) {
+  pra_pts <- read_sf(pra_gpkg) |>
+    st_shift_longitude() |>
+    st_point_on_surface() |>
+    select(programarea_key, programarea_name) |>
+    mutate(
+      lng = st_coordinates(geometry)[, 1],
+      lat = st_coordinates(geometry)[, 2]) |>
+    st_drop_geometry()
+  write_csv(pra_pts, pra_pts_csv)
+} else {
+  pra_pts <- read_csv(pra_pts_csv)
+}
+pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
+
 r_cell <- rast(cell_tif)
 r_masks <- list(
   programarea_key = rast(mask_tif, lyrs = "programarea_key"),
@@ -607,35 +628,28 @@ server <- function(input, output, session) {
     mapboxgl(
       style = mapbox_style("dark"),
       projection = ifelse(input$tgl_sphere, "globe", "mercator"),
-      # projection = "globe",
       zoom = 3.5,
       center = c(-106, 40.1)
     ) |>
-      add_pmtiles_source(
-        id = "er_src",
-        url = glue("{pmtiles_base_url}/{tbl_er}.pmtiles")
-      ) |>
-      add_pmtiles_source(
-        id = "pra_src",
-        url = glue("{pmtiles_base_url}/{tbl_pra}.pmtiles")
-      ) |>
-      add_line_layer(
-        id = "pra_ln",
-        source = "pra_src",
-        source_layer = tbl_pra,
-        line_color = "white",
-        line_opacity = 1,
-        line_width = 1
-      ) |>
-      add_line_layer(
-        id = "er_ln",
-        source = "er_src",
-        source_layer = tbl_er,
-        line_color = "black",
-        line_opacity = 1,
-        line_width = 3,
-        before_id = "pra_ln"
-      ) |>
+      msens::add_pmline(list(
+        list(url = glue("{pmtiles_base_url}/{tbl_pra_pm}.pmtiles"),
+             source_layer = tbl_pra_pm, id = "pra_ln", source_id = "pra_src",
+             line_color = "white", line_width = 1),
+        list(url = glue("{pmtiles_base_url}/{tbl_er}.pmtiles"),
+             source_layer = tbl_er, id = "er_ln", source_id = "er_src",
+             line_color = "black", line_width = 3, before_id = "pra_ln"))) |>
+      add_fill_layer(
+        id           = "pra_hover",
+        source       = "pra_src",
+        source_layer = tbl_pra_pm,
+        fill_opacity = 0.01,
+        fill_color   = "white",
+        tooltip      = get_column("programarea_name"),
+        before_id    = "pra_ln") |>
+      msens::add_pmlabel(list(
+        list(source     = pra_pts,
+             text_field = "programarea_key",
+             id         = "pra_lbl"))) |>
       add_fullscreen_control() |>
       add_navigation_control() |>
       add_scale_control() |>
@@ -644,8 +658,8 @@ server <- function(input, output, session) {
       add_layers_control(
         layers = list(
           "Program Area outlines" = "pra_ln",
-          "Ecoregions outlines"   = "er_ln",
-          "Raster cell values"    = "r_lyr"))
+          "Program Area labels"   = "pra_lbl",
+          "Ecoregions outlines"   = "er_ln"))
   })
 
   # * parse_er_clr helper ----
@@ -815,6 +829,7 @@ server <- function(input, output, session) {
       add_layers_control(
         layers = list(
           "Program Area outlines" = "pra_ln",
+          "Program Area labels"   = "pra_lbl",
           "Ecoregion outlines"    = "er_ln",
           "Raster cell values"    = "r_lyr"))
 

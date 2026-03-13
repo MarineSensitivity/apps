@@ -86,6 +86,7 @@ taxonomy_csv <- here(
 tbl_er <- "ply_ecoregions_2025"
 tbl_sr <- glue("ply_subregions_2026_{ver}")
 tbl_pra <- glue("ply_programareas_2026_{ver}")
+tbl_pra_pm <- "ply_programareas_2026"
 
 v_required <- c(
   mapbox_tkn_txt,
@@ -306,6 +307,23 @@ plot_flower <- function(
 }
 
 # data prep ----
+
+# * pra_pts: program area label points (cached) ----
+pra_pts_csv <- here("mapgl/cache/pra_label_pts.csv")
+if (!file.exists(pra_pts_csv)) {
+  pra_pts <- read_sf(pra_gpkg) |>
+    st_shift_longitude() |>
+    st_point_on_surface() |>
+    select(programarea_key, programarea_name) |>
+    mutate(
+      lng = st_coordinates(geom)[, 1],
+      lat = st_coordinates(geom)[, 2]) |>
+    st_drop_geometry()
+  write_csv(pra_pts, pra_pts_csv)
+} else {
+  pra_pts <- read_csv(pra_pts_csv)
+}
+pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
 
 # * sr_choices ----
 # sr_choices <- c(
@@ -569,6 +587,36 @@ ui <- page_sidebar(
       });
       Shiny.addCustomMessageHandler('saveSplashPref', function(val) {
         localStorage.setItem('msens_mapgl_show_splash', val);
+      });
+
+      // program area tooltip lookup (updated from server)
+      var praTooltips = {};
+      var praPopup = null;
+      var praHandlersAdded = false;
+      Shiny.addCustomMessageHandler('setPraTooltips', function(data) {
+        praTooltips = data;
+        // add hover handlers once map is ready
+        if (praHandlersAdded) return;
+        var widget = HTMLWidgets.find('#map');
+        if (!widget) return;
+        var map = widget.getMap();
+        if (!map) return;
+        praHandlersAdded = true;
+        praPopup = new mapboxgl.Popup({
+          closeButton: false, closeOnClick: false
+        });
+        map.on('mousemove', 'pra_lyr', function(e) {
+          if (!e.features || !e.features.length) return;
+          var key = e.features[0].properties.programarea_key;
+          var tip = praTooltips[key] ||
+            e.features[0].properties.programarea_name || key;
+          map.getCanvas().style.cursor = 'pointer';
+          praPopup.setLngLat(e.lngLat).setHTML(tip).addTo(map);
+        });
+        map.on('mouseleave', 'pra_lyr', function() {
+          map.getCanvas().style.cursor = '';
+          praPopup.remove();
+        });
       });
     "))
   ),
@@ -850,57 +898,23 @@ server <- function(input, output, session) {
     cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
     rng_r <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
-    # TODO: eval: input = list(tgl_sphere = T)
     mapboxgl(
       style = mapbox_style("dark"),
       projection = ifelse(input$tgl_sphere, "globe", "mercator")
     ) |>
       fit_bounds(bbox) |>
-      add_pmtiles_source(
-        id = "er_src",
-        url = glue("{pmtiles_base_url}/{tbl_er}.pmtiles")
-      ) |>
-      add_pmtiles_source(
-        id = "pra_src",
-        url = glue("{pmtiles_base_url}/{tbl_pra}.pmtiles")
-      ) |>
-      add_image_source(
-        id = "r_src",
-        data = r,
-        colors = cols_r
-      ) |>
-      # add_line_layer(
-      #   id = "pa_ln",
-      #   source = "pa_src",
-      #   source_layer = "public.ply_planareas_2025",
-      #   line_color = "white",
-      #   line_opacity = 1,
-      #   line_width = 1
-      # ) |>
-      add_line_layer(
-        id = "pra_ln",
-        source = "pra_src",
-        source_layer = tbl_pra,
-        line_color = "white",
-        line_opacity = 1,
-        line_width = 1
-      ) |>
-      add_line_layer(
-        id = "er_ln",
-        source = "er_src",
-        source_layer = tbl_er,
-        line_color = "black",
-        line_opacity = 1,
-        line_width = 3,
-        before_id = "pra_ln"
-      ) |>
-      add_raster_layer(
-        id = "r_lyr",
-        source = "r_src",
-        raster_opacity = 0.6,
-        raster_resampling = "nearest",
-        before_id = "er_ln"
-      ) |>
+      msens::add_pmline(list(
+        list(url = glue("{pmtiles_base_url}/{tbl_pra_pm}.pmtiles"),
+             source_layer = tbl_pra_pm, id = "pra_ln", source_id = "pra_src",
+             line_color = "white", line_width = 1),
+        list(url = glue("{pmtiles_base_url}/{tbl_er}.pmtiles"),
+             source_layer = tbl_er, id = "er_ln", source_id = "er_src",
+             line_color = "black", line_width = 3, before_id = "pra_ln"))) |>
+      msens::add_pmlabel(list(
+        list(source     = pra_pts,
+             text_field = "programarea_key",
+             id         = "pra_lbl"))) |>
+      msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
       mapgl::add_legend(
         get_lyr_name(lyr_default),
         values = rng_r,
@@ -913,11 +927,11 @@ server <- function(input, output, session) {
       add_layers_control(
         layers = list(
           "Program Area outlines" = "pra_ln",
-          "Ecoregions outlines" = "er_ln",
-          "Raster cell values" = "r_lyr"
+          "Program Area labels"   = "pra_lbl",
+          "Ecoregions outlines"   = "er_ln",
+          "Raster cell values"    = "r_lyr"
         )
       ) |>
-      # add_draw_control(position = "top-right") |>
       add_geocoder_control(placeholder = "Go to location")
   })
 
@@ -960,18 +974,7 @@ server <- function(input, output, session) {
 
         # add raster source and layer
         map_proxy |>
-          add_image_source(
-            id = "r_src",
-            data = r,
-            colors = cols_r
-          ) |>
-          add_raster_layer(
-            id = "r_lyr",
-            source = "r_src",
-            raster_opacity = 0.6,
-            raster_resampling = "nearest",
-            before_id = "er_ln"
-          ) |>
+          msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
           mapgl::add_legend(
             get_lyr_name(input$sel_lyr),
             values = rng_r,
@@ -986,8 +989,9 @@ server <- function(input, output, session) {
           add_layers_control(
             layers = list(
               "Program Area outlines" = "pra_ln",
-              "Ecoregion outlines" = "er_ln",
-              "Raster cell values" = "r_lyr"
+              "Program Area labels"   = "pra_lbl",
+              "Ecoregion outlines"    = "er_ln",
+              "Raster cell values"    = "r_lyr"
             )
           )
 
@@ -1103,56 +1107,66 @@ server <- function(input, output, session) {
           pull(programarea_key)
         pra_filter <- c("in", "programarea_key", pra_keys)
 
-        # show program area layer
+        # query program area values from db
         n_cols <- 11
         cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
 
-        # get range of program area values
-        rng_pra <- tbl(con_sdm, "zone") |>
+        d_pra <- tbl(con_sdm, "zone") |>
           filter(
             fld == "programarea_key",
-            value %in% pra_keys
-          ) |>
+            value %in% pra_keys) |>
           select(programarea_key = value, zone_seq) |>
           inner_join(tbl(con_sdm, "zone_metric"), by = join_by(zone_seq)) |>
           inner_join(
             tbl(con_sdm, "metric") |>
               filter(metric_key == !!lyr),
-            by = join_by(metric_seq)
-          ) |>
-          pull(value) |>
-          range()
+            by = join_by(metric_seq)) |>
+          select(programarea_key, value) |>
+          collect()
 
-        # colors
+        rng_pra <- range(d_pra$value)
         cols_pra <- colorRampPalette(cols_r, space = "Lab")(n_cols)
-        brks_pra <- seq(rng_pra[1], rng_pra[2], length.out = n_cols)
+
+        # assign color per program area by scaling value to color index
+        d_pra <- d_pra |>
+          mutate(
+            val_scaled = (value - rng_pra[1]) / max(rng_pra[2] - rng_pra[1], 1e-6),
+            col_idx    = pmin(pmax(round(val_scaled * (n_cols - 1)) + 1, 1), n_cols),
+            fill_color = cols_pra[col_idx])
+
+        # build tooltip lookup and send to client
+        pra_tooltip <- d_pra |>
+          left_join(
+            pra_pts |> st_drop_geometry() |> select(programarea_key, programarea_name),
+            by = "programarea_key") |>
+          mutate(tip = glue("{programarea_name}: {round(value)}")) |>
+          select(programarea_key, tip) |>
+          deframe() |>
+          as.list()
+        session$sendCustomMessage("setPraTooltips", pra_tooltip)
 
         # remove layers if exist
         map_proxy |>
           clear_layer("r_lyr") |>
-          # clear_layer("pa_lyr") |>
           clear_layer("pra_lyr") |>
           clear_legend()
 
-        # add program area fill layer
+        # add program area fill layer using pmtiles + match_expr for color
         map_proxy |>
           add_fill_layer(
             id = "pra_lyr",
             source = "pra_src",
-            source_layer = tbl_pra,
-            fill_color = interpolate(
-              column = lyr,
-              values = brks_pra,
-              stops = cols_pra,
-              na_color = "lightgrey"
-            ),
+            source_layer = tbl_pra_pm,
+            fill_color = match_expr(
+              column  = "programarea_key",
+              values  = d_pra$programarea_key,
+              stops   = d_pra$fill_color,
+              default = "lightgrey"),
             fill_opacity = 0.7,
             fill_outline_color = "white",
-            tooltip = concat("Value: ", get_column(lyr)),
             hover_options = list(
-              fill_color = "purple",
-              fill_opacity = 1
-            ),
+              fill_color   = "purple",
+              fill_opacity = 1),
             before_id = "pra_ln",
             filter = pra_filter
           ) |>
@@ -1167,8 +1181,9 @@ server <- function(input, output, session) {
           add_layers_control(
             layers = list(
               "Program Area outlines" = "pra_ln",
-              "Ecoregion outlines" = "er_ln",
-              "Program Area values" = "pra_lyr"
+              "Program Area labels"   = "pra_lbl",
+              "Ecoregion outlines"    = "er_ln",
+              "Program Area values"   = "pra_lyr"
             )
           )
 
