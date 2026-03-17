@@ -1327,39 +1327,45 @@ server <- function(input, output, session) {
       #       )
       #   }
     } else if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
-      # get data for program area
+      # get data for program area from database
       pra_name <- rx$clicked_pra$properties$programarea_name
-      pra_key <- rx$clicked_pra$properties$programarea_key
+      pra_key  <- rx$clicked_pra$properties$programarea_key
 
       if (verbose) {
-        message(glue("Rendering flower plot for Program Area: {pra_name}"))
+        message(glue("Rendering flower plot for Program Area: {pra_name} ({pra_key})"))
       }
 
-      l <- rx$clicked_pra$properties
-      l <- l[str_detect(names(l), "_ecoregion_rescaled$")]
+      # look up zone_seq for this program area
+      z_seq <- tbl(con_sdm, "zone") |>
+        filter(tbl == !!tbl_pra, value == !!pra_key) |>
+        pull(zone_seq)
 
-      d_fl <- tibble(
-        metric_key = names(l),
-        score = unlist(l)
-      ) |>
-        mutate(
-          component = metric_key |>
-            str_replace("extrisk_", "") |>
-            str_replace("_ecoregion_rescaled", "") |>
-            str_replace("_", " "),
-          even = 1
-        ) |>
-        filter(component != "all")
+      if (length(z_seq) > 0) {
+        d_fl <- tbl(con_sdm, "metric") |>
+          filter(str_detect(metric_key, ".*_ecoregion_rescaled$")) |>
+          left_join(
+            tbl(con_sdm, "zone_metric"),
+            by = "metric_seq") |>
+          filter(zone_seq == !!z_seq) |>
+          select(metric_key, score = value) |>
+          mutate(
+            component = metric_key |>
+              str_replace("extrisk_", "") |>
+              str_replace("_ecoregion_rescaled", "") |>
+              str_replace("_", " "),
+            even = 1) |>
+          filter(component != "all") |>
+          collect()
 
-      if (nrow(d_fl) > 0) {
-        d_fl |>
-          plot_flower(
-            fld_category = component,
-            fld_height = score,
-            fld_width = even,
-            tooltip_expr = "{component}: {round(score, 2)}",
-            title = pra_name
-          )
+        if (nrow(d_fl) > 0) {
+          d_fl |>
+            plot_flower(
+              fld_category = component,
+              fld_height   = score,
+              fld_width    = even,
+              tooltip_expr = "{component}: {round(score, 2)}",
+              title        = pra_name)
+        }
       }
     }
   })

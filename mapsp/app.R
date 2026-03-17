@@ -130,8 +130,8 @@ if (!file.exists(pra_pts_csv)) {
     st_point_on_surface() |>
     select(programarea_key, programarea_name) |>
     mutate(
-      lng = st_coordinates(geometry)[, 1],
-      lat = st_coordinates(geometry)[, 2]) |>
+      lng = st_coordinates(geom)[, 1],
+      lat = st_coordinates(geom)[, 2]) |>
     st_drop_geometry()
   write_csv(pra_pts, pra_pts_csv)
 } else {
