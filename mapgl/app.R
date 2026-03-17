@@ -24,6 +24,7 @@ librarian::shelf(
   ggplot2,
   glue,
   here,
+  MarineSensitivity/msens,
   yogevherz / plotme,
   plotly,
   purrr,
