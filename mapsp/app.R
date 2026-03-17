@@ -33,7 +33,7 @@ options(
 verbose <- T
 
 # version ----
-ver <- "v4"
+ver <- "v4b"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -53,8 +53,8 @@ dir_big <- ifelse(
 is_prod <- Sys.getenv("MSENS_ENV") == "prod"
 pmtiles_base_url <- ifelse(
   is_prod,
-  glue("/pmtiles/{ver}"),
-  glue("https://file.marinesensitivity.org/pmtiles/{ver}"))
+  "/pmtiles",
+  "https://file.marinesensitivity.org/pmtiles")
 tbl_er <- "ply_ecoregions_2025"
 tbl_pra <- glue("ply_programareas_2026_{ver}")
 tbl_pra_pm <- "ply_programareas_2026"
@@ -202,7 +202,8 @@ spp_choices <- d_spp |>
   deframe()
 
 sel_sp_default <- d_spp |>
-  filter(scientific_name == "Balaenoptera ricei") |>
+  # filter(scientific_name == "Balaenoptera ricei") |>
+  filter(scientific_name == "Dermochelys coriacea") |>
   pull(mdl_seq)
 
 # build reverse lookup: any mdl_seq -> (merged mdl_seq, ds_layer)

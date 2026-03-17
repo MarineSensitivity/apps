@@ -47,7 +47,7 @@ options(readr.show_col_types = F)
 verbose <- interactive()
 
 # version ----
-ver <- "v4"
+ver <- "v4b"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -68,8 +68,8 @@ dir_big <- ifelse(
 is_prod <- Sys.getenv("MSENS_ENV") == "prod"
 pmtiles_base_url <- ifelse(
   is_prod,
-  glue("/pmtiles/{ver}"),
-  glue("https://file.marinesensitivity.org/pmtiles/{ver}"))
+  "/pmtiles",
+  "https://file.marinesensitivity.org/pmtiles")
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
