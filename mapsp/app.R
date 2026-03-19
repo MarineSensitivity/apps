@@ -8,6 +8,7 @@ librarian::shelf(
   glue,
   here,
   htmltools,
+  MarineSensitivity/msens,
   RColorBrewer,
   readr,
   scales,
