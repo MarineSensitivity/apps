@@ -268,8 +268,13 @@ ui <- page_sidebar(
         document.title = title;
       });
       $(document).on('shiny:connected', function() {
-        var show = localStorage.getItem('msens_mapsp_show_splash');
-        Shiny.setInputValue('show_splash_pref', show === null ? 'true' : show);
+        var params = new URLSearchParams(window.location.search);
+        if (params.get('splash') === 'false') {
+          Shiny.setInputValue('show_splash_pref', 'false');
+        } else {
+          var show = localStorage.getItem('msens_mapsp_show_splash');
+          Shiny.setInputValue('show_splash_pref', show === null ? 'true' : show);
+        }
       });
       Shiny.addCustomMessageHandler('saveSplashPref', function(val) {
         localStorage.setItem('msens_mapsp_show_splash', val);
