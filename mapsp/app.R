@@ -231,6 +231,37 @@ ui <- page_sidebar(
       .header-right .action-button { background: none; border: none; color: inherit; cursor: pointer; text-decoration: underline; font-size: 0.9em; padding: 0; }
       .modal-footer { flex-wrap: wrap; justify-content: center; }
       .modal-footer .form-group { width: 100%; margin-bottom: 0.5rem; }
+
+      /* layer status bar */
+      .layer-bar {
+        display: flex; align-items: center; gap: 6px;
+        padding: 6px 12px; border-radius: 6px;
+        margin-top: -8px; margin-bottom: 8px; font-size: 0.9em;
+      }
+      .layer-bar.is-merged { background-color: #198754; color: white; }
+      .layer-bar.is-input  { background-color: #fd7e14; color: white; }
+      .layer-bar .layer-icon  { font-size: 1.1em; margin-right: 2px; }
+      .layer-bar .layer-label { font-weight: 600; }
+      .layer-bar .layer-links {
+        margin-left: auto; display: flex; gap: 4px;
+        flex-wrap: wrap; align-items: center;
+      }
+      .layer-bar .layer-pill {
+        display: inline-block; padding: 2px 10px; border-radius: 12px;
+        cursor: pointer; font-size: 0.85em;
+        border: 1.5px solid rgba(255,255,255,0.5);
+        background: rgba(255,255,255,0.15); color: inherit;
+        text-decoration: none; transition: background 0.15s, border-color 0.15s;
+      }
+      .layer-bar .layer-pill:hover {
+        background: rgba(255,255,255,0.3); border-color: rgba(255,255,255,0.8);
+      }
+      .layer-bar .layer-pill.active {
+        background: rgba(255,255,255,0.35); border-color: white; font-weight: 700;
+      }
+      .layer-bar .merged-link {
+        text-decoration: underline; cursor: pointer; color: inherit; font-weight: 600;
+      }
     ")),
     tags$script(HTML("
       Shiny.addCustomMessageHandler('updateTitle', function(title) {
@@ -285,7 +316,7 @@ ui <- page_sidebar(
           selected = "programarea_key",
           width    = "100%")))
   ),
-  uiOutput("current_layer_info"),
+  uiOutput("layer_bar"),
   # hidden radioButtons to maintain ds_layer input
   div(
     id = "ds_layer_container",
@@ -372,6 +403,12 @@ server <- function(input, output, session) {
       title    = "Mask Selection",
       text     = "Choose whether to overlay BOEM Program Area or Ecoregion boundaries on the map.",
       el       = "#tour_mask",
+      position = "bottom"
+    )$
+    step(
+      title    = "Layer Selector",
+      text     = "The colored bar shows which model layer is displayed. Green means the final Merged Model; orange means you are viewing a single input. Click the pills to switch layers.",
+      el       = ".layer-bar",
       position = "bottom"
     )$
     step(
@@ -466,18 +503,66 @@ server <- function(input, output, session) {
     rx_url_initialized(TRUE)
   })
 
-  # * current_layer_info ----
-  output$current_layer_info <- renderUI({
+  # * layer_bar ----
+  output$layer_bar <- renderUI({
     req(input$sel_sp, input$ds_layer)
 
-    sp_row     <- d_spp |> filter(mdl_seq == input$sel_sp)
-    layer_name <- layer_names[input$ds_layer]
-    mdl_seq    <- sp_row[[input$ds_layer]]
+    sp_row        <- d_spp |> filter(mdl_seq == input$sel_sp)
+    current_layer <- input$ds_layer
+    layer_name    <- layer_names[current_layer]
+    n_ds          <- sp_row$n_ds
 
-    tags$p(
-      tags$em(glue("Displaying: {layer_name} (mdl_seq: {mdl_seq})")),
-      style = "margin-top: -10px; margin-bottom: 10px; color: #888;"
-    )
+    # determine available layers (mirrors observeEvent input$sel_sp logic)
+    available <- c()
+    if (!is.na(sp_row$mdl_seq))
+      available <- c(available, c("Merged Model" = "mdl_seq"))
+    for (dk in ds_keys) {
+      if (dk %in% names(sp_row) && !is.na(sp_row[[dk]]))
+        available <- c(available, setNames(dk, mdl_names[dk]))
+    }
+
+    is_merged <- (current_layer == "mdl_seq")
+
+    # build pill buttons for each available layer
+    pills <- lapply(seq_along(available), function(i) {
+      ds_val   <- available[[i]]
+      ds_label <- names(available)[[i]]
+      active   <- ifelse(ds_val == current_layer, " active", "")
+      onclick_js <- sprintf(
+        "var r=document.querySelector('#ds_layer_container input[value=\"%s\"]'); if(r) r.click();",
+        ds_val)
+      tags$a(
+        class   = paste0("layer-pill", active),
+        onclick = onclick_js,
+        ds_label)
+    })
+
+    # build left content based on merged vs input state
+    if (is_merged) {
+      bar_class <- "layer-bar is-merged"
+      left_content <- tagList(
+        span(class = "layer-icon", "\u2713"),
+        span(class = "layer-label", "Merged Model"),
+        if (n_ds > 1) span(
+          style = "opacity: 0.85;",
+          glue(" (maximum of {n_ds} inputs)")))
+    } else {
+      bar_class <- "layer-bar is-input"
+      left_content <- tagList(
+        span(class = "layer-icon", "\u25B6"),
+        span(class = "layer-label",
+          glue("Viewing input: {layer_name}")),
+        span(" \u2014 "),
+        tags$a(
+          class   = "merged-link",
+          onclick = "var r=document.querySelector('#ds_layer_container input[value=\"mdl_seq\"]'); if(r) r.click();",
+          "show Merged Model"))
+    }
+
+    div(
+      class = bar_class,
+      left_content,
+      div(class = "layer-links", pills))
   })
 
   # * species_info ----
@@ -495,7 +580,7 @@ server <- function(input, output, session) {
     # current layer being displayed
     current_layer <- input$ds_layer
 
-    # helper to create model link (bold if currently displayed)
+    # helper to create model link (bold if currently displayed, in-page switch)
     make_link <- function(ds_key, type = "value") {
       if (!ds_key %in% names(d_sp)) return(NULL)
       ds_mdl_seq <- d_sp[[ds_key]]
@@ -510,7 +595,10 @@ server <- function(input, output, session) {
       } else {
         mdl_names[ds_key]
       }
-      HTML(glue('<a href="?mdl_seq={ds_mdl_seq}">{link_text}</a>{str_info}'))
+      onclick_js <- sprintf(
+        "var r=document.querySelector('#ds_layer_container input[value=&quot;%s&quot;]'); if(r) r.click(); return false;",
+        ds_key)
+      HTML(glue('<a href="?mdl_seq={ds_mdl_seq}" onclick="{onclick_js}">{link_text}</a>{str_info}'))
     }
 
     # value models (all non-merge datasets present for this species)
@@ -532,7 +620,7 @@ server <- function(input, output, session) {
       sub_items   <- lapply(value_models, function(k) tags$li(make_link(k)))
       values_ui   <- tags$ul(
         tags$li(
-          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}">{merge_label}</a><br><em>(maximum of):</em>')),
+          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}" onclick="var r=document.querySelector(\'#ds_layer_container input[value=&quot;mdl_seq&quot;]\'); if(r) r.click(); return false;">{merge_label}</a><br><em>(maximum of):</em>')),
           tags$ul(sub_items)
         )
       )
