@@ -34,7 +34,7 @@ options(
 verbose <- T
 
 # version ----
-ver <- "v5"
+ver <- "v6"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -464,6 +464,9 @@ server <- function(input, output, session) {
       lookup_row <- mdl_seq_lookup |>
         filter(input_mdl_seq == url_mdl_seq)
 
+      # check if mdl_seq is a valid merged model in spp_choices
+      all_mdl_seqs <- unlist(spp_choices, use.names = FALSE)
+
       if (nrow(lookup_row) > 0) {
         # found: select the species (merged model) and store layer to apply later
         merged_seq <- lookup_row$merged_mdl_seq[1]
@@ -477,8 +480,8 @@ server <- function(input, output, session) {
           selected = merged_seq
         )
         rx_ds_layer(ds_layer)
-      } else {
-        # not found in lookup, try as merged model directly
+      } else if (url_mdl_seq %in% all_mdl_seqs) {
+        # valid merged model
         updateSelectizeInput(
           session,
           'sel_sp',
@@ -486,6 +489,34 @@ server <- function(input, output, session) {
           server   = T,
           selected = url_mdl_seq
         )
+      } else {
+        # model not found — show disclaimer modal
+        updateSelectizeInput(
+          session,
+          'sel_sp',
+          choices  = spp_choices,
+          server   = T,
+          selected = sel_sp_default
+        )
+        showModal(modalDialog(
+          title     = "Model not found",
+          size      = "m",
+          easyClose = TRUE,
+          tags$div(
+            style = "text-align: left;",
+            tags$p(
+              glue("The requested model (mdl_seq={url_mdl_seq}) is no longer ",
+                   "available. It may have been modified or removed by a newer ",
+                   "version of the Marine Sensitivity Toolkit.")),
+            tags$p(
+              "Please search for the species using the ",
+              tags$strong("Species"), " dropdown above."),
+            tags$p(
+              "If the species is not listed, its distribution has been masked ",
+              "out because the expert range map (IUCN Red List) falls entirely ",
+              "outside BOEM Program Areas or the US Exclusive Economic Zone.")),
+          footer = modalButton("OK")
+        ))
       }
     } else {
       updateSelectizeInput(

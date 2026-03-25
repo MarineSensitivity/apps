@@ -48,7 +48,7 @@ options(readr.show_col_types = F)
 verbose <- interactive()
 
 # version ----
-ver <- "v5"
+ver <- "v6"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
