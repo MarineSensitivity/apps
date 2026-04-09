@@ -16,6 +16,8 @@ librarian::shelf(
   bslib,
   etiennebacher / conductor,
   DBI,
+  dbplyr,
+  digest,
   dplyr,
   duckdb,
   DT,
@@ -81,7 +83,8 @@ metrics_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
 pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
 sr_pra_csv <- glue("{dir_v}/subregion_programareas.csv")
 sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
-init_tif <- here("mapgl/cache/r_init.tif")
+init_tif <- here("mapgl/cache/r_init_full.tif")
+outside_pra_tif <- here("mapgl/cache/r_cells_outside_pra.tif")
 taxonomy_csv <- here(
   "mapgl/data/taxonomic_hierarchy_worms_2025-10-30.csv")
 tbl_er <- "ply_ecoregions_2025"
@@ -126,11 +129,11 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 # duckdb_shutdown(duckdb()); rm(con_sdm)
 
 # helper functions ----
-get_rast <- function(m_key, subregion_key = "USA") {
+get_rast <- function(m_key, subregion_key = "FULL") {
   # m_key         = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"
-  # m_key = "extrisk_mammal"; subregion_key = "L48"
+  # m_key = "extrisk_mammal"; subregion_key = "FULL" (full study area)
 
-  d <- tbl(con_sdm, "metric") |> # get metric.metric_seq
+  d_metric <- tbl(con_sdm, "metric") |> # get metric.metric_seq
     filter(metric_key == !!m_key) |> #   by input$sel_lyr
     select(metric_seq) |>
     inner_join(
@@ -139,25 +142,32 @@ get_rast <- function(m_key, subregion_key = "USA") {
         select(metric_seq, cell_id, value),
       by = join_by(metric_seq)
     ) |>
-    select(cell_id, value) |>
-    inner_join(
-      # limit to zone
-      tbl(con_sdm, "zone") |>
-        filter(
-          tbl == !!tbl_sr,
-          fld == "subregion_key",
-          value == !!subregion_key
-        ) |> #   by input$sel_subregion
-        select(zone_seq) |>
-        inner_join(
-          tbl(con_sdm, "zone_cell") |>
-            select(zone_seq, cell_id),
-          by = join_by(zone_seq)
-        ) |>
-        select(cell_id),
-      by = join_by(cell_id)
-    ) |>
-    collect()
+    select(cell_id, value)
+
+  d <- if (subregion_key == "FULL") {
+    # full study area: all cells with this metric
+    d_metric |> collect()
+  } else {
+    # limit to subregion zone
+    d_metric |>
+      inner_join(
+        tbl(con_sdm, "zone") |>
+          filter(
+            tbl == !!tbl_sr,
+            fld == "subregion_key",
+            value == !!subregion_key
+          ) |>
+          select(zone_seq) |>
+          inner_join(
+            tbl(con_sdm, "zone_cell") |>
+              select(zone_seq, cell_id),
+            by = join_by(zone_seq)
+          ) |>
+          select(cell_id),
+        by = join_by(cell_id)
+      ) |>
+      collect()
+  }
 
   r <- init(r_cell[[1]], NA) # plot(r)
   r[d$cell_id] <- d$value
@@ -307,6 +317,116 @@ plot_flower <- function(
   )
 }
 
+# polygon scoring helpers ----
+# (prototype inline; planned to move into msens::scores_for_cells() etc.)
+
+# given an sf polygon and a cell-id raster, return a tibble of intersecting
+# cell_id with pct_covered (0-100). The cell raster uses 0-360 longitudes,
+# so the input polygon is shifted accordingly.
+cells_in_polygon <- function(poly, r_cell_id) {
+  # poly: sf object (assumed EPSG:4326 in -180/180 range, e.g. from
+  # mapgl::get_drawn_features)
+  poly_t <- poly |>
+    st_transform(4326) |>
+    st_shift_longitude()  # [-180,180] -> [0,360]
+  r_cov <- terra::rasterize(
+    vect(poly_t), r_cell_id,
+    cover   = TRUE,
+    touches = TRUE)
+  r_id_vals  <- values(r_cell_id)[, 1]
+  r_cov_vals <- values(r_cov)[, 1]
+  keep <- !is.na(r_cov_vals) & r_cov_vals > 0 & !is.na(r_id_vals)
+  tibble(
+    cell_id     = as.integer(r_id_vals[keep]),
+    pct_covered = round(as.numeric(r_cov_vals[keep]) * 100))
+}
+
+# weighted-mean aggregation of cell_metric across a set of cells; returns
+# a flower-plot-ready tibble (component, score, even)
+scores_for_cells <- function(con, cells,
+                             metric_pattern = "_ecoregion_rescaled$") {
+  # use a temp table for IN-list; copy_inline keeps it client-side
+  cells_t <- dbplyr::copy_inline(con, cells)
+  tbl(con, "metric") |>
+    filter(str_detect(metric_key, metric_pattern)) |>
+    inner_join(tbl(con, "cell_metric"), by = "metric_seq") |>
+    inner_join(cells_t, by = "cell_id") |>
+    group_by(metric_key) |>
+    summarize(
+      score = sum(value * pct_covered, na.rm = TRUE) /
+              sum(pct_covered, na.rm = TRUE),
+      .groups = "drop") |>
+    collect() |>
+    mutate(
+      component = metric_key |>
+        str_replace("extrisk_", "") |>
+        str_replace("_ecoregion_rescaled", "") |>
+        str_replace("_", " "),
+      even = 1) |>
+    filter(component != "all")
+}
+
+# species-table aggregation across a set of cells; mirrors the cell-mode
+# query but generalized to multiple cells with pct_covered weighting
+species_for_cells <- function(con, cells) {
+  cells_t <- dbplyr::copy_inline(con, cells)
+  tbl_taxon <- tbl(con, "taxon") |>
+    filter(is_ok) |>
+    select(
+      sp_cat,
+      sp_common     = common_name,
+      sp_scientific = scientific_name,
+      taxon_id,
+      taxon_authority,
+      er_code       = extrisk_code,
+      er_score,
+      is_mmpa,
+      is_mbta,
+      mdl_seq) |>
+    mutate(er_score = er_score / 100)
+  tbl(con, "model_cell") |>
+    inner_join(cells_t,    by = "cell_id") |>
+    inner_join(tbl_taxon,  by = join_by(mdl_seq)) |>
+    inner_join(
+      tbl(con, "cell") |> select(cell_id, area_km2),
+      by = join_by(cell_id)) |>
+    group_by(
+      mdl_seq, sp_cat, sp_common, sp_scientific, taxon_id,
+      taxon_authority, er_code, er_score, is_mmpa, is_mbta) |>
+    summarize(
+      area_km2 = sum(area_km2 * pct_covered / 100, na.rm = TRUE),
+      avg_suit = sum(value * pct_covered, na.rm = TRUE) /
+                 sum(pct_covered, na.rm = TRUE) / 100,
+      .groups  = "drop") |>
+    collect() |>
+    mutate(
+      suit_er      = avg_suit * er_score,
+      suit_er_area = avg_suit * er_score * area_km2) |>
+    group_by(sp_cat) |>
+    mutate(cat_suit_er_area = sum(suit_er_area, na.rm = TRUE)) |>
+    ungroup() |>
+    mutate(pct_cat = suit_er_area / cat_suit_er_area)
+}
+
+# paint a drawn polygon as a fill layer colored by its mean score
+# uses a unique source id per call so re-draws don't collide with the
+# previous source (mapgl doesn't expose remove_source)
+paint_drawn_polygon <- function(proxy, poly, mean_score, hash) {
+  cols <- rev(RColorBrewer::brewer.pal(11, "Spectral"))
+  pal  <- scales::col_numeric(cols, domain = c(0, 100), na.color = "#888888")
+  fill <- pal(mean_score)
+  src_id <- glue("drawn_score_src_{hash}")
+  proxy |>
+    clear_layer("drawn_score_lyr") |>
+    add_source(id = src_id, data = poly) |>
+    add_fill_layer(
+      id           = "drawn_score_lyr",
+      source       = src_id,
+      fill_color   = fill,
+      fill_opacity = 0.55,
+      before_id    = "pra_ln")
+}
+
 # data prep ----
 
 # * pra_pts: program area label points (cached) ----
@@ -334,10 +454,11 @@ pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
 #   "Mainland USA & Alaska" = "AKL48")
 # TODO: version subregions
 sr_choices <- c(
-  "All USA" = "USA",
-  "Alaska" = "AK",
+  "Full study area" = "FULL",
+  "All USA"         = "USA",
+  "Alaska"          = "AK",
   "Gulf of America" = "GA",
-  "Pacific" = "PA"
+  "Pacific"         = "PA"
 )
 # TODO: add other subregions:
 # - `HI`  : Hawaii
@@ -549,6 +670,79 @@ if (!file_exists(sr_bb_csv)) {
 }
 d_sr_bb <- read_csv(sr_bb_csv)
 
+# append FULL bbox = full extent of cells with metric values (in-memory only)
+if (!"FULL" %in% d_sr_bb$subregion_key) {
+  # st_bbox order: xmin, ymin, xmax, ymax
+  bb_full <- st_bbox(r_init) |> as.numeric()
+  d_sr_bb <- bind_rows(
+    tibble(
+      subregion_key = "FULL",
+      xmin = bb_full[1], ymin = bb_full[2],
+      xmax = bb_full[3], ymax = bb_full[4]),
+    d_sr_bb)
+}
+
+# * r_outside_pra (cached) ----
+# binary raster of cells that have metric values but lie outside any
+# v6 Program Area zone — used as a semi-transparent gray overlay so the
+# data-vs-program-area gap (Atlantic, Gulf of America, Hawaii, Puerto Rico,
+# Pacific Island Territories) is visible.
+if (!file_exists(outside_pra_tif)) {
+  if (verbose) message("Computing r_cells_outside_pra.tif ...")
+  pra_zone_seqs <- tbl(con_sdm, "zone") |>
+    filter(fld == "programarea_key") |>
+    pull(zone_seq)
+  cells_in_pra <- tbl(con_sdm, "zone_cell") |>
+    filter(zone_seq %in% pra_zone_seqs) |>
+    distinct(cell_id) |>
+    pull(cell_id)
+  cells_with_metrics <- tbl(con_sdm, "cell_metric") |>
+    distinct(cell_id) |>
+    pull(cell_id)
+  cells_outside <- setdiff(cells_with_metrics, cells_in_pra)
+
+  r_out <- init(r_cell[[1]], NA)
+  r_out[cells_outside] <- 1L
+  r_out <- trim(r_out)
+  writeRaster(r_out, outside_pra_tif, overwrite = TRUE, datatype = "INT1U")
+}
+r_outside_pra <- rast(outside_pra_tif)
+
+# * default subregion flower-plot data (cached) ----
+# Pre-compute the flower-plot tibble for each subregion zone (USA, AK, GA,
+# PA) once at startup so the default Plot of Scores tab loads instantly.
+# zone_metric for subregions was added by the cell_metrics_to_zone_metrics
+# chunk in calc_scores.qmd; if it's missing for some reason this still
+# falls back to on-the-fly aggregation across cell_metric x zone_cell.
+flower_default_csv <- here("mapgl/cache/flower_default_subregions.csv")
+if (!file_exists(flower_default_csv)) {
+  if (verbose) message("Building flower_default_subregions cache...")
+  d_flower_default <- tbl(con_sdm, "zone") |>
+    filter(tbl == !!tbl_sr, fld == "subregion_key") |>
+    select(zone_seq, subregion_key = value) |>
+    inner_join(tbl(con_sdm, "zone_metric"), by = "zone_seq") |>
+    inner_join(
+      tbl(con_sdm, "metric") |>
+        filter(str_detect(metric_key, ".*_ecoregion_rescaled$")) |>
+        select(metric_seq, metric_key),
+      by = "metric_seq") |>
+    select(subregion_key, metric_key, score = value) |>
+    collect() |>
+    mutate(
+      component = metric_key |>
+        str_replace("extrisk_", "") |>
+        str_replace("_ecoregion_rescaled", "") |>
+        str_replace("_", " "),
+      even = 1) |>
+    filter(component != "all")
+  if (nrow(d_flower_default) == 0) {
+    warning("No subregion zone_metric rows; default flower plot will be empty. ",
+            "Re-run the cell_metrics_to_zone_metrics chunk in calc_scores.qmd.")
+  }
+  write_csv(d_flower_default, flower_default_csv)
+}
+d_flower_default <- read_csv(flower_default_csv)
+
 # * d_taxonomy ----
 d_taxonomy <- read_csv(taxonomy_csv, guess_max = Inf)
 
@@ -669,35 +863,27 @@ ui <- page_sidebar(
   ),
 
   navset_card_tab(
+    id          = "main_tabs",
     full_screen = TRUE,
     nav_panel(
-      "Map",
-      mapboxglOutput("map"),
-      conditionalPanel(
-        absolutePanel(
-          id = "flower_panel",
-          top = 80,
-          left = 30,
-          # width       = 350,
-          height = "auto",
-          draggable = T,
-          accordion(accordion_panel(
-            "Plot",
-            card(
-              # style       = "resize:vertical;",
-              full_screen = T,
-              # card_header(class = "bg-dark", "Score"),
-              card_body(
-                girafeOutput("plot_flower", height = "100%")
-              )
-            )
-          ))
-        ),
-        condition = 'output.flower_status'
+      title = "Map",
+      value = "Map",
+      mapboxglOutput("map")
+    ),
+    nav_panel(
+      title = "Plot of Scores",
+      value = "Plot of Scores",
+      card(
+        full_screen = T,
+        card_header(textOutput("flower_panel_title", inline = TRUE)),
+        card_body(
+          girafeOutput("plot_flower", height = "100%")
+        )
       )
     ),
     nav_panel(
-      "Species",
+      title = "Table of Species",
+      value = "Table of Species",
       card(
         card_header(
           span(
@@ -790,35 +976,62 @@ server <- function(input, output, session) {
   }) |> bindEvent(input$chk_show_splash)
 
   # conductor tour ----
-  tour <- Conductor$new()$step(
-    title = "Study Area",
-    text = "Select a study area to focus on a specific subregion of US waters.",
-    el = "#tour_subregion",
-    position = "right"
-  )$step(
-    title = "Spatial Units",
-    text = "Toggle between raster cells (0.05\u00b0) and program area aggregations.",
-    el = "#tour_unit",
-    position = "right"
-  )$step(
-    title = "Layer Selection",
-    text = "Choose which sensitivity metric to display: composite score, individual species categories, or primary productivity.",
-    el = "#tour_lyr",
-    position = "right"
-  )$step(
-    title = "Map View",
-    text = "The map displays sensitivity scores across US waters. Click a program area to see its detailed score breakdown.",
-    el = "#map",
-    position = "top"
-  )$step(
-    title = "Flower Plot",
-    text = "When a program area is selected, the flower plot shows scores by species category. Petal length = score, center = weighted mean.",
-    el = "#flower_panel",
-    position = "right"
-  )$step(
-    title = "Species Tab",
-    text = "Switch to the Species tab to see a sortable table of all species in the selected area with extinction risk details."
-  )
+  tour <- Conductor$new()$
+    step(
+      title    = "Study Area",
+      text     = "Pick a region to focus on. 'Full study area' shows all US federal waters from the Aleutians to the Caribbean and out to the Pacific Island Territories. The other choices zoom into a single subregion.",
+      el       = "#tour_subregion",
+      position = "right")$
+    step(
+      title    = "Spatial Units",
+      text     = "Toggle between fine-grained raster cells (0.05\u00b0) and aggregated BOEM Program Area polygons. Cell mode lets you click any pixel; Program Area mode shows pre-aggregated zone scores.",
+      el       = "#tour_unit",
+      position = "right")$
+    step(
+      title    = "Layer Selection",
+      text     = "Choose which sensitivity metric to display \u2014 composite score, individual species categories (bird, fish, mammal, etc.), or primary productivity. Note that some cells (Atlantic, Gulf of America, Hawaii, Puerto Rico, Pacific Islands) have scores but lie outside any v6 BOEM Program Area; they appear dimmed under a 'Cells outside Program Areas' overlay.",
+      el       = "#tour_lyr",
+      position = "right")$
+    step(
+      title    = "Map tab",
+      text     = "The Map tab is where you explore scores spatially \u2014 click cells, click Program Areas, draw polygons.",
+      el       = "[data-value='Map'].nav-link",
+      position = "bottom")$
+    step(
+      title    = "Layers control",
+      text     = "Toggle individual map layers on and off \u2014 program area outlines, ecoregion outlines, raster cells, and the gray 'Cells outside Program Areas' overlay.",
+      el       = ".layers-control",
+      position = "right")$
+    step(
+      title    = "Go to location",
+      text     = "Search for a place name and the map will fly there \u2014 useful for jumping to a specific Program Area, port, or feature.",
+      el       = ".mapboxgl-ctrl-geocoder",
+      position = "left")$
+    step(
+      title    = "Draw your own area",
+      text     = "Click the polygon tool, then click on the map to define vertices and double-click to finish. The Plot of Scores and Table of Species tabs will update to show results for whatever cells your polygon covers \u2014 even in the gray-overlay regions outside the Program Areas. Use the trash icon to delete the polygon and revert to the prior selection.",
+      el       = ".mapbox-gl-draw_polygon",
+      position = "left")$
+    step(
+      title    = "Full screen",
+      text     = "Expand the map to fill the entire window.",
+      el       = ".mapboxgl-ctrl-fullscreen",
+      position = "left")$
+    step(
+      title    = "Zoom in / out",
+      text     = "Zoom and reset the view. You can also use the mouse wheel, pinch gesture, or double-click.",
+      el       = ".mapboxgl-ctrl-zoom-in",
+      position = "left")$
+    step(
+      title    = "Plot of Scores tab",
+      text     = "Switch here to see the flower plot of aggregated sensitivity scores for the current selection, broken out by species category. Petal length = score (0\u2013100); center number = weighted mean. Defaults to 'All USA' until you click a cell, click a Program Area, or draw a polygon.",
+      el       = "[data-value='Plot of Scores'].nav-link",
+      position = "bottom")$
+    step(
+      title    = "Table of Species tab",
+      text     = "A sortable, downloadable table of every species in the currently selected area, with extinction-risk codes, areas, and per-category contributions.",
+      el       = "[data-value='Table of Species'].nav-link",
+      position = "bottom")
   tour$init()
   if (verbose) {
     message("conductor tour initialized")
@@ -841,25 +1054,31 @@ server <- function(input, output, session) {
 
   # reactive values ----
   rx <- reactiveValues(
-    clicked_pa = NULL,
-    clicked_pra = NULL,
-    clicked_cell = NULL,
-    spp_tbl = NULL,
-    spp_tbl_hdr = NULL,
+    clicked_pa       = NULL,
+    clicked_pra      = NULL,
+    clicked_cell     = NULL,
+    drawn_polygon    = NULL,   # list(sf, cells, hash, mean_score, d_scores)
+    spp_tbl          = NULL,
+    spp_tbl_hdr      = NULL,
     spp_tbl_filename = NULL
   )
 
-  output$flower_status <- reactive({
-    if (
-      !is.null(rx$clicked_pa) ||
-        !is.null(rx$clicked_pra) ||
-        !is.null(rx$clicked_cell)
-    ) {
-      return(T)
+  # dynamic title shown in the flower panel drag handle
+  output$flower_panel_title <- renderText({
+    if (!is.null(rx$drawn_polygon)) {
+      glue("Drawn polygon ({nrow(rx$drawn_polygon$cells)} cells, ",
+           "score {round(rx$drawn_polygon$mean_score)})")
+    } else if (!is.null(rx$clicked_cell)) {
+      glue("Cell {rx$clicked_cell$cell_id}")
+    } else if (!is.null(rx$clicked_pra)) {
+      glue("{rx$clicked_pra$properties$programarea_name}")
+    } else {
+      sr_key <- input$sel_subregion %||% "FULL"
+      sr_lbl <- if (sr_key == "FULL") "All USA" else
+        names(sr_choices)[sr_choices == sr_key]
+      glue("{sr_lbl} (default)")
     }
-    F
   })
-  outputOptions(output, "flower_status", suspendWhenHidden = FALSE)
 
   # * get_rast_rx ----
   get_rast_rx <- reactive({
@@ -892,7 +1111,7 @@ server <- function(input, output, session) {
 
   # map ----
   output$map <- renderMapboxgl({
-    # default to show raster score
+    # default to show raster score over the full study area extent
     r <- r_init
     bbox <- st_bbox(r) |> as.numeric()
     n_cols <- 11
@@ -915,7 +1134,19 @@ server <- function(input, output, session) {
         list(source     = pra_pts,
              text_field = "programarea_key",
              id         = "pra_lbl"))) |>
+      # score raster (added FIRST so the gray overlay below sits on top of it)
       msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
+      # semi-transparent gray overlay for cells that have metric values but
+      # lie outside any v6 Program Area (Atlantic, Gulf of America, Hawaii,
+      # Puerto Rico, Pacific Island Territories) — sits ON TOP of the score
+      # raster so the outside area is visibly dimmed/muted, not brightened
+      msens::add_cells(
+        r_outside_pra,
+        colors         = c("#222222", "#222222"),
+        id             = "outside_pra_lyr",
+        source_id      = "outside_pra_lyr",
+        raster_opacity = 0.55,
+        before_id      = "er_ln") |>
       mapgl::add_legend(
         get_lyr_name(lyr_default),
         values = rng_r,
@@ -927,12 +1158,29 @@ server <- function(input, output, session) {
       add_scale_control() |>
       add_layers_control(
         layers = list(
-          "Program Area outlines" = "pra_ln",
-          "Program Area labels"   = "pra_lbl",
-          "Ecoregions outlines"   = "er_ln",
-          "Raster cell values"    = "r_lyr"
+          "Program Area outlines"           = "pra_ln",
+          "Program Area labels"             = "pra_lbl",
+          "Ecoregions outlines"             = "er_ln",
+          "Raster cell values"              = "r_lyr",
+          "Cells outside Program Areas"     = "outside_pra_lyr"
         )
       ) |>
+      add_draw_control(
+        position     = "top-right",
+        fill_color   = "#fbb03b",
+        line_color   = "#fbb03b",
+        fill_opacity = 0.2,
+        # hide point, line, and combine/uncombine buttons — only allow
+        # polygon drawing + trash. Cells are already clickable, lines
+        # don't make sense for an area-based score, and combine/uncombine
+        # are for multipolygons (out of scope for phase 1)
+        controls     = list(
+          point              = FALSE,
+          line_string        = FALSE,
+          polygon            = TRUE,
+          trash              = TRUE,
+          combine_features   = FALSE,
+          uncombine_features = FALSE)) |>
       add_geocoder_control(placeholder = "Go to location")
   })
 
@@ -965,17 +1213,27 @@ server <- function(input, output, session) {
         cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
         rng_r <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
-        # remove layers if exist
+        # remove layers if exist (clear_layer also removes any source with
+        # that id, so the same name covers layer + source)
         map_proxy |>
           # clear_layer("pa_lyr") |>
           clear_layer("pra_lyr") |>
+          clear_layer("outside_pra_lyr") |>
           clear_layer("r_lyr") |>
           clear_layer("r_src") |>
           clear_legend()
 
-        # add raster source and layer
+        # add raster source + layer, then re-overlay the gray on top so it
+        # still dims the cells outside any v6 Program Area
         map_proxy |>
           msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
+          msens::add_cells(
+            r_outside_pra,
+            colors         = c("#222222", "#222222"),
+            id             = "outside_pra_lyr",
+            source_id      = "outside_pra_lyr",
+            raster_opacity = 0.55,
+            before_id      = "er_ln") |>
           mapgl::add_legend(
             get_lyr_name(input$sel_lyr),
             values = rng_r,
@@ -989,10 +1247,11 @@ server <- function(input, output, session) {
           clear_controls("layers") |>
           add_layers_control(
             layers = list(
-              "Program Area outlines" = "pra_ln",
-              "Program Area labels"   = "pra_lbl",
-              "Ecoregion outlines"    = "er_ln",
-              "Raster cell values"    = "r_lyr"
+              "Program Area outlines"       = "pra_ln",
+              "Program Area labels"         = "pra_lbl",
+              "Ecoregion outlines"          = "er_ln",
+              "Raster cell values"          = "r_lyr",
+              "Cells outside Program Areas" = "outside_pra_lyr"
             )
           )
 
@@ -1103,9 +1362,14 @@ server <- function(input, output, session) {
           message(glue("sr_bb: {paste(round(sr_bb,2), collapse = ', ')}"))
         }
 
-        pra_keys <- d_sr_pra |>
-          filter(subregion_key == !!sr_key) |>
-          pull(programarea_key)
+        # full study area = all program areas; otherwise filter by subregion
+        pra_keys <- if (sr_key == "FULL") {
+          unique(d_sr_pra$programarea_key)
+        } else {
+          d_sr_pra |>
+            filter(subregion_key == !!sr_key) |>
+            pull(programarea_key)
+        }
         pra_filter <- c("in", "programarea_key", pra_keys)
 
         # query program area values from db
@@ -1146,10 +1410,12 @@ server <- function(input, output, session) {
           as.list()
         session$sendCustomMessage("setPraTooltips", pra_tooltip)
 
-        # remove layers if exist
+        # remove layers if exist (clear gray too so it can be re-added on top)
         map_proxy |>
           clear_layer("r_lyr") |>
+          clear_layer("r_src") |>
           clear_layer("pra_lyr") |>
+          clear_layer("outside_pra_lyr") |>
           clear_legend()
 
         # add program area fill layer using pmtiles + match_expr for color
@@ -1171,6 +1437,15 @@ server <- function(input, output, session) {
             before_id = "pra_ln",
             filter = pra_filter
           ) |>
+          # re-overlay the gray on top of the program-area fill so cells
+          # outside any v6 Program Area remain visually distinct
+          msens::add_cells(
+            r_outside_pra,
+            colors         = c("#222222", "#222222"),
+            id             = "outside_pra_lyr",
+            source_id      = "outside_pra_lyr",
+            raster_opacity = 0.55,
+            before_id      = "er_ln") |>
           mapgl::add_legend(
             get_lyr_name(input$sel_lyr),
             values = round(rng_pra, 1),
@@ -1181,10 +1456,11 @@ server <- function(input, output, session) {
           clear_controls("layers") |>
           add_layers_control(
             layers = list(
-              "Program Area outlines" = "pra_ln",
-              "Program Area labels"   = "pra_lbl",
-              "Ecoregion outlines"    = "er_ln",
-              "Program Area values"   = "pra_lyr"
+              "Program Area outlines"       = "pra_ln",
+              "Program Area labels"         = "pra_lbl",
+              "Ecoregion outlines"          = "er_ln",
+              "Program Area values"         = "pra_lyr",
+              "Cells outside Program Areas" = "outside_pra_lyr"
             )
           )
 
@@ -1252,10 +1528,77 @@ server <- function(input, output, session) {
     }
   })
 
+  # map_drawn_features ----
+  # always-on draw control: when the user draws / edits / deletes a polygon,
+  # take over the flower plot + species table with that polygon's scores
+  observeEvent(input$map_drawn_features, ignoreNULL = FALSE, {
+    feats <- get_drawn_features(mapboxgl_proxy("map"))
+    proxy <- mapboxgl_proxy("map")
+
+    if (is.null(feats) || nrow(feats) == 0) {
+      # polygon deleted: clear and revert to whatever was selected before
+      rx$drawn_polygon <- NULL
+      proxy |> clear_layer("drawn_score_lyr")
+      return()
+    }
+
+    # phase 1: score the most recently drawn feature only
+    poly  <- feats[nrow(feats), ]
+    cells <- cells_in_polygon(poly, r_cell[["cell_id"]])
+    if (nrow(cells) == 0) {
+      showNotification(
+        "Drawn polygon doesn't overlap any scored cells.",
+        type = "warning")
+      return()
+    }
+
+    if (verbose) {
+      message(glue("drawn polygon: {nrow(cells)} cells"))
+    }
+
+    # compute aggregated component scores once and stash for both
+    # the flower plot and the polygon-fill color
+    d_sc       <- scores_for_cells(con_sdm, cells)
+    mean_score <- weighted.mean(d_sc$score, d_sc$even, na.rm = TRUE)
+
+    rx$drawn_polygon <- list(
+      sf         = poly,
+      cells      = cells,
+      hash       = digest::digest(sf::st_as_text(sf::st_geometry(poly))),
+      mean_score = mean_score,
+      d_scores   = d_sc)
+
+    # auto-switch: clear any prior cell / program-area selection so the
+    # drawn polygon owns the flower plot + species table
+    rx$clicked_cell <- NULL
+    rx$clicked_pra  <- NULL
+    rx$clicked_pa   <- NULL
+
+    # paint the polygon by its aggregate score
+    paint_drawn_polygon(proxy, poly, mean_score, rx$drawn_polygon$hash)
+  })
+
   # plot_flower ----
   output$plot_flower <- renderGirafe({
     # set height based on container size
     height <- "100%"
+
+    # ** drawn polygon ----
+    if (!is.null(rx$drawn_polygon)) {
+      d_fl <- rx$drawn_polygon$d_scores
+      if (nrow(d_fl) > 0) {
+        return(
+          d_fl |>
+            plot_flower(
+              fld_category = component,
+              fld_height   = score,
+              fld_width    = even,
+              tooltip_expr = "{component}: {round(score, 2)}",
+              title        = glue(
+                "Drawn polygon ({nrow(rx$drawn_polygon$cells)} cells, ",
+                "mean score {round(rx$drawn_polygon$mean_score, 1)})")))
+      }
+    }
 
     if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
       # get data for cell
@@ -1287,14 +1630,15 @@ server <- function(input, output, session) {
         collect()
 
       if (nrow(d_fl) > 0) {
-        d_fl |>
-          plot_flower(
-            fld_category = component,
-            fld_height = score,
-            fld_width = even,
-            tooltip_expr = "{component}: {round(score, 2)}",
-            title = glue("Cell ID: {cell_id} (x: {lng}, y: {lat})")
-          )
+        return(
+          d_fl |>
+            plot_flower(
+              fld_category = component,
+              fld_height = score,
+              fld_width = even,
+              tooltip_expr = "{component}: {round(score, 2)}",
+              title = glue("Cell ID: {cell_id} (x: {lng}, y: {lat})")
+            ))
       }
       # } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
       #   # get data for planning area
@@ -1359,14 +1703,42 @@ server <- function(input, output, session) {
           collect()
 
         if (nrow(d_fl) > 0) {
+          return(
+            d_fl |>
+              plot_flower(
+                fld_category = component,
+                fld_height   = score,
+                fld_width    = even,
+                tooltip_expr = "{component}: {round(score, 2)}",
+                title        = pra_name))
+        }
+      }
+    }
+
+    # ** subregion default ----
+    # nothing clicked / drawn: read pre-cached flower data for the current
+    # subregion zone (FULL falls back to USA). The cache is built at app
+    # startup from zone_metric, populated by cell_metrics_to_zone_metrics
+    # in calc_scores.qmd.
+    if (is.null(rx$drawn_polygon) &&
+        is.null(rx$clicked_cell)  &&
+        is.null(rx$clicked_pra)) {
+      sr_key   <- input$sel_subregion %||% "FULL"
+      z_sr_key <- if (sr_key == "FULL") "USA" else sr_key
+      sr_lbl   <- if (sr_key == "FULL") "All USA" else
+        names(sr_choices)[sr_choices == sr_key]
+      d_fl <- d_flower_default |>
+        filter(subregion_key == !!z_sr_key) |>
+        select(component, score, even)
+      if (nrow(d_fl) > 0) {
+        return(
           d_fl |>
             plot_flower(
               fld_category = component,
               fld_height   = score,
               fld_width    = even,
               tooltip_expr = "{component}: {round(score, 2)}",
-              title        = pra_name)
-        }
+              title        = sr_lbl))
       }
     }
   })
@@ -1424,27 +1796,41 @@ server <- function(input, output, session) {
 
   # * get_spp_tbl ----
   get_spp_tbl <- reactive({
-    # ** subregion ----
-    # if (is.null(rx$clicked_cell) && is.null(rx$clicked_pa) && is.null(rx$clicked_pra)) {
-    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
-      sr_key <- input$sel_subregion
-      sr_lbl <- names(sr_choices)[sr_choices == sr_key]
+    # ** drawn polygon ----
+    if (!is.null(rx$drawn_polygon)) {
+      n_cells <- nrow(rx$drawn_polygon$cells)
 
       if (verbose) {
         message(glue(
-          "Getting species table for subregion: {sr_lbl} ({sr_key})"
-        ))
+          "Getting species table for drawn polygon ({n_cells} cells)"))
       }
 
-      rx$spp_tbl_hdr <- glue("Species in {sr_lbl}")
-      rx$spp_tbl_filename <- glue("species_{sr_key}")
+      rx$spp_tbl_hdr      <- glue("Species for drawn polygon ({n_cells} cells)")
+      rx$spp_tbl_filename <- glue("species_drawn-{rx$drawn_polygon$hash}")
+
+      d_spp <- species_for_cells(con_sdm, rx$drawn_polygon$cells)
+    } else if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
+      # ** subregion default ----
+      # FULL falls back to USA (the only superset zone in zone_taxon)
+      sr_key   <- input$sel_subregion %||% "FULL"
+      z_sr_key <- if (sr_key == "FULL") "USA" else sr_key
+      sr_lbl   <- if (sr_key == "FULL") "All USA" else
+        names(sr_choices)[sr_choices == sr_key]
+
+      if (verbose) {
+        message(glue(
+          "Getting species table for subregion: {sr_lbl} ({z_sr_key})"))
+      }
+
+      rx$spp_tbl_hdr      <- glue("Species in {sr_lbl}")
+      rx$spp_tbl_filename <- glue("species_{z_sr_key}")
 
       d_spp <- tbl(con_sdm, "zone_taxon") |>
         select(-is_mmpa, -is_mbta) |>
         filter(
-          zone_tbl == !!tbl_sr,
-          zone_fld == "subregion_key",
-          zone_value == sr_key
+          zone_tbl   == !!tbl_sr,
+          zone_fld   == "subregion_key",
+          zone_value == !!z_sr_key
         ) |>
         inner_join(
           tbl(con_sdm, "taxon") |>
