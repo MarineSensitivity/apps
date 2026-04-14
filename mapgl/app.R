@@ -722,7 +722,7 @@ ui <- page_sidebar(
             actionButton("btn_add_drawn", "Add drawn polygon",
                          icon  = icon("plus"),
                          class = "btn-sm btn-outline-primary"),
-            actionButton("btn_add_pra", "Add selected PRA",
+            actionButton("btn_add_pra", "Add selected Program Area",
                          icon  = icon("plus"),
                          class = "btn-sm btn-outline-primary")),
           hr(),
@@ -1015,8 +1015,6 @@ server <- function(input, output, session) {
       unit <- input$sel_unit
       lyr <- input$sel_lyr
 
-      map_proxy <- mapboxgl_proxy("map")
-
       if (unit == "cell") {
         # * cell ----
 
@@ -1033,47 +1031,43 @@ server <- function(input, output, session) {
         cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
         rng_r <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
-        # remove layers if exist (clear_layer also removes any source with
-        # that id, so the same name covers layer + source)
-        map_proxy |>
-          # clear_layer("pa_lyr") |>
-          clear_layer("pra_lyr") |>
-          clear_layer("outside_pra_lyr") |>
-          clear_layer("r_lyr") |>
-          clear_layer("r_src") |>
-          clear_legend()
-
-        # add raster source + layer, then re-overlay the gray on top so it
-        # still dims the cells outside any v6 Program Area
-        map_proxy |>
-          msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
-          msens::add_cells(
-            r_outside_pra,
-            colors         = c("#222222", "#222222"),
-            id             = "outside_pra_lyr",
-            source_id      = "outside_pra_lyr",
-            raster_opacity = 0.55,
-            before_id      = "er_ln") |>
-          mapgl::add_legend(
-            get_lyr_name(input$sel_lyr),
-            values = rng_r,
-            colors = cols_r,
-            position = "bottom-right"
-          ) |>
-          mapgl::fit_bounds(
-            bbox = as.numeric(st_bbox(r)),
-            animate = T
-          ) |>
-          clear_controls("layers") |>
-          add_layers_control(
-            layers = list(
-              "Program Area outlines"       = "pra_ln",
-              "Program Area labels"         = "pra_lbl",
-              "Ecoregion outlines"          = "er_ln",
-              "Raster cell values"          = "r_lyr",
-              "Cells outside Program Areas" = "outside_pra_lyr"
-            )
-          )
+        # applied to both the Map tab's proxy and the Report tab's
+        # embedded map proxy so the Report map stays in sync with
+        # sidebar selections.
+        apply_cell_update <- function(map_proxy) {
+          map_proxy |>
+            clear_layer("pra_lyr") |>
+            clear_layer("outside_pra_lyr") |>
+            clear_layer("r_lyr") |>
+            clear_layer("r_src") |>
+            clear_legend() |>
+            msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
+            msens::add_cells(
+              r_outside_pra,
+              colors         = c("#222222", "#222222"),
+              id             = "outside_pra_lyr",
+              source_id      = "outside_pra_lyr",
+              raster_opacity = 0.55,
+              before_id      = "er_ln") |>
+            mapgl::add_legend(
+              get_lyr_name(input$sel_lyr),
+              values   = rng_r,
+              colors   = cols_r,
+              position = "bottom-right") |>
+            mapgl::fit_bounds(
+              bbox    = as.numeric(st_bbox(r)),
+              animate = TRUE) |>
+            clear_controls("layers") |>
+            add_layers_control(
+              layers = list(
+                "Program Area outlines"       = "pra_ln",
+                "Program Area labels"         = "pra_lbl",
+                "Ecoregion outlines"          = "er_ln",
+                "Raster cell values"          = "r_lyr",
+                "Cells outside Program Areas" = "outside_pra_lyr"))
+        }
+        apply_cell_update(mapboxgl_proxy("map"))
+        apply_cell_update(mapboxgl_proxy("map_rpt"))
 
         if (verbose) {
           message(glue("update map cell - end"))
@@ -1230,59 +1224,55 @@ server <- function(input, output, session) {
           as.list()
         session$sendCustomMessage("setPraTooltips", pra_tooltip)
 
-        # remove layers if exist (clear gray too so it can be re-added on top)
-        map_proxy |>
-          clear_layer("r_lyr") |>
-          clear_layer("r_src") |>
-          clear_layer("pra_lyr") |>
-          clear_layer("outside_pra_lyr") |>
-          clear_legend()
-
-        # add program area fill layer using pmtiles + match_expr for color
-        map_proxy |>
-          add_fill_layer(
-            id = "pra_lyr",
-            source = "pra_src",
-            source_layer = tbl_pra_pm,
-            fill_color = match_expr(
-              column  = "programarea_key",
-              values  = d_pra$programarea_key,
-              stops   = d_pra$fill_color,
-              default = "lightgrey"),
-            fill_opacity = 0.7,
-            fill_outline_color = "white",
-            hover_options = list(
-              fill_color   = "purple",
-              fill_opacity = 1),
-            before_id = "pra_ln",
-            filter = pra_filter
-          ) |>
-          # re-overlay the gray on top of the program-area fill so cells
-          # outside any v6 Program Area remain visually distinct
-          msens::add_cells(
-            r_outside_pra,
-            colors         = c("#222222", "#222222"),
-            id             = "outside_pra_lyr",
-            source_id      = "outside_pra_lyr",
-            raster_opacity = 0.55,
-            before_id      = "er_ln") |>
-          mapgl::add_legend(
-            get_lyr_name(input$sel_lyr),
-            values = round(rng_pra, 1),
-            colors = cols_pra,
-            position = "bottom-right"
-          ) |>
-          mapgl::fit_bounds(sr_bb, animate = T) |>
-          clear_controls("layers") |>
-          add_layers_control(
-            layers = list(
-              "Program Area outlines"       = "pra_ln",
-              "Program Area labels"         = "pra_lbl",
-              "Ecoregion outlines"          = "er_ln",
-              "Program Area values"         = "pra_lyr",
-              "Cells outside Program Areas" = "outside_pra_lyr"
-            )
-          )
+        # applied to both the Map tab's proxy and the Report tab's
+        # embedded map proxy so the Report map shows Program Areas too.
+        apply_pra_update <- function(map_proxy) {
+          map_proxy |>
+            clear_layer("r_lyr") |>
+            clear_layer("r_src") |>
+            clear_layer("pra_lyr") |>
+            clear_layer("outside_pra_lyr") |>
+            clear_legend() |>
+            add_fill_layer(
+              id           = "pra_lyr",
+              source       = "pra_src",
+              source_layer = tbl_pra_pm,
+              fill_color   = match_expr(
+                column  = "programarea_key",
+                values  = d_pra$programarea_key,
+                stops   = d_pra$fill_color,
+                default = "lightgrey"),
+              fill_opacity       = 0.7,
+              fill_outline_color = "white",
+              hover_options      = list(
+                fill_color   = "purple",
+                fill_opacity = 1),
+              before_id = "pra_ln",
+              filter    = pra_filter) |>
+            msens::add_cells(
+              r_outside_pra,
+              colors         = c("#222222", "#222222"),
+              id             = "outside_pra_lyr",
+              source_id      = "outside_pra_lyr",
+              raster_opacity = 0.55,
+              before_id      = "er_ln") |>
+            mapgl::add_legend(
+              get_lyr_name(input$sel_lyr),
+              values   = round(rng_pra, 1),
+              colors   = cols_pra,
+              position = "bottom-right") |>
+            mapgl::fit_bounds(sr_bb, animate = TRUE) |>
+            clear_controls("layers") |>
+            add_layers_control(
+              layers = list(
+                "Program Area outlines"       = "pra_ln",
+                "Program Area labels"         = "pra_lbl",
+                "Ecoregion outlines"          = "er_ln",
+                "Program Area values"         = "pra_lyr",
+                "Cells outside Program Areas" = "outside_pra_lyr"))
+        }
+        apply_pra_update(mapboxgl_proxy("map"))
+        apply_pra_update(mapboxgl_proxy("map_rpt"))
 
         if (verbose) {
           message(glue("update map pra - end"))
@@ -1879,13 +1869,42 @@ server <- function(input, output, session) {
   })
 
   # * rpt_drawn_sf: most-recently-drawn polygon on map_rpt ----
+  # `input$map_rpt_drawn_features` is a GeoJSON string (see mapgl JS:
+  # updateDrawnFeatures — Shiny.setInputValue(..., JSON.stringify(fc))),
+  # so parse it directly rather than round-tripping through the proxy.
   rpt_drawn_sf <- reactive({
-    fc <- input$map_rpt_drawn_features
-    req(fc, length(fc$features) > 0)
-    sf_feats <- get_drawn_features(mapboxgl_proxy("map_rpt"))
+    fc_json <- input$map_rpt_drawn_features
+    req(fc_json, is.character(fc_json), nzchar(fc_json))
+    sf_feats <- tryCatch(
+      sf::read_sf(fc_json, quiet = TRUE),
+      error = function(e) NULL)
     req(sf_feats, nrow(sf_feats) > 0)
     sf_feats[nrow(sf_feats), ]
   })
+
+  # * map_rpt_click: register Program Area clicks on the Report map ----
+  # mirrors the main Map tab's click handler so `btn_add_pra` works after
+  # clicking a Program Area on either map.
+  observeEvent(input$map_rpt_click, {
+    req(input$map_rpt_click)
+    if (input$sel_unit != "pra") return()
+    if (is.null(input$map_rpt_feature_click)) return()
+    rx$clicked_cell <- NULL
+    rx$clicked_pa   <- NULL
+    rx$clicked_pra  <- list(
+      id         = input$map_rpt_feature_click$id,
+      properties = input$map_rpt_feature_click$properties)
+  })
+
+  # * prepopulate the "Label for next area" input with the clicked
+  # Program Area name so the user can click > Add without typing.
+  observeEvent(rx$clicked_pra, {
+    props <- rx$clicked_pra$properties
+    req(props)
+    nm <- props$programarea_name %||% props$programarea_key
+    if (!is.null(nm) && nzchar(nm))
+      updateTextInput(session, "rpt_area_label", value = nm)
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
 
   # * btn_add_drawn ----
   observeEvent(input$btn_add_drawn, {
@@ -1940,11 +1959,12 @@ server <- function(input, output, session) {
       return(tags$p(class = "text-muted small", "No areas yet."))
     tagList(lapply(seq_along(areas), function(i) {
       a <- areas[[i]]
+      kind_lbl <- switch(a$kind, pra = "Program Area", wkt = "drawn", a$kind)
       div(
         class = "d-flex align-items-center mb-1",
         tags$span(
           class = "flex-grow-1 small",
-          sprintf("%d. %s (%s)", i, a$label, a$kind)),
+          sprintf("%d. %s (%s)", i, a$label, kind_lbl)),
         actionButton(
           paste0("rpt_del_", i),
           "",
