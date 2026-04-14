@@ -1016,14 +1016,25 @@ server <- function(input, output, session) {
     build_initial_map(sphere = input$tgl_sphere)
   })
 
+  # rpt_map_loaded: one-shot trigger that flips the first time
+  # map_rpt finishes its style.load (detected via the input$map_rpt_zoom
+  # event mapgl JS emits from map.on("load", ...)). The main update
+  # observer depends on it so that the *first* apply_*_update against
+  # map_rpt runs after the widget exists, not before — previously the
+  # Report map could be stranded with the cell raster layer because the
+  # proxy messages arrived before pra_ln was registered on the client.
+  rpt_map_loaded <- reactiveVal(0)
+  observeEvent(input$map_rpt_zoom, {
+    rpt_map_loaded(rpt_map_loaded() + 1)
+  }, once = TRUE, ignoreInit = FALSE)
+
   # update map ----
   # `input$main_tabs` is included so switching to the Report tab
-  # (which renders map_rpt on demand) re-applies the current layer
-  # state to that map — otherwise the Report map would keep the
-  # cell-raster layer from build_initial_map() even after the user
-  # had already set Spatial units = Program areas on the Map tab.
+  # re-applies the current layer state to map_rpt; `rpt_map_loaded()`
+  # covers the initial-load case (see above).
   observeEvent(
-    c(input$sel_subregion, input$sel_unit, input$sel_lyr, input$main_tabs),
+    c(input$sel_subregion, input$sel_unit, input$sel_lyr,
+      input$main_tabs, rpt_map_loaded()),
     {
       req(input$sel_subregion, input$sel_unit, input$sel_lyr)
 
@@ -2147,7 +2158,8 @@ server <- function(input, output, session) {
           role         = "status",
           `aria-hidden`= "true"),
         tags$span(
-          "Generating report — this may take a couple of minutes...")),
+          "Generating report — this may take a couple of minutes...", br(),
+          "Will open in a new tab when done. Meanwhile, you can continue using the app.")),
       duration    = NULL,
       closeButton = FALSE,
       type        = "message")
