@@ -564,30 +564,26 @@ ui <- page_sidebar(
 
       // open a rendered-report URL in a new browser tab.
       //
-      // Modern browsers block window.open() calls that aren't in the
+      // Modern browsers block window.open() calls that arent in the
       // same tick as a user gesture. The /report round-trip takes
       // tens of seconds, so by the time the promise resolves the
       // user-activation window is long gone and the popup is blocked
       // on the first click. Workaround: when the Generate report
-      // button is clicked, open an "about:blank" tab *synchronously*
+      // button is clicked, open an about:blank tab synchronously
       // (while we still have user activation) and stash the window
       // reference. When the /report response finally arrives, point
-      // that stashed window at the real URL — no popup check, no
+      // that stashed window at the real URL -- no popup check, no
       // second-click-to-open dance.
       window._msens_report_win = null;
       $(document).on('click', '#btn_rpt_submit', function() {
         try {
-          var w = window.open('about:blank', '_blank');
+          var w = window.open('', '_blank');
           if (w && w.document) {
-            w.document.write(
-              '<!doctype html><html><head><title>' +
-              'Generating report…</title></head><body style="' +
-              'font-family:system-ui,sans-serif;padding:2em;' +
-              'color:#444;">' +
-              '<h3>Generating report…</h3>' +
-              '<p>This tab will update when the report is ready ' +
-              '(usually a couple of minutes). You can keep using ' +
-              'the app in the meantime.</p></body></html>');
+            w.document.title = 'Generating report…';
+            w.document.body.innerText =
+              'Generating report — this tab will update when the ' +
+              'report is ready (usually a couple of minutes). You ' +
+              'can keep using the app in the meantime.';
           }
           window._msens_report_win = w;
         } catch (e) {
