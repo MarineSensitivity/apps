@@ -23,7 +23,7 @@ db_r         <- here("../workflows/libs/db.R")
 stopifnot(all(file.exists(c(mb_token_txt, plys_csv, db_r))))
 
 source(db_r)
-source(here("scores/functions.R"))
+# plot_flower now lives in msens::plot_flower (loaded above)
 
 mb_token <- readLines(mb_token_txt)
 options(rdeck.mapbox_access_token = mb_token)

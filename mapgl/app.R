@@ -188,244 +188,10 @@ get_lyr_name <- function(lyr) {
   lyr_name
 }
 
-plot_flower <- function(
-  data,
-  fld_category,
-  fld_height,
-  fld_width,
-  tooltip_expr = NULL,
-  score = NULL,
-  # colors    = "Set2",
-  title = NULL
-) {
-  # TODO: ck NA scores ok with colors
-
-  stopifnot(is.numeric(data |> pull({{ fld_height }})))
-  stopifnot(is.numeric(data |> pull({{ fld_width }})))
-
-  if (is.null(score)) {
-    score <- data |>
-      # ensure both are not just integer (weighted.mean goes to 0)
-      mutate(
-        "{{fld_height}}" := as.double({{ fld_height }}),
-        "{{fld_width}}" := as.double({{ fld_width }})
-      ) |>
-      summarize(
-        score = weighted.mean({{ fld_height }}, {{ fld_width }}, na.rm = T)
-      ) |>
-      pull(score)
-  }
-
-  # Calculate positions
-  d <- data |>
-    arrange({{ fld_category }}) |>
-    mutate(across(!where(is.character), as.double)) |>
-    mutate(
-      # Calculate angles for plotting
-      ymax = cumsum({{ fld_width }}),
-      ymin = lag(ymax, default = 0), # ,  c(0, head(ymax, n=-1)),
-      xmax = {{ fld_height }},
-      xmin = 0
-    )
-
-  sym_category <- ensym(fld_category)
-  sym_height <- ensym(fld_height)
-  sym_width <- ensym(fld_width)
-
-  if (!is.null(tooltip_expr)) {
-    d <- d |>
-      mutate(
-        tooltip = glue(tooltip_expr)
-      )
-  } else {
-    d <- d |>
-      mutate(
-        tooltip = glue("{!!fld_category}")
-      )
-  }
-
-  # components <- tbl(con_sdm, "taxon") |> filter(is_ok) |> distinct(sp_cat) |>
-  #   pull(sp_cat) %>% c(., "primprod") |> sort() |>  paste(collapse = '", "') |> cat()
-  components <- c(
-    "invertebrate",
-    "mammal",
-    "other",
-    "primprod",
-    "turtle",
-    "bird",
-    "coral",
-    "fish"
-  )
-  # primprod in 4th green position
-  cols <- setNames(
-    hue_pal()(length(components)),
-    components
-  )
-  # show_col(cols)
-
-  g <- ggplot(d) +
-    geom_rect_interactive(
-      aes(
-        xmin = xmin,
-        xmax = xmax,
-        ymin = ymin,
-        ymax = ymax,
-        fill = {{ fld_category }},
-        color = "white",
-        data_id = {{ fld_category }},
-        tooltip = tooltip
-      ),
-      color = "white",
-      alpha = 0.5
-    ) +
-    scale_fill_manual(values = cols) +
-    coord_polar(theta = "y") +
-    # Create donut hole
-    xlim(c(-10, max(data |> pull({{ fld_height }})))) +
-    # Add center score
-    annotate(
-      "text",
-      x = -10,
-      y = 0,
-      label = round(score),
-      size = 8,
-      fontface = "bold"
-    ) +
-    # scale_fill_brewer(
-    #   palette = colors) +
-    # scale_fill_brewer() +
-    theme_minimal() +
-    # theme_void() +
-    theme(
-      legend.position = "bottom",
-      plot.margin = unit(c(20, 20, 20, 20), "pt")
-    )
-
-  if (!is.null(title)) {
-    g <- g +
-      ggtitle(title)
-  }
-
-  girafe(
-    ggobj = g,
-    options = list(
-      opts_sizing(rescale = TRUE, width = 1),
-      opts_tooltip(
-        css = "background-color:white;color:black;padding:5px;border-radius:3px;"
-      )
-    )
-  )
-}
-
-# polygon scoring helpers ----
-# (prototype inline; planned to move into msens::scores_for_cells() etc.)
-
-# given an sf polygon and a cell-id raster, return a tibble of intersecting
-# cell_id with pct_covered (0-100). The cell raster uses 0-360 longitudes,
-# so the input polygon is shifted accordingly.
-cells_in_polygon <- function(poly, r_cell_id) {
-  # poly: sf object (assumed EPSG:4326 in -180/180 range, e.g. from
-  # mapgl::get_drawn_features)
-  poly_t <- poly |>
-    st_transform(4326) |>
-    st_shift_longitude()  # [-180,180] -> [0,360]
-  r_cov <- terra::rasterize(
-    vect(poly_t), r_cell_id,
-    cover   = TRUE,
-    touches = TRUE)
-  r_id_vals  <- values(r_cell_id)[, 1]
-  r_cov_vals <- values(r_cov)[, 1]
-  keep <- !is.na(r_cov_vals) & r_cov_vals > 0 & !is.na(r_id_vals)
-  tibble(
-    cell_id     = as.integer(r_id_vals[keep]),
-    pct_covered = round(as.numeric(r_cov_vals[keep]) * 100))
-}
-
-# weighted-mean aggregation of cell_metric across a set of cells; returns
-# a flower-plot-ready tibble (component, score, even)
-scores_for_cells <- function(con, cells,
-                             metric_pattern = "_ecoregion_rescaled$") {
-  # use a temp table for IN-list; copy_inline keeps it client-side
-  cells_t <- dbplyr::copy_inline(con, cells)
-  tbl(con, "metric") |>
-    filter(str_detect(metric_key, metric_pattern)) |>
-    inner_join(tbl(con, "cell_metric"), by = "metric_seq") |>
-    inner_join(cells_t, by = "cell_id") |>
-    group_by(metric_key) |>
-    summarize(
-      score = sum(value * pct_covered, na.rm = TRUE) /
-              sum(pct_covered, na.rm = TRUE),
-      .groups = "drop") |>
-    collect() |>
-    mutate(
-      component = metric_key |>
-        str_replace("extrisk_", "") |>
-        str_replace("_ecoregion_rescaled", "") |>
-        str_replace("_", " "),
-      even = 1) |>
-    filter(component != "all")
-}
-
-# species-table aggregation across a set of cells; mirrors the cell-mode
-# query but generalized to multiple cells with pct_covered weighting
-species_for_cells <- function(con, cells) {
-  cells_t <- dbplyr::copy_inline(con, cells)
-  tbl_taxon <- tbl(con, "taxon") |>
-    filter(is_ok) |>
-    select(
-      sp_cat,
-      sp_common     = common_name,
-      sp_scientific = scientific_name,
-      taxon_id,
-      taxon_authority,
-      er_code       = extrisk_code,
-      er_score,
-      is_mmpa,
-      is_mbta,
-      mdl_seq) |>
-    mutate(er_score = er_score / 100)
-  tbl(con, "model_cell") |>
-    inner_join(cells_t,    by = "cell_id") |>
-    inner_join(tbl_taxon,  by = join_by(mdl_seq)) |>
-    inner_join(
-      tbl(con, "cell") |> select(cell_id, area_km2),
-      by = join_by(cell_id)) |>
-    group_by(
-      mdl_seq, sp_cat, sp_common, sp_scientific, taxon_id,
-      taxon_authority, er_code, er_score, is_mmpa, is_mbta) |>
-    summarize(
-      area_km2 = sum(area_km2 * pct_covered / 100, na.rm = TRUE),
-      avg_suit = sum(value * pct_covered, na.rm = TRUE) /
-                 sum(pct_covered, na.rm = TRUE) / 100,
-      .groups  = "drop") |>
-    collect() |>
-    mutate(
-      suit_er      = avg_suit * er_score,
-      suit_er_area = avg_suit * er_score * area_km2) |>
-    group_by(sp_cat) |>
-    mutate(cat_suit_er_area = sum(suit_er_area, na.rm = TRUE)) |>
-    ungroup() |>
-    mutate(pct_cat = suit_er_area / cat_suit_er_area)
-}
-
-# paint a drawn polygon as a fill layer colored by its mean score
-# uses a unique source id per call so re-draws don't collide with the
-# previous source (mapgl doesn't expose remove_source)
-paint_drawn_polygon <- function(proxy, poly, mean_score, hash) {
-  cols <- rev(RColorBrewer::brewer.pal(11, "Spectral"))
-  pal  <- scales::col_numeric(cols, domain = c(0, 100), na.color = "#888888")
-  fill <- pal(mean_score)
-  src_id <- glue("drawn_score_src_{hash}")
-  proxy |>
-    clear_layer("drawn_score_lyr") |>
-    add_source(id = src_id, data = poly) |>
-    add_fill_layer(
-      id           = "drawn_score_lyr",
-      source       = src_id,
-      fill_color   = fill,
-      fill_opacity = 0.55,
-      before_id    = "pra_ln")
-}
+# plot_flower, cells_in_polygon, scores_for_cells, species_for_cells:
+# now provided by the msens package (loaded via librarian::shelf above).
+# Polygon drawing moved from the Map tab to the Report tab; the old
+# paint_drawn_polygon helper was removed along with it.
 
 # data prep ----
 
@@ -784,6 +550,11 @@ ui <- page_sidebar(
         localStorage.setItem('msens_mapgl_show_splash', val);
       });
 
+      // open a rendered-report URL in a new browser tab
+      Shiny.addCustomMessageHandler('openUrl', function(url) {
+        window.open(url, '_blank');
+      });
+
       // program area tooltip lookup (updated from server)
       var praTooltips = {};
       var praPopup = null;
@@ -911,6 +682,58 @@ ui <- page_sidebar(
             )
           )
         )
+      )
+    ),
+    # Report tab ----
+    # Build a list of labeled areas (drawn polygons and/or selected
+    # Program Areas) and submit to the parameterized Quarto report
+    # endpoint. Drawing lives here, not on the Map tab.
+    nav_panel(
+      title = "Report",
+      value = "Report",
+      layout_sidebar(
+        sidebar = sidebar(
+          width = 360,
+          textInput(
+            "rpt_title",
+            "Report title",
+            value = "BOEM Marine Sensitivity Report"),
+          selectInput(
+            "rpt_ver",
+            "Data version",
+            choices  = c("v6", "v5", "v4c", "v4b", "v3"),
+            selected = "v6"),
+          radioButtons(
+            "rpt_format",
+            "Output format",
+            choices  = c("HTML" = "html",
+                         "Word (.docx)" = "docx",
+                         "PDF" = "pdf"),
+            selected = "html",
+            inline   = TRUE),
+          hr(),
+          tags$h5("Add area"),
+          tags$p(class = "text-muted small",
+            "Draw a polygon on the map OR click a Program Area ",
+            "(set Spatial units = Program areas in the sidebar), then:"),
+          textInput("rpt_area_label", "Label for next area",
+                    value = "Area 1"),
+          div(class = "d-flex gap-2 mb-2",
+            actionButton("btn_add_drawn", "Add drawn polygon",
+                         icon  = icon("plus"),
+                         class = "btn-sm btn-outline-primary"),
+            actionButton("btn_add_pra", "Add selected PRA",
+                         icon  = icon("plus"),
+                         class = "btn-sm btn-outline-primary")),
+          hr(),
+          tags$h5("Areas"),
+          uiOutput("rpt_areas_ui"),
+          hr(),
+          actionButton("btn_rpt_submit", "Generate report",
+                       class = "btn-primary w-100",
+                       icon  = icon("file-export"))
+        ),
+        mapboxglOutput("map_rpt", height = "700px")
       )
     )
   )
@@ -1057,7 +880,7 @@ server <- function(input, output, session) {
     clicked_pa       = NULL,
     clicked_pra      = NULL,
     clicked_cell     = NULL,
-    drawn_polygon    = NULL,   # list(sf, cells, hash, mean_score, d_scores)
+    rpt_areas        = list(),  # Report tab: list of {label, kind, value}
     spp_tbl          = NULL,
     spp_tbl_hdr      = NULL,
     spp_tbl_filename = NULL
@@ -1065,10 +888,7 @@ server <- function(input, output, session) {
 
   # dynamic title shown in the flower panel drag handle
   output$flower_panel_title <- renderText({
-    if (!is.null(rx$drawn_polygon)) {
-      glue("Drawn polygon ({nrow(rx$drawn_polygon$cells)} cells, ",
-           "score {round(rx$drawn_polygon$mean_score)})")
-    } else if (!is.null(rx$clicked_cell)) {
+    if (!is.null(rx$clicked_cell)) {
       glue("Cell {rx$clicked_cell$cell_id}")
     } else if (!is.null(rx$clicked_pra)) {
       glue("{rx$clicked_pra$properties$programarea_name}")
@@ -1109,18 +929,20 @@ server <- function(input, output, session) {
     r
   })
 
-  # map ----
-  output$map <- renderMapboxgl({
-    # default to show raster score over the full study area extent
-    r <- r_init
-    bbox <- st_bbox(r) |> as.numeric()
+  # build_initial_map ----
+  # construct the initial map state (base layers, controls) shared by the
+  # Map tab and the Report tab's embedded map. The Report tab chains
+  # add_draw_control() after calling this.
+  build_initial_map <- function(sphere = TRUE) {
+    r      <- r_init
+    bbox   <- st_bbox(r) |> as.numeric()
     n_cols <- 11
     cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-    rng_r <- minmax(r) |> as.numeric() |> signif(digits = 3)
+    rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
 
     mapboxgl(
-      style = mapbox_style("dark"),
-      projection = ifelse(input$tgl_sphere, "globe", "mercator")
+      style      = mapbox_style("dark"),
+      projection = ifelse(sphere, "globe", "mercator")
     ) |>
       fit_bounds(bbox) |>
       msens::add_pmline(list(
@@ -1134,12 +956,7 @@ server <- function(input, output, session) {
         list(source     = pra_pts,
              text_field = "programarea_key",
              id         = "pra_lbl"))) |>
-      # score raster (added FIRST so the gray overlay below sits on top of it)
       msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
-      # semi-transparent gray overlay for cells that have metric values but
-      # lie outside any v6 Program Area (Atlantic, Gulf of America, Hawaii,
-      # Puerto Rico, Pacific Island Territories) — sits ON TOP of the score
-      # raster so the outside area is visibly dimmed/muted, not brightened
       msens::add_cells(
         r_outside_pra,
         colors         = c("#222222", "#222222"),
@@ -1149,39 +966,42 @@ server <- function(input, output, session) {
         before_id      = "er_ln") |>
       mapgl::add_legend(
         get_lyr_name(lyr_default),
-        values = rng_r,
-        colors = cols_r,
-        position = "bottom-right"
-      ) |>
+        values   = rng_r,
+        colors   = cols_r,
+        position = "bottom-right") |>
       add_fullscreen_control() |>
       add_navigation_control() |>
       add_scale_control() |>
       add_layers_control(
         layers = list(
-          "Program Area outlines"           = "pra_ln",
-          "Program Area labels"             = "pra_lbl",
-          "Ecoregions outlines"             = "er_ln",
-          "Raster cell values"              = "r_lyr",
-          "Cells outside Program Areas"     = "outside_pra_lyr"
-        )
-      ) |>
-      add_draw_control(
-        position     = "top-right",
-        fill_color   = "#fbb03b",
-        line_color   = "#fbb03b",
-        fill_opacity = 0.2,
-        # hide point, line, and combine/uncombine buttons — only allow
-        # polygon drawing + trash. Cells are already clickable, lines
-        # don't make sense for an area-based score, and combine/uncombine
-        # are for multipolygons (out of scope for phase 1)
-        controls     = list(
-          point              = FALSE,
-          line_string        = FALSE,
-          polygon            = TRUE,
-          trash              = TRUE,
-          combine_features   = FALSE,
-          uncombine_features = FALSE)) |>
+          "Program Area outlines"       = "pra_ln",
+          "Program Area labels"         = "pra_lbl",
+          "Ecoregions outlines"         = "er_ln",
+          "Raster cell values"          = "r_lyr",
+          "Cells outside Program Areas" = "outside_pra_lyr")) |>
       add_geocoder_control(placeholder = "Go to location")
+  }
+
+  # a draw_control spec the Map tab and Report tab share; only the Report
+  # tab actually adds it (Task 4 removed drawing from the Map tab)
+  add_msens_draw_control <- function(m) {
+    m |> add_draw_control(
+      position     = "top-right",
+      fill_color   = "#fbb03b",
+      line_color   = "#fbb03b",
+      fill_opacity = 0.2,
+      controls     = list(
+        point              = FALSE,
+        line_string        = FALSE,
+        polygon            = TRUE,
+        trash              = TRUE,
+        combine_features   = FALSE,
+        uncombine_features = FALSE))
+  }
+
+  # map ----
+  output$map <- renderMapboxgl({
+    build_initial_map(sphere = input$tgl_sphere)
   })
 
   # update map ----
@@ -1528,77 +1348,12 @@ server <- function(input, output, session) {
     }
   })
 
-  # map_drawn_features ----
-  # always-on draw control: when the user draws / edits / deletes a polygon,
-  # take over the flower plot + species table with that polygon's scores
-  observeEvent(input$map_drawn_features, ignoreNULL = FALSE, {
-    feats <- get_drawn_features(mapboxgl_proxy("map"))
-    proxy <- mapboxgl_proxy("map")
-
-    if (is.null(feats) || nrow(feats) == 0) {
-      # polygon deleted: clear and revert to whatever was selected before
-      rx$drawn_polygon <- NULL
-      proxy |> clear_layer("drawn_score_lyr")
-      return()
-    }
-
-    # phase 1: score the most recently drawn feature only
-    poly  <- feats[nrow(feats), ]
-    cells <- cells_in_polygon(poly, r_cell[["cell_id"]])
-    if (nrow(cells) == 0) {
-      showNotification(
-        "Drawn polygon doesn't overlap any scored cells.",
-        type = "warning")
-      return()
-    }
-
-    if (verbose) {
-      message(glue("drawn polygon: {nrow(cells)} cells"))
-    }
-
-    # compute aggregated component scores once and stash for both
-    # the flower plot and the polygon-fill color
-    d_sc       <- scores_for_cells(con_sdm, cells)
-    mean_score <- weighted.mean(d_sc$score, d_sc$even, na.rm = TRUE)
-
-    rx$drawn_polygon <- list(
-      sf         = poly,
-      cells      = cells,
-      hash       = digest::digest(sf::st_as_text(sf::st_geometry(poly))),
-      mean_score = mean_score,
-      d_scores   = d_sc)
-
-    # auto-switch: clear any prior cell / program-area selection so the
-    # drawn polygon owns the flower plot + species table
-    rx$clicked_cell <- NULL
-    rx$clicked_pra  <- NULL
-    rx$clicked_pa   <- NULL
-
-    # paint the polygon by its aggregate score
-    paint_drawn_polygon(proxy, poly, mean_score, rx$drawn_polygon$hash)
-  })
+  # (drawn-polygon reactive removed — drawing lives on the Report tab now)
 
   # plot_flower ----
   output$plot_flower <- renderGirafe({
     # set height based on container size
     height <- "100%"
-
-    # ** drawn polygon ----
-    if (!is.null(rx$drawn_polygon)) {
-      d_fl <- rx$drawn_polygon$d_scores
-      if (nrow(d_fl) > 0) {
-        return(
-          d_fl |>
-            plot_flower(
-              fld_category = component,
-              fld_height   = score,
-              fld_width    = even,
-              tooltip_expr = "{component}: {round(score, 2)}",
-              title        = glue(
-                "Drawn polygon ({nrow(rx$drawn_polygon$cells)} cells, ",
-                "mean score {round(rx$drawn_polygon$mean_score, 1)})")))
-      }
-    }
 
     if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
       # get data for cell
@@ -1716,13 +1471,10 @@ server <- function(input, output, session) {
     }
 
     # ** subregion default ----
-    # nothing clicked / drawn: read pre-cached flower data for the current
-    # subregion zone (FULL falls back to USA). The cache is built at app
-    # startup from zone_metric, populated by cell_metrics_to_zone_metrics
-    # in calc_scores.qmd.
-    if (is.null(rx$drawn_polygon) &&
-        is.null(rx$clicked_cell)  &&
-        is.null(rx$clicked_pra)) {
+    # nothing clicked: read pre-cached flower data for the current subregion
+    # zone (FULL falls back to USA). The cache is built at app startup from
+    # zone_metric, populated by cell_metrics_to_zone_metrics in calc_scores.qmd.
+    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
       sr_key   <- input$sel_subregion %||% "FULL"
       z_sr_key <- if (sr_key == "FULL") "USA" else sr_key
       sr_lbl   <- if (sr_key == "FULL") "All USA" else
@@ -1796,20 +1548,7 @@ server <- function(input, output, session) {
 
   # * get_spp_tbl ----
   get_spp_tbl <- reactive({
-    # ** drawn polygon ----
-    if (!is.null(rx$drawn_polygon)) {
-      n_cells <- nrow(rx$drawn_polygon$cells)
-
-      if (verbose) {
-        message(glue(
-          "Getting species table for drawn polygon ({n_cells} cells)"))
-      }
-
-      rx$spp_tbl_hdr      <- glue("Species for drawn polygon ({n_cells} cells)")
-      rx$spp_tbl_filename <- glue("species_drawn-{rx$drawn_polygon$hash}")
-
-      d_spp <- species_for_cells(con_sdm, rx$drawn_polygon$cells)
-    } else if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
+    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
       # ** subregion default ----
       # FULL falls back to USA (the only superset zone in zone_taxon)
       sr_key   <- input$sel_subregion %||% "FULL"
@@ -2126,6 +1865,141 @@ server <- function(input, output, session) {
         plot_bgcolor = bg,
         paper_bgcolor = bg
       )
+  })
+
+  # Report tab ----
+
+  # * map_rpt: embedded map with draw control ----
+  # reuses build_initial_map() from the Map tab so layer/subregion/sphere
+  # toggles in the sidebar apply here too; add_msens_draw_control() is
+  # chained on top.
+  output$map_rpt <- renderMapboxgl({
+    build_initial_map(sphere = input$tgl_sphere) |>
+      add_msens_draw_control()
+  })
+
+  # * rpt_drawn_sf: most-recently-drawn polygon on map_rpt ----
+  rpt_drawn_sf <- reactive({
+    fc <- input$map_rpt_drawn_features
+    req(fc, length(fc$features) > 0)
+    sf_feats <- get_drawn_features(mapboxgl_proxy("map_rpt"))
+    req(sf_feats, nrow(sf_feats) > 0)
+    sf_feats[nrow(sf_feats), ]
+  })
+
+  # * btn_add_drawn ----
+  observeEvent(input$btn_add_drawn, {
+    p   <- tryCatch(rpt_drawn_sf(), error = function(e) NULL)
+    if (is.null(p)) {
+      showNotification(
+        "Draw a polygon on the map first.",
+        type = "warning")
+      return()
+    }
+    wkt <- sf::st_as_text(sf::st_geometry(p))
+    if (nchar(wkt) > 8000) {
+      p   <- sf::st_simplify(p, dTolerance = 0.01, preserveTopology = TRUE)
+      wkt <- sf::st_as_text(sf::st_geometry(p))
+      showNotification(
+        "Polygon simplified to fit request.",
+        type = "warning")
+    }
+    lbl <- input$rpt_area_label %||% paste0("Area ", length(rx$rpt_areas) + 1)
+    rx$rpt_areas <- c(
+      rx$rpt_areas,
+      list(list(label = lbl, kind = "wkt", value = wkt)))
+    updateTextInput(
+      session, "rpt_area_label",
+      value = paste0("Area ", length(rx$rpt_areas) + 1))
+  })
+
+  # * btn_add_pra ----
+  observeEvent(input$btn_add_pra, {
+    if (is.null(rx$clicked_pra)) {
+      showNotification(
+        "Click a Program Area on the map first (set Spatial units = Program areas).",
+        type = "warning")
+      return()
+    }
+    props <- rx$clicked_pra$properties
+    key   <- props$programarea_key %||% props$planarea_key
+    nm    <- props$programarea_name %||% props$planarea_name
+    lbl   <- if (nzchar(input$rpt_area_label)) input$rpt_area_label else nm
+    rx$rpt_areas <- c(
+      rx$rpt_areas,
+      list(list(label = lbl, kind = "pra", value = key)))
+    updateTextInput(
+      session, "rpt_area_label",
+      value = paste0("Area ", length(rx$rpt_areas) + 1))
+  })
+
+  # * rpt_areas_ui: list of added areas with delete buttons ----
+  output$rpt_areas_ui <- renderUI({
+    areas <- rx$rpt_areas
+    if (length(areas) == 0)
+      return(tags$p(class = "text-muted small", "No areas yet."))
+    tagList(lapply(seq_along(areas), function(i) {
+      a <- areas[[i]]
+      div(
+        class = "d-flex align-items-center mb-1",
+        tags$span(
+          class = "flex-grow-1 small",
+          sprintf("%d. %s (%s)", i, a$label, a$kind)),
+        actionButton(
+          paste0("rpt_del_", i),
+          "",
+          icon  = icon("trash"),
+          class = "btn-sm btn-outline-danger"))
+    }))
+  })
+
+  # dynamically wire up the per-row delete buttons
+  observe({
+    lapply(seq_along(rx$rpt_areas), function(i) {
+      local({
+        idx <- i
+        observeEvent(
+          input[[paste0("rpt_del_", idx)]],
+          {
+            cur <- rx$rpt_areas
+            cur[[idx]] <- NULL
+            rx$rpt_areas <- cur
+          },
+          ignoreInit = TRUE,
+          once       = TRUE)
+      })
+    })
+  })
+
+  # * btn_rpt_submit: POST to plumber and open returned URL ----
+  observeEvent(input$btn_rpt_submit, {
+    areas <- rx$rpt_areas
+    if (length(areas) == 0) {
+      showNotification("Add at least one area first.", type = "error")
+      return()
+    }
+    body <- list(
+      title  = input$rpt_title,
+      ver    = input$rpt_ver,
+      format = input$rpt_format,
+      areas  = areas)
+    endpoint <- Sys.getenv(
+      "MSENS_REPORT_URL",
+      unset = "https://api.marinesensitivity.org/report")
+    resp <- tryCatch(
+      httr2::request(endpoint) |>
+        httr2::req_body_json(body) |>
+        httr2::req_timeout(300) |>
+        httr2::req_perform() |>
+        httr2::resp_body_json(),
+      error = function(e) {
+        showNotification(
+          paste("Report request failed:", conditionMessage(e)),
+          type = "error", duration = 10)
+        NULL
+      })
+    req(resp, resp$url)
+    session$sendCustomMessage("openUrl", resp$url)
   })
 }
 shinyApp(ui, server)
