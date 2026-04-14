@@ -562,9 +562,46 @@ ui <- page_sidebar(
         localStorage.setItem('msens_mapgl_show_splash', val);
       });
 
-      // open a rendered-report URL in a new browser tab
+      // open a rendered-report URL in a new browser tab.
+      //
+      // Modern browsers block window.open() calls that aren't in the
+      // same tick as a user gesture. The /report round-trip takes
+      // tens of seconds, so by the time the promise resolves the
+      // user-activation window is long gone and the popup is blocked
+      // on the first click. Workaround: when the Generate report
+      // button is clicked, open an "about:blank" tab *synchronously*
+      // (while we still have user activation) and stash the window
+      // reference. When the /report response finally arrives, point
+      // that stashed window at the real URL — no popup check, no
+      // second-click-to-open dance.
+      window._msens_report_win = null;
+      $(document).on('click', '#btn_rpt_submit', function() {
+        try {
+          var w = window.open('about:blank', '_blank');
+          if (w && w.document) {
+            w.document.write(
+              '<!doctype html><html><head><title>' +
+              'Generating report…</title></head><body style="' +
+              'font-family:system-ui,sans-serif;padding:2em;' +
+              'color:#444;">' +
+              '<h3>Generating report…</h3>' +
+              '<p>This tab will update when the report is ready ' +
+              '(usually a couple of minutes). You can keep using ' +
+              'the app in the meantime.</p></body></html>');
+          }
+          window._msens_report_win = w;
+        } catch (e) {
+          window._msens_report_win = null;
+        }
+      });
       Shiny.addCustomMessageHandler('openUrl', function(url) {
-        window.open(url, '_blank');
+        var w = window._msens_report_win;
+        if (w && !w.closed) {
+          try { w.location.href = url; } catch (e) { window.open(url, '_blank'); }
+          window._msens_report_win = null;
+        } else {
+          window.open(url, '_blank');
+        }
       });
 
       // program area tooltip lookup (updated from server)
