@@ -1017,8 +1017,13 @@ server <- function(input, output, session) {
   })
 
   # update map ----
+  # `input$main_tabs` is included so switching to the Report tab
+  # (which renders map_rpt on demand) re-applies the current layer
+  # state to that map — otherwise the Report map would keep the
+  # cell-raster layer from build_initial_map() even after the user
+  # had already set Spatial units = Program areas on the Map tab.
   observeEvent(
-    c(input$sel_subregion, input$sel_unit, input$sel_lyr),
+    c(input$sel_subregion, input$sel_unit, input$sel_lyr, input$main_tabs),
     {
       req(input$sel_subregion, input$sel_unit, input$sel_lyr)
 
