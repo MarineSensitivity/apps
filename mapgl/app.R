@@ -217,6 +217,11 @@ if (!file.exists(pra_pts_csv)) {
 } else {
   pra_pts <- read_csv(pra_pts_csv)
 }
+
+# * pra_full_sf: full program-area polygons, used to render areas added
+# on the Report tab (so the user can see what they're submitting) ----
+pra_full_sf <- read_sf(pra_gpkg) |>
+  select(programarea_key, programarea_name)
 pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
 
 # * sr_choices ----
@@ -1889,6 +1894,67 @@ server <- function(input, output, session) {
     sf_feats[nrow(sf_feats), ]
   })
 
+  # * rpt_areas_sf: sf of all currently-added Report areas ----
+  # rebuilt whenever rx$rpt_areas changes. PRA polygons come from the
+  # versioned gpkg loaded at startup (pra_full_sf); wkt areas are
+  # parsed from their stored WKT strings.
+  rpt_areas_sf <- reactive({
+    areas <- rx$rpt_areas
+    if (length(areas) == 0) return(NULL)
+    rows <- purrr::map(areas, function(a) {
+      g <- tryCatch(
+        {
+          if (identical(a$kind, "pra")) {
+            pra_full_sf |>
+              filter(programarea_key == a$value) |>
+              st_geometry()
+          } else {
+            st_as_sfc(a$value, crs = 4326)
+          }
+        },
+        error = function(e) NULL)
+      if (is.null(g) || length(g) == 0) return(NULL)
+      st_sf(label = a$label, kind = a$kind, geometry = g, crs = 4326)
+    })
+    rows <- Filter(Negate(is.null), rows)
+    if (length(rows) == 0) return(NULL)
+    do.call(rbind, rows)
+  })
+
+  # * render added Report areas on map_rpt with thick pink border ----
+  # + symbol label at the polygon's point-on-surface. Re-runs whenever
+  # rpt_areas_sf() invalidates; clears stale layers first.
+  observe({
+    sf_data <- rpt_areas_sf()
+    proxy   <- mapboxgl_proxy("map_rpt")
+    proxy |>
+      clear_layer("rpt_added_lbl") |>
+      clear_layer("rpt_added_ln") |>
+      clear_layer("rpt_added_fill")
+    if (is.null(sf_data) || nrow(sf_data) == 0) return()
+    pts <- suppressWarnings(st_point_on_surface(sf_data))
+    proxy |>
+      add_fill_layer(
+        id           = "rpt_added_fill",
+        source       = sf_data,
+        fill_color   = "#ff00aa",
+        fill_opacity = 0.15) |>
+      add_line_layer(
+        id         = "rpt_added_ln",
+        source     = sf_data,
+        line_color = "#ff00aa",
+        line_width = 4) |>
+      add_symbol_layer(
+        id              = "rpt_added_lbl",
+        source          = pts,
+        text_field      = "label",
+        text_size       = 14,
+        text_color      = "#ffffff",
+        text_halo_color = "#ff00aa",
+        text_halo_width = 2,
+        text_offset     = c(0, -1))
+  })
+
   # * map_rpt_click: register Program Area clicks on the Report map ----
   # mirrors the main Map tab's click handler so `btn_add_pra` works after
   # clicking a Program Area on either map.
@@ -1912,6 +1978,29 @@ server <- function(input, output, session) {
     if (!is.null(nm) && nzchar(nm))
       updateTextInput(session, "rpt_area_label", value = nm)
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
+  # * highlight the currently-clicked Program Area on both maps with a
+  # thick bright-pink border so it stands out against the Spectral
+  # cell colormap. Applies to the Map tab and the Report tab's
+  # embedded map; clears the highlight when rx$clicked_pra is NULL.
+  observe({
+    clicked <- rx$clicked_pra
+    key <- if (!is.null(clicked))
+      clicked$properties$programarea_key %||% clicked$properties$planarea_key
+    for (mid in c("map", "map_rpt")) {
+      proxy <- mapboxgl_proxy(mid)
+      proxy |> clear_layer("pra_highlight_ln")
+      if (!is.null(key) && nzchar(key)) {
+        proxy |> add_line_layer(
+          id           = "pra_highlight_ln",
+          source       = "pra_src",
+          source_layer = tbl_pra_pm,
+          line_color   = "#ff00aa",
+          line_width   = 4,
+          filter       = list("==", "programarea_key", key))
+      }
+    }
+  })
 
   # * btn_add_drawn ----
   observeEvent(input$btn_add_drawn, {
