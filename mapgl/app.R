@@ -22,13 +22,16 @@ librarian::shelf(
   duckdb,
   DT,
   fs,
+  future,
   ggiraph,
   ggplot2,
   glue,
   here,
+  httr2,
   MarineSensitivity/msens,
   yogevherz / plotme,
   plotly,
+  promises,
   purrr,
   RColorBrewer,
   readr,
@@ -42,6 +45,10 @@ librarian::shelf(
   quiet = T
 )
 options(readr.show_col_types = F)
+
+# async backend for background `/report` POSTs so long renders don't
+# block the Shiny session. Workers are shared across sessions.
+future::plan(future::multisession, workers = 2)
 
 # profile performance of app:
 #   profvis::profvis(shiny::runApp(here::here("mapgl")))
@@ -1991,7 +1998,9 @@ server <- function(input, output, session) {
     })
   })
 
-  # * btn_rpt_submit: POST to plumber and open returned URL ----
+  # * btn_rpt_submit: POST to plumber in a background worker and open
+  # the returned URL on resolve. Keeps the Shiny session responsive
+  # while the render runs (which can take a couple of minutes).
   observeEvent(input$btn_rpt_submit, {
     areas <- rx$rpt_areas
     if (length(areas) == 0) {
@@ -2006,20 +2015,60 @@ server <- function(input, output, session) {
     endpoint <- Sys.getenv(
       "MSENS_REPORT_URL",
       unset = "https://api.marinesensitivity.org/report")
-    resp <- tryCatch(
-      httr2::request(endpoint) |>
-        httr2::req_body_json(body) |>
-        httr2::req_timeout(300) |>
-        httr2::req_perform() |>
-        httr2::resp_body_json(),
-      error = function(e) {
-        showNotification(
-          paste("Report request failed:", conditionMessage(e)),
-          type = "error", duration = 10)
-        NULL
-      })
-    req(resp, resp$url)
-    session$sendCustomMessage("openUrl", resp$url)
+
+    # sticky indeterminate progress notification with a bootstrap spinner;
+    # removed in both the resolve and reject handlers below.
+    notif_id <- showNotification(
+      tags$div(
+        tags$div(
+          class        = "spinner-border spinner-border-sm me-2",
+          role         = "status",
+          `aria-hidden`= "true"),
+        tags$span(
+          "Generating report — this may take a couple of minutes...")),
+      duration    = NULL,
+      closeButton = FALSE,
+      type        = "message")
+
+    # run the request in a background R worker. `body` and `endpoint`
+    # are captured and serialized to the worker; httr2 is referenced via
+    # namespace so the worker loads it automatically. The .then callbacks
+    # run back on the main Shiny thread, so they can safely touch
+    # `session` and the notification stack.
+    promises::future_promise(
+      {
+        httr2::request(endpoint) |>
+          httr2::req_body_json(body) |>
+          httr2::req_timeout(600) |>
+          httr2::req_perform() |>
+          httr2::resp_body_json()
+      },
+      seed = TRUE) |>
+      promises::then(
+        onFulfilled = function(resp) {
+          removeNotification(notif_id)
+          if (is.null(resp$url)) {
+            showNotification(
+              paste0(
+                "Report finished but returned no URL",
+                if (!is.null(resp$error)) paste0(": ", resp$error) else "."),
+              type = "error", duration = 10)
+            return()
+          }
+          session$sendCustomMessage("openUrl", resp$url)
+          showNotification(
+            "Report ready — opening in a new tab.",
+            type = "message", duration = 5)
+        },
+        onRejected = function(e) {
+          removeNotification(notif_id)
+          showNotification(
+            paste("Report request failed:", conditionMessage(e)),
+            type = "error", duration = 10)
+        })
+
+    # return invisibly so the observer doesn't block on the promise
+    invisible(NULL)
   })
 }
 shinyApp(ui, server)
