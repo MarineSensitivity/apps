@@ -1947,7 +1947,9 @@ server <- function(input, output, session) {
       add_symbol_layer(
         id              = "rpt_added_lbl",
         source          = pts,
-        text_field      = "label",
+        # get_column() emits ["get","label"] so the text resolves
+        # per-feature; a bare string would render the literal "label".
+        text_field      = get_column("label"),
         text_size       = 14,
         text_color      = "#ffffff",
         text_halo_color = "#ff00aa",
@@ -1998,6 +2000,32 @@ server <- function(input, output, session) {
           line_color   = "#ff00aa",
           line_width   = 4,
           filter       = list("==", "programarea_key", key))
+      }
+    }
+  })
+
+  # * highlight the currently-clicked cell on both maps with a bright
+  # pink circle marker at the click coordinates. Simpler than drawing
+  # the cell polygon since the raster uses 0-360 longitudes and would
+  # need shifting. Cleared when rx$clicked_cell is NULL.
+  observe({
+    clicked <- rx$clicked_cell
+    pt <- if (!is.null(clicked))
+      st_sf(
+        cell_id  = clicked$cell_id,
+        geometry = st_sfc(st_point(c(clicked$lng, clicked$lat)), crs = 4326))
+    for (mid in c("map", "map_rpt")) {
+      proxy <- mapboxgl_proxy(mid)
+      proxy |> clear_layer("cell_highlight")
+      if (!is.null(pt)) {
+        proxy |> add_circle_layer(
+          id                  = "cell_highlight",
+          source              = pt,
+          circle_color        = "#ffffff",
+          circle_opacity      = 0.4,
+          circle_radius       = 8,
+          circle_stroke_color = "#ff00aa",
+          circle_stroke_width = 4)
       }
     }
   })
