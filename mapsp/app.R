@@ -224,6 +224,7 @@ mdl_seq_lookup <- d_spp |>
 # ui ----
 ui <- page_sidebar(
   tags$head(
+    tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     tags$style(HTML("
       .mapboxgl-popup-content{color:black;}
       #ds_layer_container {display: none;}

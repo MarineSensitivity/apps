@@ -530,6 +530,7 @@ light <- bs_theme()
 dark <- bs_theme()
 ui <- page_sidebar(
   tags$head(
+    tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     tags$style(HTML("
       .mapboxgl-popup-content{color:black;}
       .bslib-full-screen .girafe_container_std {
