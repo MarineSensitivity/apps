@@ -552,6 +552,24 @@ ui <- page_sidebar(
       .header-right .action-button { background: none; border: none; color: inherit; cursor: pointer; text-decoration: underline; font-size: 0.9em; padding: 0; }
       .modal-footer { flex-wrap: wrap; justify-content: center; }
       .modal-footer .form-group { width: 100%; margin-bottom: 0.5rem; }
+      .map-container { position: relative; width: 100%; height: 100%; }
+      .map-loading-overlay {
+        position: absolute; inset: 0; z-index: 10;
+        display: flex; flex-direction: column;
+        align-items: center; justify-content: center;
+        background: rgba(25, 25, 25, 0.85);
+        color: #9ca3af; font-size: 0.9em; gap: 12px;
+        transition: opacity 0.4s ease;
+      }
+      .map-loading-overlay.hidden { opacity: 0; pointer-events: none; }
+      .map-loading-spinner {
+        width: 36px; height: 36px;
+        border: 3px solid rgba(255,255,255,0.12);
+        border-top-color: #6ea8fe;
+        border-radius: 50%;
+        animation: msens-spin 0.8s linear infinite;
+      }
+      @keyframes msens-spin { to { transform: rotate(360deg); } }
     ")),
     tags$script(HTML("
       $(document).on('shiny:connected', function() {
@@ -560,6 +578,12 @@ ui <- page_sidebar(
       });
       Shiny.addCustomMessageHandler('saveSplashPref', function(val) {
         localStorage.setItem('msens_mapgl_show_splash', val);
+      });
+
+      // hide a map loading overlay with a fade-out transition
+      Shiny.addCustomMessageHandler('hideMapOverlay', function(id) {
+        var el = document.getElementById(id);
+        if (el) el.classList.add('hidden');
       });
 
       // open a rendered-report URL in a new browser tab.
@@ -585,8 +609,8 @@ ui <- page_sidebar(
           if (w && w.document) {
             w.document.title = 'Generating report\u2026';
             w.document.body.innerText =
-              'Generating report \u2014 this tab will update when the ' +
-              'report is ready (usually a couple of minutes). You ' +
+              'Generating report \u2014 this tab will close when the ' +
+              'report is finished and begins downloading (usually a couple of minutes). You ' +
               'can keep using the app in the meantime.';
           }
           window._msens_report_pending.push(w);
@@ -704,7 +728,11 @@ ui <- page_sidebar(
     nav_panel(
       title = "Map",
       value = "Map",
-      mapboxglOutput("map")
+      div(class = "map-container",
+        div(id = "map-overlay", class = "map-loading-overlay",
+          div(class = "map-loading-spinner"),
+          span("Loading map\u2026")),
+        mapboxglOutput("map"))
     ),
     nav_panel(
       title = "Plot of Scores",
@@ -798,7 +826,11 @@ ui <- page_sidebar(
                        class = "btn-primary w-100",
                        icon  = icon("file-export"))
         ),
-        mapboxglOutput("map_rpt", height = "700px")
+        div(class = "map-container", style = "height: 700px;",
+          div(id = "map-rpt-overlay", class = "map-loading-overlay",
+            div(class = "map-loading-spinner"),
+            span("Loading map\u2026")),
+          mapboxglOutput("map_rpt", height = "700px"))
       )
     )
   )
@@ -1069,6 +1101,11 @@ server <- function(input, output, session) {
     build_initial_map(sphere = input$tgl_sphere)
   })
 
+  # hide the main map loading overlay once style.load fires
+  observeEvent(input$map_zoom, {
+    session$sendCustomMessage("hideMapOverlay", "map-overlay")
+  }, once = TRUE, ignoreInit = FALSE)
+
   # rpt_map_loaded: one-shot trigger that flips the first time
   # map_rpt finishes its style.load (detected via the input$map_rpt_zoom
   # event mapgl JS emits from map.on("load", ...)). The main update
@@ -1079,6 +1116,7 @@ server <- function(input, output, session) {
   rpt_map_loaded <- reactiveVal(0)
   observeEvent(input$map_rpt_zoom, {
     rpt_map_loaded(rpt_map_loaded() + 1)
+    session$sendCustomMessage("hideMapOverlay", "map-rpt-overlay")
   }, once = TRUE, ignoreInit = FALSE)
 
   # update map ----
@@ -2217,8 +2255,8 @@ server <- function(input, output, session) {
           role         = "status",
           `aria-hidden`= "true"),
         tags$span(
-          "Generating report — this may take a couple of minutes...", br(),
-          "Will open in a new tab when done. Meanwhile, you can continue using the app.")),
+          "Generating report in new tab — this may take a couple of minutes...", br(),
+          "Tab will close when report done and download begins. Meanwhile, you can continue using the app.")),
       duration    = NULL,
       closeButton = FALSE,
       type        = "message")
