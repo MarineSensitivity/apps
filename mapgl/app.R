@@ -574,29 +574,49 @@ ui <- page_sidebar(
       // reference. When the /report response finally arrives, point
       // that stashed window at the real URL -- no popup check, no
       // second-click-to-open dance.
-      window._msens_report_win = null;
+      //
+      // Multiple concurrent reports: a queue + map keyed by reqId
+      // ensures each response targets the correct placeholder tab.
+      window._msens_report_pending = [];
+      window._msens_report_wins = {};
       $(document).on('click', '#btn_rpt_submit', function() {
         try {
           var w = window.open('', '_blank');
           if (w && w.document) {
-            w.document.title = 'Generating report…';
+            w.document.title = 'Generating report\u2026';
             w.document.body.innerText =
-              'Generating report — this tab will update when the ' +
+              'Generating report \u2014 this tab will update when the ' +
               'report is ready (usually a couple of minutes). You ' +
               'can keep using the app in the meantime.';
           }
-          window._msens_report_win = w;
+          window._msens_report_pending.push(w);
         } catch (e) {
-          window._msens_report_win = null;
+          window._msens_report_pending.push(null);
         }
       });
-      Shiny.addCustomMessageHandler('openUrl', function(url) {
-        var w = window._msens_report_win;
+      Shiny.addCustomMessageHandler('setReportReqId', function(reqId) {
+        var w = window._msens_report_pending.shift() || null;
+        if (w) window._msens_report_wins[reqId] = w;
+      });
+      Shiny.addCustomMessageHandler('openUrl', function(msg) {
+        var url   = msg.url;
+        var reqId = msg.reqId;
+        var w     = window._msens_report_wins[reqId];
+        delete window._msens_report_wins[reqId];
         if (w && !w.closed) {
-          try { w.location.href = url; } catch (e) { window.open(url, '_blank'); }
-          window._msens_report_win = null;
+          try { w.location.href = url; } catch (e) {}
+          // close placeholder tab after download starts (server sends
+          // Content-Disposition: attachment so the tab won't navigate)
+          setTimeout(function() { if (w && !w.closed) w.close(); }, 2000);
         } else {
-          window.open(url, '_blank');
+          // fallback: hidden anchor click triggers download via
+          // Content-Disposition header from the file server
+          var a = document.createElement('a');
+          a.href = url;
+          a.style.display = 'none';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(function() { document.body.removeChild(a); }, 100);
         }
       });
 
@@ -2173,6 +2193,12 @@ server <- function(input, output, session) {
       showNotification("Add at least one area first.", type = "error")
       return()
     }
+
+    # unique ID for this report request — associates the pre-opened
+    # placeholder tab (JS side) with the response when it arrives
+    req_id <- paste0("rpt_", as.integer(Sys.time()), "_", sample.int(1e6, 1))
+    session$sendCustomMessage("setReportReqId", req_id)
+
     body <- list(
       title  = input$rpt_title,
       ver    = input$rpt_ver,
@@ -2222,9 +2248,9 @@ server <- function(input, output, session) {
               type = "error", duration = 10)
             return()
           }
-          session$sendCustomMessage("openUrl", resp$url)
+          session$sendCustomMessage("openUrl", list(url = resp$url, reqId = req_id))
           showNotification(
-            "Report ready — opening in a new tab.",
+            "Report ready — downloading.",
             type = "message", duration = 5)
         },
         onRejected = function(e) {
