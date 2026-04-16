@@ -553,7 +553,8 @@ ui <- page_sidebar(
       .header-right .action-button { background: none; border: none; color: inherit; cursor: pointer; text-decoration: underline; font-size: 0.9em; padding: 0; }
       .modal-footer { flex-wrap: wrap; justify-content: center; }
       .modal-footer .form-group { width: 100%; margin-bottom: 0.5rem; }
-      .map-container { position: relative; width: 100%; height: 100%; }
+      .map-container { position: relative; width: 100%; flex: 1 1 auto; min-height: 0; }
+      .map-container > .html-widget { height: 100% !important; }
       .map-loading-overlay {
         position: absolute; inset: 0; z-index: 10;
         display: flex; flex-direction: column;
