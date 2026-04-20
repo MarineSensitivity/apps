@@ -90,7 +90,6 @@ metrics_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
 pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
 sr_pra_csv <- glue("{dir_v}/subregion_programareas.csv")
 sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
-init_tif <- here("mapgl/cache/r_init_full.tif")
 outside_pra_tif <- here("mapgl/cache/r_cells_outside_pra.tif")
 taxonomy_csv <- here(
   "mapgl/data/taxonomic_hierarchy_worms_2025-10-30.csv")
@@ -108,7 +107,6 @@ v_required <- c(
   metrics_tif,
   pra_gpkg,
   sr_pra_csv,
-  # init_tif,
   taxonomy_csv
 )
 v_missing <- v_required[!file.exists(v_required)]
@@ -134,6 +132,45 @@ librarian::shelf(
 con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 # dbListTables(con_sdm)
 # duckdb_shutdown(duckdb()); rm(con_sdm)
+
+# tile server ----
+# browser-facing titilecache (Varnish) URL; used verbatim in the tile URL
+# template sent to mapbox-gl, and for cell_stats() calls from R.
+tile_base_url <- "https://titilecache.marinesensitivity.org"
+# cache-bust tag tied to the sdm.duckdb mtime: if the DB is rebuilt, every
+# cell_tile_url() and cell_stats() URL changes, invalidating the Varnish +
+# browser cache automatically. distinct from the dataset version (`v6`).
+db_mtime <- format(file.info(sdm_db)$mtime, "%Y%m%dT%H%M%SZ", tz = "UTC")
+
+# build the (cell_id, value) SELECT for a given metric + subregion; passed to
+# msens::cell_tile_url() / cell_stats(). strict allowlist on the identifiers
+# to keep the string string-interpolation-safe before it ever hits DuckDB.
+cell_sql <- function(metric_key, subregion_key = "FULL") {
+  stopifnot(
+    is.character(metric_key),   length(metric_key) == 1,
+    grepl("^[A-Za-z0-9_.-]+$", metric_key))
+  stopifnot(
+    is.character(subregion_key), length(subregion_key) == 1,
+    grepl("^[A-Za-z0-9_]+$",   subregion_key))
+  if (subregion_key == "FULL") {
+    glue(
+      "SELECT cm.cell_id, cm.value ",
+      "FROM cell_metric cm ",
+      "JOIN metric m ON cm.metric_seq = m.metric_seq ",
+      "WHERE m.metric_key = '{metric_key}'")
+  } else {
+    glue(
+      "SELECT cm.cell_id, cm.value ",
+      "FROM cell_metric cm ",
+      "JOIN metric     m  ON cm.metric_seq = m.metric_seq ",
+      "JOIN zone_cell  zc ON cm.cell_id    = zc.cell_id ",
+      "JOIN zone       z  ON zc.zone_seq   = z.zone_seq ",
+      "WHERE m.metric_key = '{metric_key}' ",
+      "AND   z.tbl       = '{tbl_sr}' ",
+      "AND   z.fld       = 'subregion_key' ",
+      "AND   z.value     = '{subregion_key}'")
+  }
+}
 
 # helper functions ----
 get_rast <- function(m_key, subregion_key = "FULL") {
@@ -398,22 +435,12 @@ d_sr_pra <- read_csv(sr_pra_csv)
 
 # * r_metrics ----
 r_metrics <- rast(metrics_tif)
-
-# * r_init (cached) ----
-if (!file_exists(init_tif)) {
-  # writing r_init
-  r_init <- get_rast(lyr_default, subregion_key = sr_choices[[1]])
-
-  if (verbose) {
-    message(glue("Writing cached: {basename(init_tif)}"))
-    # show extent of raster
-    print(ext(r_init))
-  }
-
-  writeRaster(r_init, init_tif, overwrite = T)
-  # plot(r_init)
-}
-r_init <- rast(init_tif)
+# NOTE: the old `r_init` terra raster was a ~4 GiB cached default-layer
+# raster (see `mapgl/cache/r_init_full.tif`) used to seed the initial
+# map's image source via msens::add_cells(). With tiles it's no longer
+# needed — the browser fetches only the viewport's tiles on startup
+# (~4-16 PNGs @ ~5-20 KB each), served cached from Varnish after the
+# first hit. The cache file can be deleted whenever.
 
 # * d_sr_bb (cached) ----
 get_sr_bbox <- function(sr_key) {
@@ -448,17 +475,40 @@ if (!file_exists(sr_bb_csv)) {
 }
 d_sr_bb <- read_csv(sr_bb_csv)
 
-# append FULL bbox = full extent of cells with metric values (in-memory only)
+# append FULL bbox = union of subregion bboxes (in-memory only).
+# Previously derived from st_bbox(r_init); with tiles we no longer
+# materialize a full-extent raster, so take the min/max of the cached
+# subregion bboxes instead — same extent in the 0-360° longitude
+# convention the bboxes share with r_cell / r_metrics.
 if (!"FULL" %in% d_sr_bb$subregion_key) {
-  # st_bbox order: xmin, ymin, xmax, ymax
-  bb_full <- st_bbox(r_init) |> as.numeric()
   d_sr_bb <- bind_rows(
     tibble(
       subregion_key = "FULL",
-      xmin = bb_full[1], ymin = bb_full[2],
-      xmax = bb_full[3], ymax = bb_full[4]),
+      xmin = min(d_sr_bb$xmin), ymin = min(d_sr_bb$ymin),
+      xmax = max(d_sr_bb$xmax), ymax = max(d_sr_bb$ymax)),
     d_sr_bb)
 }
+
+# helper: numeric length-4 bbox c(xmin, ymin, xmax, ymax) for a subregion key
+sr_bbox <- function(sr_key) {
+  d_sr_bb |>
+    filter(subregion_key == !!sr_key) |>
+    select(xmin, ymin, xmax, ymax) |>
+    as.numeric()
+}
+
+# pre-compute initial tile state for build_initial_map() so startup doesn't
+# block on a network round-trip to /msens/statistics every time the map
+# re-renders (sphere toggle, etc.). Varnish caches this anyway; warming
+# it once at boot keeps the critical path synchronous-but-fast.
+initial_sql      <- cell_sql(lyr_default, sr_choices[[1]])
+initial_stats    <- msens::cell_stats(initial_sql, mtime = db_mtime, base = tile_base_url)
+initial_rescale  <- c(initial_stats$min, initial_stats$max)
+initial_tile_url <- msens::cell_tile_url(
+  initial_sql,
+  colormap = "spectral_r", rescale = initial_rescale,
+  mtime    = db_mtime,     base    = tile_base_url)
+initial_bbox     <- sr_bbox(sr_choices[[1]])
 
 # * r_outside_pra (cached) ----
 # binary raster of cells that have metric values but lie outside any
@@ -1000,6 +1050,9 @@ server <- function(input, output, session) {
   })
 
   # * get_rast_rx ----
+  # returns a metadata list for the msens cell-tile layer; no terra raster
+  # is materialized in R (the browser fetches tiles on demand from
+  # titilecache). NULL when the unit is not "cell" (pa/pra use vector fills).
   get_rast_rx <- reactive({
     req(input$sel_subregion, input$sel_unit, input$sel_lyr)
 
@@ -1008,42 +1061,54 @@ server <- function(input, output, session) {
     }
 
     if (verbose) {
-      message(glue("get_rast_rx() input$sel_subregion: {input$sel_subregion}"))
+      message(glue(
+        "get_rast_rx() lyr: {input$sel_lyr} | subregion: {input$sel_subregion}"))
     }
 
-    if (input$sel_lyr == lyr_default & input$sel_subregion == sr_choices[[1]]) {
-      if (verbose) {
-        message(glue("Getting cached: {basename(init_tif)}"))
-      }
-      r <- r_init
-    } else {
-      if (verbose) {
-        message(glue(
-          "Getting raster for layer: {input$sel_lyr} and subregion: {input$sel_subregion}"
-        ))
-      }
-      r <- get_rast(input$sel_lyr, subregion_key = input$sel_subregion)
+    # fast path: the default layer + FULL subregion was pre-warmed at boot
+    if (input$sel_lyr == lyr_default && input$sel_subregion == sr_choices[[1]]) {
+      return(list(
+        m_key    = lyr_default,
+        sr_key   = sr_choices[[1]],
+        sql      = initial_sql,
+        rescale  = initial_rescale,
+        tile_url = initial_tile_url,
+        bbox     = initial_bbox))
     }
 
-    r
+    m_key  <- input$sel_lyr
+    sr_key <- input$sel_subregion
+    sql    <- cell_sql(m_key, sr_key)
+    stats  <- msens::cell_stats(sql, mtime = db_mtime, base = tile_base_url)
+    rescl  <- c(stats$min, stats$max)
+
+    list(
+      m_key    = m_key,
+      sr_key   = sr_key,
+      sql      = sql,
+      rescale  = rescl,
+      tile_url = msens::cell_tile_url(
+        sql, colormap = "spectral_r", rescale = rescl,
+        mtime = db_mtime, base = tile_base_url),
+      bbox     = sr_bbox(sr_key))
   })
 
   # build_initial_map ----
   # construct the initial map state (base layers, controls) shared by the
   # Map tab and the Report tab's embedded map. The Report tab chains
-  # add_draw_control() after calling this.
+  # add_draw_control() after calling this. The main cell-values layer is
+  # an XYZ raster source backed by the msens TiTiler factory; only
+  # viewport-intersecting tiles (~4-16 per initial load) are fetched.
   build_initial_map <- function(sphere = TRUE) {
-    r      <- r_init
-    bbox   <- st_bbox(r) |> as.numeric()
     n_cols <- 11
     cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-    rng_r  <- minmax(r) |> as.numeric() |> signif(digits = 3)
+    rng_r  <- signif(initial_rescale, digits = 3)
 
     mapboxgl(
       style      = mapbox_style("dark"),
       projection = ifelse(sphere, "globe", "mercator")
     ) |>
-      fit_bounds(bbox) |>
+      fit_bounds(initial_bbox) |>
       msens::add_pmline(list(
         list(url = glue("{pmtiles_base_url}/{tbl_pra_pm}.pmtiles"),
              source_layer = tbl_pra_pm, id = "pra_ln", source_id = "pra_src",
@@ -1055,7 +1120,8 @@ server <- function(input, output, session) {
         list(source     = pra_pts,
              text_field = "programarea_key",
              id         = "pra_lbl"))) |>
-      msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
+      msens::add_cell_tiles(
+        initial_tile_url, raster_opacity = 0.6, before_id = "er_ln") |>
       msens::add_cells(
         r_outside_pra,
         colors         = c("#222222", "#222222"),
@@ -1146,11 +1212,11 @@ server <- function(input, output, session) {
         # rx$clicked_pa <- NULL
         rx$clicked_pra <- NULL
 
-        # show raster layer
-        r <- get_rast_rx()
+        # metadata for the tile-backed cell-values layer (no terra raster)
+        meta   <- get_rast_rx()
         n_cols <- 11
         cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
-        rng_r <- minmax(r) |> as.numeric() |> signif(digits = 3)
+        rng_r  <- signif(meta$rescale, digits = 3)
 
         # applied to both the Map tab's proxy and the Report tab's
         # embedded map proxy so the Report map stays in sync with
@@ -1162,7 +1228,8 @@ server <- function(input, output, session) {
             clear_layer("r_lyr") |>
             clear_layer("r_src") |>
             clear_legend() |>
-            msens::add_cells(r, cols_r, raster_opacity = 0.6, before_id = "er_ln") |>
+            msens::add_cell_tiles(
+              meta$tile_url, raster_opacity = 0.6, before_id = "er_ln") |>
             msens::add_cells(
               r_outside_pra,
               colors         = c("#222222", "#222222"),
@@ -1176,7 +1243,7 @@ server <- function(input, output, session) {
               colors   = cols_r,
               position = "bottom-right") |>
             mapgl::fit_bounds(
-              bbox    = as.numeric(st_bbox(r)),
+              bbox    = meta$bbox,
               animate = TRUE) |>
             clear_controls("layers") |>
             add_layers_control(
