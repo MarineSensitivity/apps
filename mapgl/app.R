@@ -90,7 +90,6 @@ metrics_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
 pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
 sr_pra_csv <- glue("{dir_v}/subregion_programareas.csv")
 sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
-outside_pra_tif <- here("mapgl/cache/r_cells_outside_pra.tif")
 taxonomy_csv <- here(
   "mapgl/data/taxonomic_hierarchy_worms_2025-10-30.csv")
 tbl_er <- "ply_ecoregions_2025"
@@ -510,31 +509,28 @@ initial_tile_url <- msens::cell_tile_url(
   mtime    = db_mtime,     base    = tile_base_url)
 initial_bbox     <- sr_bbox(sr_choices[[1]])
 
-# * r_outside_pra (cached) ----
-# binary raster of cells that have metric values but lie outside any
-# v6 Program Area zone — used as a semi-transparent gray overlay so the
-# data-vs-program-area gap (Atlantic, Gulf of America, Hawaii, Puerto Rico,
-# Pacific Island Territories) is visible.
-if (!file_exists(outside_pra_tif)) {
-  if (verbose) message("Computing r_cells_outside_pra.tif ...")
-  pra_zone_seqs <- tbl(con_sdm, "zone") |>
-    filter(fld == "programarea_key") |>
-    pull(zone_seq)
-  cells_in_pra <- tbl(con_sdm, "zone_cell") |>
-    filter(zone_seq %in% pra_zone_seqs) |>
-    distinct(cell_id) |>
-    pull(cell_id)
-  cells_with_metrics <- tbl(con_sdm, "cell_metric") |>
-    distinct(cell_id) |>
-    pull(cell_id)
-  cells_outside <- setdiff(cells_with_metrics, cells_in_pra)
+# "Cells outside Program Areas" overlay: a binary mask served by the same
+# msens TiTiler factory but with the `color=` param (single-color mask
+# render, bypassing colormap/rescale). Replaces the old r_outside_pra
+# terra raster + msens::add_cells(..., colors = c("#222222","#222222")).
+outside_pra_sql <- paste0(
+  "SELECT c.cell_id, 1.0 AS value ",
+  "FROM (SELECT DISTINCT cell_id FROM cell_metric) c ",
+  "WHERE c.cell_id NOT IN (",
+  "SELECT zc.cell_id FROM zone_cell zc ",
+  "JOIN zone z ON zc.zone_seq = z.zone_seq ",
+  "WHERE z.fld = 'programarea_key'",
+  ")")
+outside_pra_tile_url <- msens::cell_tile_url(
+  outside_pra_sql,
+  color = "#222222",
+  mtime = db_mtime, base = tile_base_url)
 
-  r_out <- init(r_cell[[1]], NA)
-  r_out[cells_outside] <- 1L
-  r_out <- trim(r_out)
-  writeRaster(r_out, outside_pra_tif, overwrite = TRUE, datatype = "INT1U")
-}
-r_outside_pra <- rast(outside_pra_tif)
+# NOTE: the previous r_outside_pra terra raster (cached to
+# mapgl/cache/r_cells_outside_pra.tif) is gone — the same "cells with
+# metric values but outside any Program Area" mask is now rendered by
+# the msens TiTiler factory via `outside_pra_tile_url` (defined above,
+# SQL: cell_metric cell_ids NOT IN any zone where fld='programarea_key').
 
 # * default subregion flower-plot data (cached) ----
 # Pre-compute the flower-plot tibble for each subregion zone (USA, AK, GA,
@@ -1122,9 +1118,8 @@ server <- function(input, output, session) {
              id         = "pra_lbl"))) |>
       msens::add_cell_tiles(
         initial_tile_url, raster_opacity = 0.6, before_id = "er_ln") |>
-      msens::add_cells(
-        r_outside_pra,
-        colors         = c("#222222", "#222222"),
+      msens::add_cell_tiles(
+        outside_pra_tile_url,
         id             = "outside_pra_lyr",
         source_id      = "outside_pra_lyr",
         raster_opacity = 0.55,
@@ -1230,9 +1225,8 @@ server <- function(input, output, session) {
             clear_legend() |>
             msens::add_cell_tiles(
               meta$tile_url, raster_opacity = 0.6, before_id = "er_ln") |>
-            msens::add_cells(
-              r_outside_pra,
-              colors         = c("#222222", "#222222"),
+            msens::add_cell_tiles(
+              outside_pra_tile_url,
               id             = "outside_pra_lyr",
               source_id      = "outside_pra_lyr",
               raster_opacity = 0.55,
@@ -1437,9 +1431,8 @@ server <- function(input, output, session) {
                 fill_opacity = 1),
               before_id = "pra_ln",
               filter    = pra_filter) |>
-            msens::add_cells(
-              r_outside_pra,
-              colors         = c("#222222", "#222222"),
+            msens::add_cell_tiles(
+              outside_pra_tile_url,
               id             = "outside_pra_lyr",
               source_id      = "outside_pra_lyr",
               raster_opacity = 0.55,
