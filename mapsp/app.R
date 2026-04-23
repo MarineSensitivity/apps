@@ -582,7 +582,7 @@ server <- function(input, output, session) {
         span(class = "layer-label", "Merged Model"),
         if (n_ds > 1) span(
           style = "opacity: 0.85;",
-          glue(" (maximum of {n_ds} inputs)")))
+          glue(" (maximum of {n_ds - 1} inputs)"))) # assume 1 merged model + n_ds-1 inputs
     } else {
       bar_class <- "layer-bar is-input"
       left_content <- tagList(
