@@ -145,6 +145,26 @@ r_masks <- list(
   programarea_key = rast(mask_tif, lyrs = "programarea_key"),
   ecoregion_key   = rast(mask_tif, lyrs = "ecoregion_key"))
 
+# * er_bbox: default extent = all ecoregions ----
+# cached bbox (numeric xmin,ymin,xmax,ymax in the 0-360 longitude convention
+# of r_cell / r_masks) used by the initial map render. trim() strips outer
+# all-NA rows/cols so the bbox hugs actual ecoregion cells.
+er_bbox_csv <- here("mapsp/cache/ecoregions_bbox.csv")
+if (!file.exists(er_bbox_csv)) {
+  er_bbox <- r_masks[["ecoregion_key"]] |>
+    trim() |>
+    st_bbox() |>
+    as.numeric()
+  tibble(
+    xmin = er_bbox[1], ymin = er_bbox[2],
+    xmax = er_bbox[3], ymax = er_bbox[4]
+  ) |>
+    write_csv(er_bbox_csv)
+} else {
+  er_bbox <- read_csv(er_bbox_csv) |>
+    as.numeric()
+}
+
 # query dataset metadata once at startup
 d_datasets <- tbl(con_sdm, "dataset") |>
   select(ds_key, name_display, value_info, is_mask, sort_order) |>
@@ -319,7 +339,7 @@ ui <- page_sidebar(
           "Mask:",
           choices  = c("Program Areas (white outlines)" = "programarea_key",
                        "Ecoregions (black outlines)"    = "ecoregion_key"),
-          selected = "programarea_key",
+          selected = "ecoregion_key",
           width    = "100%")))
   ),
   uiOutput("layer_bar"),
@@ -754,10 +774,9 @@ server <- function(input, output, session) {
 
     mapboxgl(
       style = mapbox_style("dark"),
-      projection = ifelse(input$tgl_sphere, "globe", "mercator"),
-      zoom = 3.5,
-      center = c(-106, 40.1)
+      projection = ifelse(input$tgl_sphere, "globe", "mercator")
     ) |>
+      fit_bounds(er_bbox) |>
       msens::add_pmline(list(
         list(url = glue("{pmtiles_base_url}/{tbl_pra_pm}.pmtiles"),
              source_layer = tbl_pra_pm, id = "pra_ln", source_id = "pra_src",
