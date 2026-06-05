@@ -962,7 +962,7 @@ server <- function(input, output, session) {
       position = "right")$
     step(
       title    = "Map tab",
-      text     = "The Map tab is where you explore scores spatially \u2014 click cells, click Program Areas, draw polygons.",
+      text     = "The Map tab is where you explore scores spatially \u2014 click cells or click Program Areas to see their scores.",
       el       = "[data-value='Map'].nav-link",
       position = "bottom")$
     step(
@@ -976,11 +976,6 @@ server <- function(input, output, session) {
       el       = ".mapboxgl-ctrl-geocoder",
       position = "left")$
     step(
-      title    = "Draw your own area",
-      text     = "Click the polygon tool, then click on the map to define vertices and double-click to finish. The Plot of Scores and Table of Species tabs will update to show results for whatever cells your polygon covers \u2014 even in the gray-overlay regions outside the Program Areas. Use the trash icon to delete the polygon and revert to the prior selection.",
-      el       = ".mapbox-gl-draw_polygon",
-      position = "left")$
-    step(
       title    = "Full screen",
       text     = "Expand the map to fill the entire window.",
       el       = ".mapboxgl-ctrl-fullscreen",
@@ -992,13 +987,18 @@ server <- function(input, output, session) {
       position = "left")$
     step(
       title    = "Plot of Scores tab",
-      text     = "Switch here to see the flower plot of aggregated sensitivity scores for the current selection, broken out by species category. Petal length = score (0\u2013100); center number = weighted mean. Defaults to 'All USA' until you click a cell, click a Program Area, or draw a polygon.",
+      text     = "Switch here to see the flower plot of aggregated sensitivity scores for the current selection, broken out by species category. Petal length = score (0\u2013100); center number = weighted mean. Defaults to 'All USA' until you click a cell or click a Program Area.",
       el       = "[data-value='Plot of Scores'].nav-link",
       position = "bottom")$
     step(
       title    = "Table of Species tab",
       text     = "A sortable, downloadable table of every species in the currently selected area, with extinction-risk codes, areas, and per-category contributions.",
       el       = "[data-value='Table of Species'].nav-link",
+      position = "bottom")$
+    step(
+      title    = "Report tab",
+      text     = "Generate a sensitivity report for one or more custom areas. Build up a list of labeled areas by drawing a polygon on the map (using the polygon tool) and/or by selecting a Program Area, then clicking 'Add' for each. Set a title, data version, and output format (HTML, Word, or PDF), then click 'Generate report'.",
+      el       = "[data-value='Report'].nav-link",
       position = "bottom")
   tour$init()
   if (verbose) {
