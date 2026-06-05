@@ -446,7 +446,7 @@ server <- function(input, output, session) {
     step(
       title    = "Species Info",
       text     = "Open the sidebar to see ESA listing, IUCN status, MMPA/MBTA flags, and extinction risk score for the selected species.",
-      el       = ".bslib-sidebar-toggle",
+      el       = ".collapse-toggle",
       position = "right"
     )
   tour$init()
