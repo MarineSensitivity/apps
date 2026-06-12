@@ -1044,7 +1044,7 @@ server <- function(input, output, session) {
       glue("{rx$clicked_pra$properties$programarea_name}")
     } else {
       sr_key <- input$sel_subregion %||% "FULL"
-      sr_lbl <- if (sr_key == "FULL") "All USA" else
+      sr_lbl <- if (sr_key == "FULL") "Full study area" else
         names(sr_choices)[sr_choices == sr_key]
       glue("{sr_lbl} (default)")
     }
@@ -1128,6 +1128,7 @@ server <- function(input, output, session) {
         id             = "outside_pra_lyr",
         source_id      = "outside_pra_lyr",
         raster_opacity = 0.55,
+        visibility     = "none",
         before_id      = "er_ln") |>
       mapgl::add_legend(
         get_lyr_name(lyr_default),
@@ -1235,6 +1236,7 @@ server <- function(input, output, session) {
               id             = "outside_pra_lyr",
               source_id      = "outside_pra_lyr",
               raster_opacity = 0.55,
+              visibility     = "none",
               before_id      = "er_ln") |>
             mapgl::add_legend(
               get_lyr_name(input$sel_lyr),
@@ -1441,6 +1443,7 @@ server <- function(input, output, session) {
               id             = "outside_pra_lyr",
               source_id      = "outside_pra_lyr",
               raster_opacity = 0.55,
+              visibility     = "none",
               before_id      = "er_ln") |>
             mapgl::add_legend(
               get_lyr_name(input$sel_lyr),
@@ -1652,8 +1655,8 @@ server <- function(input, output, session) {
     # zone_metric, populated by cell_metrics_to_zone_metrics in calc_scores.qmd.
     if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
       sr_key   <- input$sel_subregion %||% "FULL"
-      z_sr_key <- if (sr_key == "FULL") "USA" else sr_key
-      sr_lbl   <- if (sr_key == "FULL") "All USA" else
+      z_sr_key <- if (sr_key == "FULL") "FULL" else sr_key
+      sr_lbl   <- if (sr_key == "FULL") "Full study area" else
         names(sr_choices)[sr_choices == sr_key]
       d_fl <- d_flower_default |>
         filter(subregion_key == !!z_sr_key) |>
@@ -1728,8 +1731,8 @@ server <- function(input, output, session) {
       # ** subregion default ----
       # FULL falls back to USA (the only superset zone in zone_taxon)
       sr_key   <- input$sel_subregion %||% "FULL"
-      z_sr_key <- if (sr_key == "FULL") "USA" else sr_key
-      sr_lbl   <- if (sr_key == "FULL") "All USA" else
+      z_sr_key <- if (sr_key == "FULL") "FULL" else sr_key
+      sr_lbl   <- if (sr_key == "FULL") "Full study area" else
         names(sr_choices)[sr_choices == sr_key]
 
       if (verbose) {
