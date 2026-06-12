@@ -57,7 +57,7 @@ future::plan(future::multisession, workers = 2)
 verbose <- interactive()
 
 # version ----
-ver <- "v6"
+ver <- "v7"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -847,8 +847,8 @@ ui <- page_sidebar(
           selectInput(
             "rpt_ver",
             "Data version",
-            choices  = c("v6", "v5", "v4c", "v4b", "v3"),
-            selected = "v6"),
+            choices  = c("v7", "v6", "v5", "v4c", "v4b", "v3"),
+            selected = "v7"),
           radioButtons(
             "rpt_format",
             "Output format",

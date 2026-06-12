@@ -34,7 +34,7 @@ options(
 verbose <- T
 
 # version ----
-ver <- "v6"
+ver <- "v7"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
