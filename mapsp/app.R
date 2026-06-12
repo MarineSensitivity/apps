@@ -533,9 +533,9 @@ server <- function(input, output, session) {
               "Please search for the species using the ",
               tags$strong("Species"), " dropdown above."),
             tags$p(
-              "If the species is not listed, its distribution has been masked ",
-              "out because the expert range map (IUCN Red List) falls entirely ",
-              "outside BOEM Program Areas or the US Exclusive Economic Zone.")),
+              "If the species is not listed, its expert range map (IUCN Red ",
+              "List) falls entirely outside the US Exclusive Economic Zone, so ",
+              "it has no modeled distribution in the study area.")),
           footer = modalButton("OK")
         ))
       }
@@ -909,7 +909,7 @@ server <- function(input, output, session) {
         clear_layer("r_lyr_src") |>
         clear_legend()
       showNotification(
-        "No data to display \u2014 species may lack this layer or fall outside program areas",
+        "No data to display \u2014 this species lacks this layer, or its distribution falls outside the selected mask",
         type = "warning")
       return()
     }
