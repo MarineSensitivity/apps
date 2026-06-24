@@ -13,7 +13,9 @@
 # packages ----
 librarian::shelf(
   base64enc, bslib, glue, htmltools, jsonlite, shiny,
-  walkerke/mapgl,   # latest: merged add_h3t_source() w/ query-string tile URLs
+  # antimeridian-fixed mapgl (PR walkerke/mapgl#211); revert to walkerke/mapgl once merged.
+  # if mapgl is already installed, force it: remotes::install_github("bbest/mapgl@fix/h3t-antimeridian")
+  "bbest/mapgl@fix/h3t-antimeridian",
   quiet = T)
 
 options(
