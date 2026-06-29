@@ -42,6 +42,7 @@ librarian::shelf(
   terra,
   tibble,
   tidyr,
+  viridisLite,
   quiet = T
 )
 options(readr.show_col_types = F)
@@ -330,6 +331,25 @@ lyr_choices <- d_lyrs |>
   deframe()
 
 lyr_default <- d_lyrs$lyr[1]
+
+# palette choices: default + color-blind friendly alternatives (via cblindplot CVD mappings)
+# deuteranopia -> viridis, protanopia -> cividis, tritanopia -> magma
+palette_choices <- c(
+  "Spectral (default)"        = "spectral_r",
+  "Viridis (deuteranopia)"    = "viridis",
+  "Cividis (protanopia)"      = "cividis",
+  "Magma (tritanopia)"        = "magma"
+)
+
+get_pal_colors <- function(pal_key, n = 11) {
+  switch(pal_key,
+    spectral_r = rev(RColorBrewer::brewer.pal(n, "Spectral")),
+    viridis    = viridisLite::viridis(n),
+    cividis    = viridisLite::cividis(n),
+    magma      = viridisLite::magma(n),
+    rev(RColorBrewer::brewer.pal(n, "Spectral"))
+  )
+}
 
 # * planareas by subregion ---
 
@@ -768,6 +788,12 @@ ui <- page_sidebar(
         selected = lyr_default
       )
     ),
+    selectInput(
+      "sel_palette",
+      "Color palette",
+      choices  = palette_choices,
+      selected = "spectral_r"
+    ),
     input_switch(
       "tgl_sphere",
       "Sphere",
@@ -1055,19 +1081,23 @@ server <- function(input, output, session) {
   # is materialized in R (the browser fetches tiles on demand from
   # titilecache). NULL when the unit is not "cell" (pa/pra use vector fills).
   get_rast_rx <- reactive({
-    req(input$sel_subregion, input$sel_unit, input$sel_lyr)
+    req(input$sel_subregion, input$sel_unit, input$sel_lyr, input$sel_palette)
 
     if (input$sel_unit %in% c("pa", "pra")) {
       return(NULL)
     }
 
+    pal    <- input$sel_palette
+    m_key  <- input$sel_lyr
+    sr_key <- input$sel_subregion
+
     if (verbose) {
       message(glue(
-        "get_rast_rx() lyr: {input$sel_lyr} | subregion: {input$sel_subregion}"))
+        "get_rast_rx() lyr: {m_key} | subregion: {sr_key} | palette: {pal}"))
     }
 
-    # fast path: the default layer + FULL subregion was pre-warmed at boot
-    if (input$sel_lyr == lyr_default && input$sel_subregion == sr_choices[[1]]) {
+    # fast path: the default layer + FULL subregion + default palette was pre-warmed at boot
+    if (m_key == lyr_default && sr_key == sr_choices[[1]] && pal == "spectral_r") {
       return(list(
         m_key    = lyr_default,
         sr_key   = sr_choices[[1]],
@@ -1077,11 +1107,9 @@ server <- function(input, output, session) {
         bbox     = initial_bbox))
     }
 
-    m_key  <- input$sel_lyr
-    sr_key <- input$sel_subregion
-    sql    <- cell_sql(m_key, sr_key)
-    stats  <- msens::cell_stats(sql, mtime = db_mtime, base = tile_base_url)
-    rescl  <- c(stats$min, stats$max)
+    sql   <- cell_sql(m_key, sr_key)
+    stats <- msens::cell_stats(sql, mtime = db_mtime, base = tile_base_url)
+    rescl <- c(stats$min, stats$max)
 
     list(
       m_key    = m_key,
@@ -1089,7 +1117,7 @@ server <- function(input, output, session) {
       sql      = sql,
       rescale  = rescl,
       tile_url = msens::cell_tile_url(
-        sql, colormap = "spectral_r", rescale = rescl,
+        sql, colormap = pal, rescale = rescl,
         mtime = db_mtime, base = tile_base_url),
       bbox     = sr_bbox(sr_key))
   })
@@ -1102,7 +1130,7 @@ server <- function(input, output, session) {
   # viewport-intersecting tiles (~4-16 per initial load) are fetched.
   build_initial_map <- function(sphere = TRUE) {
     n_cols <- 11
-    cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+    cols_r <- get_pal_colors("spectral_r", n_cols)
     rng_r  <- signif(initial_rescale, digits = 3)
 
     mapboxgl(
@@ -1193,7 +1221,7 @@ server <- function(input, output, session) {
   # re-applies the current layer state to map_rpt; `rpt_map_loaded()`
   # covers the initial-load case (see above).
   observeEvent(
-    c(input$sel_subregion, input$sel_unit, input$sel_lyr,
+    c(input$sel_subregion, input$sel_unit, input$sel_lyr, input$sel_palette,
       input$main_tabs, rpt_map_loaded()),
     {
       req(input$sel_subregion, input$sel_unit, input$sel_lyr)
@@ -1216,7 +1244,7 @@ server <- function(input, output, session) {
         # metadata for the tile-backed cell-values layer (no terra raster)
         meta   <- get_rast_rx()
         n_cols <- 11
-        cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+        cols_r <- get_pal_colors(input$sel_palette, n_cols)
         rng_r  <- signif(meta$rescale, digits = 3)
 
         # applied to both the Map tab's proxy and the Report tab's
@@ -1377,7 +1405,7 @@ server <- function(input, output, session) {
 
         # query program area values from db
         n_cols <- 11
-        cols_r <- rev(RColorBrewer::brewer.pal(n_cols, "Spectral"))
+        cols_r <- get_pal_colors(input$sel_palette, n_cols)
 
         d_pra <- tbl(con_sdm, "zone") |>
           filter(
