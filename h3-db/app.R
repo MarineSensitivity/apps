@@ -20,7 +20,7 @@
 
 # packages ----
 librarian::shelf(
-  base64enc, bslib, glue, htmltools, jsonlite, shiny, shinyjs, shinyWidgets,
+  base64enc, bslib, DT, glue, htmltools, jsonlite, shiny, shinyjs, shinyWidgets,
   # antimeridian-fixed mapgl (PR walkerke/mapgl#211); revert to walkerke/mapgl once merged.
   # if mapgl is already installed, force it: remotes::install_github("bbest/mapgl@fix/h3t-antimeridian", force=T)
   # "bbest/mapgl@fix/h3t-antimeridian",
@@ -82,6 +82,17 @@ PRESETS <- list(
   "Mollusks (phylum Mollusca)"     = list(phylum = "Mollusca"),
   "Crustaceans (Malacostraca)"     = list(class  = "Malacostraca"))
 RANKS <- c("phylum", "class", "order", "family", "genus", "species")
+
+# store schema (for the "Schema" modal that helps users write custom SQL) ----
+# the read-only DuckDB store registered as `obis` exposes exactly two tables.
+# both files below are kept beside the app so the schema stays editable as data;
+# the authoritative source is the DuckDB DDL in build_obis_h3_duckdb():
+# https://github.com/marinebon/obisindicators/blob/52e3ac81503892dd0fa64d7d5291d8c5dd5ac620/R/h3t.R#L201-L223
+SCHEMA_COLS <- read.csv("schema_cols.csv", stringsAsFactors = FALSE)
+ERD_MMD     <- paste(readLines("schema_erd.mmd", warn = FALSE), collapse = "\n")
+# prepend a mermaid theme directive so the ER diagram matches the app's skin
+erd_src <- function(dark = TRUE)
+  paste0('%%{init: {"theme":"', if (dark) "dark" else "neutral", '"}}%%\n', ERD_MMD)
 
 # stats endpoint (value distribution for color-ramp breaks) ----
 get_stats <- function(sql, res_h3 = 4) {
@@ -191,6 +202,12 @@ ui <- page_sidebar(
   shinyjs::useShinyjs(),
   tags$head(
     tags$style(HTML(CSS)),
+    # mermaid.js (ESM from CDN) for the Schema modal's ER diagram. startOnLoad is
+    # off — the modal calls window.mermaid.run() itself once its content mounts.
+    tags$script(type = "module", HTML(
+      "import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';",
+      "mermaid.initialize({ startOnLoad: false, securityLevel: 'loose' });",
+      "window.mermaid = mermaid;")),
     # grabbing the resolution slider (mouse/touch down) flags user intent so the
     # server can auto-switch to manual — distinct from programmatic zoom syncs
     tags$script(HTML(
@@ -214,6 +231,9 @@ ui <- page_sidebar(
       textAreaInput(
         "sql", "SQL — project exactly cell_id, value, n; use {{res}}", rows = 6,
         value = "SELECT cell_id, es AS value, n\nFROM idx_h3\nWHERE res = LEAST({{res}}, 7)"),
+      div(class = "d-flex justify-content-between align-items-center mb-2",
+          actionLink("schema_link", "table schema ↗", class = "small"),
+          tags$span()),
       actionButton("run_sql", "Run SQL", class = "btn-primary btn-sm w-100")),
 
     hr(),
@@ -237,6 +257,7 @@ ui <- page_sidebar(
               "theme", label = NULL, size = "sm",
               choiceNames = list(icon("moon"), icon("sun")),
               choiceValues = list("dark", "light"), selected = "dark"),
+            actionButton("schema", "Schema", class = "btn-sm btn-outline-light"),
             actionButton("about", "About", class = "btn-sm btn-outline-light"))),
 
       # vertical resolution control, floating mid-left ----
@@ -352,6 +373,73 @@ server <- function(input, output, session) {
         tags$li("Drag any panel by its header; use ", tags$b("−"), " to collapse it.")),
       p(class = "text-muted mb-0", "Indicators: ES(50), species richness, Shannon diversity, # records.")))
   })
+
+  # --- Schema modal (ERD + column dictionary) — helps write custom SQL ----
+  show_schema_modal <- function() {
+    showModal(modalDialog(
+      title = "Store schema — build custom SQL", easyClose = TRUE, size = "xl",
+      footer = modalButton("Close"),
+      id = "schema-modal",
+      p("Custom SQL runs read-only against the ", tags$code("obis"), " DuckDB store, ",
+        "which exposes the two tables below. Your ", tags$code("SELECT"),
+        " must project ", tags$b("exactly"), " ", tags$code("cell_id"), ", ",
+        tags$code("value"), ", and optionally ", tags$code("n"),
+        " (no ", tags$code("SELECT *"), "). Substitute the tile's resolution with ",
+        tags$code("{{res}}"), " (clamp with ", tags$code("LEAST({{res}}, 7)"), ")."),
+      tags$ul(class = "small text-muted",
+        tags$li(tags$code("idx_h3"), " — precomputed all-taxa indicators, one row ",
+                "per (res, cell) for resolutions 1-7. Fast path for unfiltered maps."),
+        tags$li(tags$code("occ_h3"), " — species-level occurrence counts at resolution ",
+                "tiers 3 / 5 / 7. Use for taxon/year filters; compute indicators on the fly.")),
+      tags$h6(class = "mt-3", "Entity-relationship diagram"),
+      # empty target — mermaid renders OFF-DOM (body temp node, which has real
+      # layout) then we inject the SVG. rendering in-place with mermaid.run()
+      # here fails ("Could not find a suitable point...") because the modal is
+      # still hidden/animating, so the in-place SVG has zero size.
+      div(id = "erd-out", class = "text-center small text-muted",
+          style = "overflow-x:auto;", "rendering diagram…"),
+      tags$h6(class = "mt-3", "Columns"),
+      DT::dataTableOutput("schema_cols"),
+      tags$script(HTML(sprintf("
+        (function draw(){
+          if (!window.mermaid) { setTimeout(draw, 120); return; }
+          window.mermaid.render('erdSvg', %s).then(function(r){
+            var el = document.getElementById('erd-out'); if (!el) return;
+            el.classList.remove('text-muted'); el.innerHTML = r.svg;
+            var svg = el.querySelector('svg');
+            if (svg) {
+              // scale the diagram down to a compact box (never upscale)
+              var vb = svg.viewBox && svg.viewBox.baseVal;
+              var maxW = el.clientWidth || 900;
+              var maxH = Math.min(360, Math.round(window.innerHeight * 0.42));
+              if (vb && vb.width && vb.height) {
+                var s = Math.min(maxW / vb.width, maxH / vb.height, 1);
+                svg.setAttribute('width',  Math.round(vb.width  * s));
+                svg.setAttribute('height', Math.round(vb.height * s));
+              }
+              svg.style.maxWidth = '100%%';
+            }
+          }).catch(function(e){
+            var el = document.getElementById('erd-out');
+            if (el) el.innerHTML = '<div class=\"text-danger small\">ERD render error: ' +
+              ((e && e.message) || e) + '</div>';
+            console.error('mermaid ERD:', e);
+          });
+        })();", jsonlite::toJSON(erd_src(dark = is_dark()), auto_unbox = TRUE))))))
+  }
+  observeEvent(input$schema,      show_schema_modal())
+  observeEvent(input$schema_link, show_schema_modal())
+
+  output$schema_cols <- DT::renderDataTable({
+    DT::datatable(
+      SCHEMA_COLS, rownames = FALSE, filter = "top", style = "auto",
+      colnames = c("Table", "Column", "Type", "Key", "Description"),
+      class = "compact stripe hover",
+      options = list(
+        pageLength = 20, dom = "ftip", scrollX = TRUE, autoWidth = FALSE,
+        columnDefs = list(list(className = "dt-nowrap", targets = 0:3)),
+        order = list(list(0, "asc"))))
+  }, server = FALSE)
 
   # --- light / dark theme: reskin the app + swap the basemap ----
   is_dark <- reactive((input$theme %||% "dark") == "dark")

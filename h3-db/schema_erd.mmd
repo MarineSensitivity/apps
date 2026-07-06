@@ -1,0 +1,25 @@
+erDiagram
+  direction LR
+  idx_h3 {
+    UTINYINT res PK "H3 resolution 1-7"
+    BIGINT cell_id PK "H3 cell index"
+    BIGINT n "records in cell"
+    BIGINT sp "species richness"
+    DOUBLE shannon "Shannon diversity"
+    DOUBLE simpson "Simpson index"
+    DOUBLE es "ES(50)"
+  }
+  occ_h3 {
+    UTINYINT res PK "H3 tier 3/5/7"
+    BIGINT cell_id PK "H3 cell index"
+    BIGINT aphiaid PK "WoRMS AphiaID"
+    SMALLINT date_year PK "observation year"
+    VARCHAR phylum "taxon phylum"
+    VARCHAR class "taxon class"
+    VARCHAR order "reserved word"
+    VARCHAR family "taxon family"
+    VARCHAR genus "taxon genus"
+    VARCHAR species "scientific name"
+    BIGINT records "occurrence records"
+  }
+  idx_h3 ||--o{ occ_h3 : "per-cell rollup across species"
