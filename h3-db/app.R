@@ -20,7 +20,7 @@
 
 # packages ----
 librarian::shelf(
-  base64enc, bslib, DT, glue, htmltools, jsonlite, shiny, shinyjs, shinyWidgets,
+  base64enc, bslib, curl, DT, glue, htmltools, jsonlite, shiny, shinyjs, shinyWidgets,
   # antimeridian-fixed mapgl (PR walkerke/mapgl#211); revert to walkerke/mapgl once merged.
   # if mapgl is already installed, force it: remotes::install_github("bbest/mapgl@fix/h3t-antimeridian", force=T)
   # "bbest/mapgl@fix/h3t-antimeridian",
@@ -29,8 +29,12 @@ librarian::shelf(
 
 options(
   shiny.autoreload = T,
-  bslib.color_contrast_warnings = F,
-  timeout = 6)   # cap the /h3t/stats fetch so a slow/down service can't stall the map
+  bslib.color_contrast_warnings = F)
+
+# /h3t/stats client timeout (seconds). must exceed the server's statement
+# timeout (H3T_STMT_TIMEOUT_MS, 8s) so a legitimately slow live query returns
+# its 504 body ("query timeout") rather than being cut off client-side.
+STATS_TIMEOUT_S <- 12L
 
 `%||%` <- function(a, b) if (is.null(a) || length(a) == 0 || all(is.na(a))) b else a
 
@@ -95,10 +99,24 @@ erd_src <- function(dark = TRUE)
   paste0('%%{init: {"theme":"', if (dark) "dark" else "neutral", '"}}%%\n', ERD_MMD)
 
 # stats endpoint (value distribution for color-ramp breaks) ----
+# use curl (not base-R url()/jsonlite::fromJSON(url)) so a non-200 response is
+# read, not treated as a failed connection: the server returns the real reason
+# in the body (e.g. 504 {"reason":"query timeout"}), which we surface instead of
+# a generic "cannot open the connection".
 get_stats <- function(sql, res_h3 = 4) {
   q   <- gsub("\n", "", base64enc::base64encode(charToRaw(sql)))
   url <- glue("{H3T_HOST}/h3t/stats?q={utils::URLencode(q, reserved = TRUE)}&res_h3={res_h3}")
-  tryCatch(jsonlite::fromJSON(url), error = function(e) list(error = conditionMessage(e)))
+  tryCatch({
+    resp <- curl::curl_fetch_memory(url, handle = curl::new_handle(timeout = STATS_TIMEOUT_S))
+    body <- rawToChar(resp$content)
+    j    <- if (nzchar(body)) jsonlite::fromJSON(body) else list()
+    if (resp$status_code >= 400) {
+      reason <- j$reason %||% j$error %||% glue("HTTP {resp$status_code}")
+      list(error = reason, reason = reason)
+    } else {
+      j
+    }
+  }, error = function(e) list(error = conditionMessage(e)))
 }
 
 # color ramp (robust p02–p98 range) + legend label from stats ----
@@ -381,7 +399,7 @@ server <- function(input, output, session) {
       footer = modalButton("Close"),
       id = "schema-modal",
       p("Custom SQL runs read-only against the ", tags$code("obis"), " DuckDB store, ",
-        "which exposes the two tables below. Your ", tags$code("SELECT"),
+        "which exposes the three tables below. Your ", tags$code("SELECT"),
         " must project ", tags$b("exactly"), " ", tags$code("cell_id"), ", ",
         tags$code("value"), ", and optionally ", tags$code("n"),
         " (no ", tags$code("SELECT *"), "). Substitute the tile's resolution with ",
@@ -389,8 +407,12 @@ server <- function(input, output, session) {
       tags$ul(class = "small text-muted",
         tags$li(tags$code("idx_h3"), " — precomputed all-taxa indicators, one row ",
                 "per (res, cell) for resolutions 1-7. Fast path for unfiltered maps."),
+        tags$li(tags$code("idx_h3_taxon"), " — precomputed per-taxon indicators for ",
+                "ranks phylum/class/order. Fast path for a single-taxon map ",
+                "(filter on ", tags$code("rank"), " + ", tags$code("taxon"), ")."),
         tags$li(tags$code("occ_h3"), " — species-level occurrence counts at resolution ",
-                "tiers 3 / 5 / 7. Use for taxon/year filters; compute indicators on the fly.")),
+                "tiers 3 / 5 / 7. Use for finer ranks, multi-taxon or year filters; ",
+                "compute indicators on the fly (slower).")),
       tags$h6(class = "mt-3", "Entity-relationship diagram"),
       # empty target — mermaid renders OFF-DOM (body temp node, which has real
       # layout) then we inject the SVG. rendering in-place with mermaid.run()
@@ -436,7 +458,7 @@ server <- function(input, output, session) {
       colnames = c("Table", "Column", "Type", "Key", "Description"),
       class = "compact stripe hover",
       options = list(
-        pageLength = 20, dom = "ftip", scrollX = TRUE, autoWidth = FALSE,
+        pageLength = 30, dom = "ftip", scrollX = TRUE, autoWidth = FALSE,
         columnDefs = list(list(className = "dt-nowrap", targets = 0:3)),
         order = list(list(0, "asc"))))
   }, server = FALSE)

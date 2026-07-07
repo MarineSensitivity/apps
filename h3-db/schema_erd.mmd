@@ -9,6 +9,17 @@ erDiagram
     DOUBLE simpson "Simpson index"
     DOUBLE es "ES(50)"
   }
+  idx_h3_taxon {
+    VARCHAR rank PK "phylum/class/order"
+    VARCHAR taxon PK "taxon value"
+    UTINYINT res PK "H3 resolution 1-7"
+    BIGINT cell_id PK "H3 cell index"
+    BIGINT n "records in cell"
+    BIGINT sp "species richness"
+    DOUBLE shannon "Shannon diversity"
+    DOUBLE simpson "Simpson index"
+    DOUBLE es "ES(50)"
+  }
   occ_h3 {
     UTINYINT res PK "H3 tier 3/5/7"
     BIGINT cell_id PK "H3 cell index"
@@ -22,4 +33,5 @@ erDiagram
     VARCHAR species "scientific name"
     BIGINT records "occurrence records"
   }
-  idx_h3 ||--o{ occ_h3 : "per-cell rollup across species"
+  idx_h3 ||--o{ occ_h3 : "all-taxa rollup"
+  idx_h3_taxon ||--o{ occ_h3 : "per-taxon rollup"
