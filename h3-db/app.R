@@ -179,6 +179,13 @@ CSS <- "
 .float-topbar .btn { padding: 2px 10px; font-size: 12px; line-height: 1.4; }
 .float-topbar .form-group { margin: 0; }
 .float-topbar .btn-group .btn { box-shadow: none; }
+/* floating view-title banner (top-center); shows on shared links */
+.float-title {
+  top: 12px; left: 50%; transform: translateX(-50%);
+  max-width: 46%; padding: 6px 18px;
+  font-size: 16px; font-weight: 600; letter-spacing: .01em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.share-url { font-family: monospace; font-size: 12px; }
 .res-col { display: flex; justify-content: center; }
 /* native vertical range input — reliable handle tracking, min bottom / max top */
 .nrange {
@@ -214,7 +221,8 @@ CSS <- "
 "
 
 # ui ----
-ui <- page_sidebar(
+# a function of `request` so Shiny's URL bookmarking can serialize/restore state
+ui <- function(request) page_sidebar(
   title = "OBIS biodiversity by H3 hexagon",
   theme = bs_theme(version = 5, preset = "darkly"),
   shinyjs::useShinyjs(),
@@ -230,10 +238,14 @@ ui <- page_sidebar(
     # server can auto-switch to manual — distinct from programmatic zoom syncs
     tags$script(HTML(
       "$(document).on('mousedown touchstart keydown', '#res',",
-      " function(){ Shiny.setInputValue('res_grab', Date.now(), {priority:'event'}); });"))),
+      " function(){ Shiny.setInputValue('res_grab', Date.now(), {priority:'event'}); });")),
+    tags$script(HTML(
+      "Shiny.addCustomMessageHandler('set_tab_title', function(t){ document.title = t; });"))),
 
   sidebar = sidebar(
-    width = 340,
+    id = "sidebar", width = 340,   # id -> collapse state is an input (bookmarked)
+    textInput("view_title", "View title",
+              placeholder = "OBIS biodiversity by H3 hexagon"),
     selectInput("indicator", "Indicator", INDICATORS),
 
     selectInput("preset", "Taxon group", names(PRESETS)),
@@ -275,8 +287,12 @@ ui <- page_sidebar(
               "theme", label = NULL, size = "sm",
               choiceNames = list(icon("moon"), icon("sun")),
               choiceValues = list("dark", "light"), selected = "dark"),
+            actionButton("share", "Share", class = "btn-sm btn-outline-light"),
             actionButton("schema", "Schema", class = "btn-sm btn-outline-light"),
             actionButton("about", "About", class = "btn-sm btn-outline-light"))),
+
+      # floating view-title banner, top-center (rendered only when set) ----
+      uiOutput("view_title_ui"),
 
       # vertical resolution control, floating mid-left ----
       div(
@@ -371,6 +387,73 @@ ui <- page_sidebar(
 
 # server ----
 server <- function(input, output, session) {
+
+  # --- bookmarking: shareable links (URL-encoded state) ----
+  restore_run <- reactiveVal(0L)   # bumped on restore to re-apply custom SQL
+  # keep buttons/events and noisy map inputs out of the URL; everything else
+  # (indicator, taxon, years, res, opacity, theme, view_title, sidebar open,
+  # map center/zoom) is captured so a link reproduces the exact view.
+  setBookmarkExclude(c(
+    "share", "about", "schema", "schema_link", "run_sql", "res_grab",
+    "map_bbox", "map_bounds", "map_click", "map_feature_click",
+    "map_mouseover", "map_hover"))
+
+  # floating view-title banner (top-center); only shown when a title is set
+  output$view_title_ui <- renderUI({
+    ttl <- trimws(input$view_title %||% "")
+    if (!nzchar(ttl)) return(NULL)
+    div(class = "float-panel float-title", ttl)
+  })
+  # reflect the title in the browser tab too
+  observe({
+    ttl <- trimws(input$view_title %||% "")
+    session$sendCustomMessage("set_tab_title",
+      if (nzchar(ttl)) paste0(ttl, " · OBIS by H3") else "OBIS biodiversity by H3 hexagon")
+  })
+
+  # Share button -> bookmark -> modal with a copyable link
+  observeEvent(input$share, session$doBookmark())
+  onBookmarked(function(url) {
+    updateQueryString(url, mode = "push")   # reflect the state in the address bar
+    showModal(modalDialog(
+      title = "Share this view", easyClose = TRUE, size = "l",
+      footer = modalButton("Close"),
+      p("Anyone who opens this link gets the current map view, filters, ",
+        "resolution, theme, sidebar state, and title."),
+      div(class = "input-group",
+        # inject the exact bookmark URL server-side (robust, no address-bar dependency)
+        tags$input(id = "share_url_field", class = "form-control share-url",
+                   readonly = NA, value = url),
+        tags$button(id = "share_copy", class = "btn btn-primary", type = "button", "Copy")),
+      tags$script(HTML("
+        (function(){
+          var f = document.getElementById('share_url_field');
+          var b = document.getElementById('share_copy');
+          if (f) { f.focus(); f.select(); }
+          if (b) b.onclick = function(){
+            var u = f ? f.value : '';
+            if (f) f.select();
+            var done = function(ok){ b.textContent = ok ? 'Copied!' : 'Copy failed';
+              setTimeout(function(){ b.textContent = 'Copy'; }, 1600); };
+            if (navigator.clipboard) navigator.clipboard.writeText(u).then(function(){done(true);}, function(){done(false);});
+            else { try { document.execCommand('copy'); done(true); } catch(e){ done(false); } }
+          };
+        })();"))))
+  })
+
+  # restore state that isn't applied just by setting the input value
+  onRestored(function(state) {
+    # theme: the theme observer below has ignoreInit=TRUE, so re-skin explicitly
+    th <- state$input$theme %||% "dark"
+    session$setCurrentTheme(
+      bs_theme(version = 5, preset = if (th == "dark") "darkly" else "flatly"))
+    # sidebar open/closed
+    if (!is.null(state$input$sidebar))
+      bslib::sidebar_toggle("sidebar",
+        open = if (isTRUE(state$input$sidebar)) "open" else "closed")
+    # a shared custom-SQL view needs to "Run" once (it's normally button-gated)
+    if (isTRUE(state$input$custom_sql)) restore_run(isolate(restore_run()) + 1L)
+  })
 
   # --- About modal (content formerly atop the sidebar) ----
   observeEvent(input$about, {
@@ -520,8 +603,10 @@ server <- function(input, output, session) {
     if (identical(as.integer(y), c(YR_MIN, YR_MAX))) NULL else as.integer(y)
   })
 
-  # custom SQL applies only on the Run button (not on every keystroke)
-  sql_custom <- eventReactive(input$run_sql, input$sql, ignoreNULL = FALSE)
+  # custom SQL applies on the Run button (not on every keystroke); a restored
+  # bookmark bumps restore_run() so a shared custom-SQL view applies once
+  sql_custom <- eventReactive(
+    list(input$run_sql, restore_run()), input$sql, ignoreNULL = FALSE)
 
   sql_r <- reactive({
     if (isTRUE(input$custom_sql)) return(sql_custom())
@@ -613,4 +698,4 @@ server <- function(input, output, session) {
   })
 }
 
-shinyApp(ui, server)
+shinyApp(ui, server, enableBookmarking = "url")
