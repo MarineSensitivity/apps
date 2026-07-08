@@ -307,7 +307,9 @@ ui <- function(request) page_sidebar(
           div(id = "res_col", class = "res-col",
               tags$input(
                 id = "res", class = "nrange", type = "range",
-                min = 1, max = RES_STORE_MAX, step = 1, value = zoom_res_capped(INIT_ZOOM))),
+                min = 1, max = RES_STORE_MAX, step = 1,
+                # restore from a bookmark at render time (custom binding doesn't restore)
+                value = restoreInput("res", zoom_res_capped(INIT_ZOOM)))),
           div(class = "float-sub", textOutput("res_lbl", inline = TRUE)),
           checkboxInput("res_manual", "manual", value = FALSE))),
 
@@ -334,7 +336,8 @@ ui <- function(request) page_sidebar(
           div(class = "res-col",
               tags$input(
                 id = "opacity", class = "nrange", type = "range",
-                min = 0, max = 100, step = 5, value = round(INIT_OPACITY * 100))),
+                min = 0, max = 100, step = 5,
+                value = restoreInput("opacity", round(INIT_OPACITY * 100)))),
           div(class = "float-sub", textOutput("fill_lbl", inline = TRUE)))))),
 
   # Shiny input binding for the native vertical range (#res). Registered
@@ -392,7 +395,13 @@ ui <- function(request) page_sidebar(
 server <- function(input, output, session) {
 
   # --- bookmarking: shareable links (URL-encoded state) ----
-  restore_run <- reactiveVal(0L)   # bumped on restore to re-apply custom SQL
+  restore_run   <- reactiveVal(0L)     # bumped on restore to re-apply custom SQL
+  restored_view <- reactiveVal(NULL)   # bookmarked map center/zoom (map isn't a
+                                       # normal input, so capture it before render)
+  onRestore(function(state) {
+    if (!is.null(state$input$map_center) || !is.null(state$input$map_zoom))
+      restored_view(list(center = state$input$map_center, zoom = state$input$map_zoom))
+  })
   # keep buttons/events and noisy map inputs out of the URL; everything else
   # (indicator, taxon, years, res, opacity, theme, view_title, sidebar open,
   # map center/zoom) is captured so a link reproduces the exact view.
@@ -639,7 +648,10 @@ server <- function(input, output, session) {
     dark <- is_dark()                       # the only reactive dependency
     st   <- isolate(state())
     ramp <- ramp_of(st$stats, st$indicator)
-    ctr  <- isolate(input$map_center); zm <- isolate(input$map_zoom)
+    rv   <- isolate(restored_view())
+    if (!is.null(rv)) restored_view(NULL)     # one-shot: honor the bookmark view once
+    ctr  <- rv$center %||% isolate(input$map_center)
+    zm   <- rv$zoom   %||% isolate(input$map_zoom)
     center <- if (!is.null(ctr)) c(ctr$lng, ctr$lat) else INIT_CENTER
     zoom   <- zm %||% INIT_ZOOM
     style  <- carto_style(if (dark) "dark-matter" else "positron")
