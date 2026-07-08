@@ -244,6 +244,9 @@ ui <- function(request) page_sidebar(
 
   sidebar = sidebar(
     id = "sidebar", width = 340,   # id -> collapse state is an input (bookmarked)
+    # restore collapsed state at render time from the bookmark (the client
+    # re-reports the sidebar's open state on load, so a server-side toggle races)
+    open = if (isFALSE(restoreInput("sidebar", TRUE))) "closed" else "desktop",
     textInput("view_title", "View title",
               placeholder = "OBIS biodiversity by H3 hexagon"),
     selectInput("indicator", "Indicator", INDICATORS),
@@ -447,10 +450,7 @@ server <- function(input, output, session) {
     th <- state$input$theme %||% "dark"
     session$setCurrentTheme(
       bs_theme(version = 5, preset = if (th == "dark") "darkly" else "flatly"))
-    # sidebar open/closed
-    if (!is.null(state$input$sidebar))
-      bslib::sidebar_toggle("sidebar",
-        open = if (isTRUE(state$input$sidebar)) "open" else "closed")
+    # (sidebar collapse is restored at render time via restoreInput() in the UI)
     # a shared custom-SQL view needs to "Run" once (it's normally button-gated)
     if (isTRUE(state$input$custom_sql)) restore_run(isolate(restore_run()) + 1L)
   })
