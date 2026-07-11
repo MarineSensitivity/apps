@@ -341,9 +341,10 @@ ui <- page_sidebar(
         id = "tour_mask",
         selectInput(
           "sel_mask",
-          "Mask:",
-          choices  = c("Program Areas (white outlines)" = "programarea_key",
-                       "Ecoregions (black outlines)"    = "ecoregion_key"),
+          "Outlines:",
+          choices  = c("Program Areas (white)" = "programarea_key",
+                       "Ecoregions (black)"    = "ecoregion_key",
+                       "None"                  = "none"),
           selected = "ecoregion_key",
           width    = "100%")))
   ),
@@ -925,15 +926,21 @@ server <- function(input, output, session) {
     is_merged <- input$ds_layer == "mdl_key"
     asset     <- if (!is_merged) native_by_key[[layer_mdl_key]] else NULL
 
-    # fit target: merged -> US model extent; input -> its own (often global) bbox; else world
+    # fit target: merged -> US model extent; input -> its own (often global) bbox from
+    # native_asset; a pmtiles input without a per-model bbox falls back to the taxon's
+    # merged US extent (never the whole world, which lands on the antipode of a globe).
     fit_bbox <- if (is_merged) {
       bb <- mdl_bbox(layer_mdl_key); if (is.null(bb)) er_bbox else bb
     } else if (!is.null(asset) && !is.na(asset$xmin)) {
       c(asset$xmin, asset$ymin, asset$xmax, asset$ymax)
-    } else c(-180, -60, 180, 85)
+    } else { bb <- mdl_bbox(sp_row$mdl_key); if (is.null(bb)) er_bbox else bb }
 
+    # clear BOTH the previous raster (r_lyr/r_src) and pmtiles (r_pm/pm_src) layer+source;
+    # clear_layer removes a source of that id too, so re-adding a source doesn't collide
+    # client-side (the bug that left the stale merged surface when switching to an input).
     map_proxy <- map_proxy |>
-      clear_layer("r_lyr") |> clear_layer("r_pm") |> clear_legend()
+      clear_layer("r_lyr") |> clear_layer("r_src") |>
+      clear_layer("r_pm")  |> clear_layer("pm_src") |> clear_legend()
 
     if (is_merged || (!is.null(asset) && asset$asset_type == "cog")) {
       tile_url <- if (is_merged) {
@@ -967,8 +974,14 @@ server <- function(input, output, session) {
       active_lyr <- character(0)
     }
 
+    # outline overlay: show Program Areas, Ecoregions, or None (the "Outlines:" selector)
+    pa_vis <- if (input$sel_mask == "programarea_key") "visible" else "none"
+    er_vis <- if (input$sel_mask == "ecoregion_key")   "visible" else "none"
     map_proxy |>
       fit_bounds(bbox = fit_bbox, animate = TRUE) |>
+      set_layout_property("pra_ln",  "visibility", pa_vis) |>
+      set_layout_property("pra_lbl", "visibility", pa_vis) |>
+      set_layout_property("er_ln",   "visibility", er_vis) |>
       clear_controls("layers") |>
       add_layers_control(layers = c(list(
         "Program Area outlines" = "pra_ln",
