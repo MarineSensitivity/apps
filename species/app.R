@@ -65,6 +65,9 @@ cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
 mask_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
 pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
 sdm_db   <- glue("{dir_big}/sdm.duckdb")
+# titiler-v8 serves the merged surfaces from the S3 view-DB; mtime cache-busts the tile URLs
+tile_base_url <- "https://titiler-v8.marinesensitivity.org"
+db_mtime <- format(file.info(sdm_db)$mtime, "%Y%m%dT%H%M%SZ", tz = "UTC")
 
 Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
 librarian::shelf(
@@ -127,8 +130,7 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 pra_pts_csv <- here("species/cache/pra_label_pts.csv")
 if (!file.exists(pra_pts_csv)) {
   pra_pts <- read_sf(pra_gpkg) |>
-    st_shift_longitude() |>
-    st_point_on_surface() |>
+    st_point_on_surface() |>   # v8 is [-180,180]; no st_shift_longitude
     select(programarea_key, programarea_name) |>
     mutate(
       lng = st_coordinates(geom)[, 1],
@@ -174,72 +176,44 @@ d_datasets <- tbl(con_sdm, "dataset") |>
 # derive what was previously hardcoded
 ds_keys      <- d_datasets |> filter(!ds_key %in% c("ms_merge")) |> pull(ds_key)
 layer_names  <- c(
-  "mdl_seq" = "Merged Model",
-  deframe(d_datasets |> filter(ds_key != "ms_merge") |> select(ds_key, name_display)))
-mdl_names    <- deframe(d_datasets |> filter(ds_key != "ms_merge") |> select(ds_key, name_display))
+  "mdl_key" = "Merged Model",
+  deframe(d_datasets |> filter(ds_key != "ms_merge", !is.na(name_display)) |> select(ds_key, name_display)))
+mdl_names    <- deframe(d_datasets |> filter(ds_key != "ms_merge", !is.na(name_display)) |> select(ds_key, name_display))
 mdl_info     <- deframe(d_datasets |> filter(!is.na(value_info)) |> select(ds_key, value_info))
 ds_keys_mask <- d_datasets |> filter(is_mask) |> pull(ds_key)
 
-# query taxon base data (no per-dataset columns)
+# query taxon base data (v8 schema). Only the MERGED surface (`ms_merge_key`) is served via
+# titiler-v8; per-dataset "original" layers await Phase 4b native publishing. Alias v8 columns
+# to the names the UI/popup downstream expect.
 d_spp <- tbl(con_sdm, "taxon") |>
-  filter(!is.na(is_ok), is_ok == T, !is.na(mdl_seq)) |>
+  filter(is_valid_usa, is_marine, !is.na(ms_merge_key)) |>
   select(
-    taxon_id, scientific_name, common_name, sp_cat, n_ds, mdl_seq,
-    worms_id, redlist_code, esa_code, esa_source,
-    is_mmpa, is_mbta) |>
-  collect()
-
-# pivot taxon_model to wide format, join to taxon
-d_tm <- tbl(con_sdm, "taxon_model") |>
-  filter(taxon_id %in% !!d_spp$taxon_id) |>
+    taxon_id, taxon_authority, scientific_name, sp_cat,
+    n_ds = n_datasets, mdl_key = ms_merge_key,
+    redlist_code = iucn_code, esa_code = extrisk_code, er_score,
+    rarity, is_mmpa, is_mbta) |>
   collect() |>
-  pivot_wider(names_from = ds_key, values_from = mdl_seq)
-
-d_spp <- d_spp |>
-  left_join(d_tm, by = "taxon_id") |>
   mutate(
-    lbl_cmn = ifelse(
-      !is.na(common_name),
-      glue(" ({common_name})", .trim = F),
-      ""
-    ),
-    label = glue("{sp_cat}: {scientific_name}{lbl_cmn}"),
+    common_name = NA_character_,
+    esa_source  = NA_character_,
+    label = glue("{sp_cat}: {scientific_name}"),
     worms_url = ifelse(
-      is.na(worms_id),
-      NA,
-      glue(
-        '<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={worms_id}" target="_blank">{worms_id}</a>'
-      )
-    )
-  )
+      taxon_authority == "worms" & !is.na(taxon_id),
+      glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}" target="_blank">{taxon_id}</a>'),
+      NA_character_))
 
 spp_choices <- d_spp |>
   arrange(sp_cat, label) |>
   group_by(sp_cat) |>
-  summarise(
-    layer = list(setNames(mdl_seq, label)),
-    .groups = "drop"
-  ) |>
+  summarise(layer = list(setNames(mdl_key, label)), .groups = "drop") |>
   deframe()
 
-sel_sp_default <- d_spp |>
-  # filter(scientific_name == "Balaenoptera ricei") |>
-  filter(scientific_name == "Dermochelys coriacea") |>
-  pull(mdl_seq)
+sel_sp_default <- d_spp |> filter(scientific_name == "Dermochelys coriacea") |> pull(mdl_key)
+if (length(sel_sp_default) == 0) sel_sp_default <- d_spp$mdl_key[1]
 
-# build reverse lookup: any mdl_seq -> (merged mdl_seq, ds_layer)
-mdl_seq_lookup <- d_spp |>
-  select(merged_mdl_seq = mdl_seq, any_of(ds_keys)) |>
-  pivot_longer(
-    cols      = any_of(ds_keys),
-    names_to  = "ds_layer",
-    values_to = "input_mdl_seq") |>
-  filter(!is.na(input_mdl_seq)) |>
-  # add merged model itself as a lookup entry
-  bind_rows(
-    d_spp |>
-      select(merged_mdl_seq = mdl_seq) |>
-      mutate(ds_layer = "mdl_seq", input_mdl_seq = merged_mdl_seq) )
+# v8: the served layer is always the merged model
+mdl_key_lookup <- d_spp |>
+  transmute(merged_mdl_key = mdl_key, ds_layer = "mdl_key", input_mdl_key = mdl_key)
 
 # ui ----
 ui <- page_sidebar(
@@ -349,10 +323,8 @@ ui <- page_sidebar(
     radioButtons(
       "ds_layer",
       "Display Layer",
-      choices  = c(
-        "Merged Model" = "mdl_seq",
-        setNames(ds_keys, d_datasets$name_display[match(ds_keys, d_datasets$ds_key)])),
-      selected = "mdl_seq",
+      choices  = c("Merged Model" = "mdl_key"),   # v8: only the merged surface is served
+      selected = "mdl_key",
       inline   = TRUE
     )
   ),
@@ -478,19 +450,19 @@ server <- function(input, output, session) {
     if (rx_url_initialized()) return()
 
     query <- parseQueryString(session$clientData$url_search)
-    if (!is.null(query$mdl_seq)) {
-      url_mdl_seq <- as.integer(query$mdl_seq)
+    if (!is.null(query$mdl_key)) {
+      url_mdl_key <- as.integer(query$mdl_key)
 
-      # look up which species and layer this mdl_seq belongs to
-      lookup_row <- mdl_seq_lookup |>
-        filter(input_mdl_seq == url_mdl_seq)
+      # look up which species and layer this mdl_key belongs to
+      lookup_row <- mdl_key_lookup |>
+        filter(input_mdl_key == url_mdl_key)
 
-      # check if mdl_seq is a valid merged model in spp_choices
-      all_mdl_seqs <- unlist(spp_choices, use.names = FALSE)
+      # check if mdl_key is a valid merged model in spp_choices
+      all_mdl_keys <- unlist(spp_choices, use.names = FALSE)
 
       if (nrow(lookup_row) > 0) {
         # found: select the species (merged model) and store layer to apply later
-        merged_seq <- lookup_row$merged_mdl_seq[1]
+        merged_seq <- lookup_row$merged_mdl_key[1]
         ds_layer   <- lookup_row$ds_layer[1]
 
         updateSelectizeInput(
@@ -501,14 +473,14 @@ server <- function(input, output, session) {
           selected = merged_seq
         )
         rx_ds_layer(ds_layer)
-      } else if (url_mdl_seq %in% all_mdl_seqs) {
+      } else if (url_mdl_key %in% all_mdl_keys) {
         # valid merged model
         updateSelectizeInput(
           session,
           'sel_sp',
           choices  = spp_choices,
           server   = T,
-          selected = url_mdl_seq
+          selected = url_mdl_key
         )
       } else {
         # model not found — show disclaimer modal
@@ -526,7 +498,7 @@ server <- function(input, output, session) {
           tags$div(
             style = "text-align: left;",
             tags$p(
-              glue("The requested model (mdl_seq={url_mdl_seq}) is no longer ",
+              glue("The requested model (mdl_key={url_mdl_key}) is no longer ",
                    "available. It may have been modified or removed by a newer ",
                    "version of the Marine Sensitivity Toolkit.")),
             tags$p(
@@ -564,21 +536,21 @@ server <- function(input, output, session) {
   output$layer_bar <- renderUI({
     req(input$sel_sp, input$ds_layer)
 
-    sp_row        <- d_spp |> filter(mdl_seq == input$sel_sp)
+    sp_row        <- d_spp |> filter(mdl_key == input$sel_sp)
     current_layer <- input$ds_layer
     layer_name    <- layer_names[current_layer]
     n_ds          <- sp_row$n_ds
 
     # determine available layers (mirrors observeEvent input$sel_sp logic)
     available <- c()
-    if (!is.na(sp_row$mdl_seq))
-      available <- c(available, c("Merged Model" = "mdl_seq"))
+    if (!is.na(sp_row$mdl_key))
+      available <- c(available, c("Merged Model" = "mdl_key"))
     for (dk in ds_keys) {
       if (dk %in% names(sp_row) && !is.na(sp_row[[dk]]))
         available <- c(available, setNames(dk, mdl_names[dk]))
     }
 
-    is_merged <- (current_layer == "mdl_seq")
+    is_merged <- (current_layer == "mdl_key")
 
     # build pill buttons for each available layer
     pills <- lapply(seq_along(available), function(i) {
@@ -612,7 +584,7 @@ server <- function(input, output, session) {
         span(" \u2014 "),
         tags$a(
           class   = "merged-link",
-          onclick = "var r=document.querySelector('#ds_layer_container input[value=\"mdl_seq\"]'); if(r) r.click();",
+          onclick = "var r=document.querySelector('#ds_layer_container input[value=\"mdl_key\"]'); if(r) r.click();",
           "show Merged Model"))
     }
 
@@ -626,9 +598,9 @@ server <- function(input, output, session) {
   output$species_info <- renderUI({
     req(input$sel_sp, input$ds_layer)
 
-    mdl_seq <- input$sel_sp
+    mdl_key <- input$sel_sp
     d_sp <- d_spp |>
-      filter(mdl_seq == !!mdl_seq)
+      filter(mdl_key == !!mdl_key)
 
     # determine which models are present
     has_iucn <- "rng_iucn" %in% names(d_sp) && !is.na(d_sp$rng_iucn)
@@ -640,8 +612,8 @@ server <- function(input, output, session) {
     # helper to create model link (bold if currently displayed, in-page switch)
     make_link <- function(ds_key, type = "value") {
       if (!ds_key %in% names(d_sp)) return(NULL)
-      ds_mdl_seq <- d_sp[[ds_key]]
-      if (is.na(ds_mdl_seq)) return(NULL)
+      ds_mdl_key <- d_sp[[ds_key]]
+      if (is.na(ds_mdl_key)) return(NULL)
       str_info <- ifelse(
         type == "value" && !is.na(mdl_info[ds_key]),
         glue("<br><em>({mdl_info[ds_key]})</em>"),
@@ -655,7 +627,7 @@ server <- function(input, output, session) {
       onclick_js <- sprintf(
         "var r=document.querySelector('#ds_layer_container input[value=&quot;%s&quot;]'); if(r) r.click(); return false;",
         ds_key)
-      HTML(glue('<a href="?mdl_seq={ds_mdl_seq}" onclick="{onclick_js}">{link_text}</a>{str_info}'))
+      HTML(glue('<a href="?mdl_key={ds_mdl_key}" onclick="{onclick_js}">{link_text}</a>{str_info}'))
     }
 
     # value models (all non-merge datasets present for this species)
@@ -673,11 +645,11 @@ server <- function(input, output, session) {
     } else {
       # merged model with sub-items
       merge_base  <- if (has_iucn) "Merged Model (IUCN masked)" else "Merged Model"
-      merge_label <- if (current_layer == "mdl_seq") glue("<b>{merge_base}</b>") else merge_base
+      merge_label <- if (current_layer == "mdl_key") glue("<b>{merge_base}</b>") else merge_base
       sub_items   <- lapply(value_models, function(k) tags$li(make_link(k)))
       values_ui   <- tags$ul(
         tags$li(
-          HTML(glue('<a href="?mdl_seq={d_sp$mdl_seq}" onclick="var r=document.querySelector(\'#ds_layer_container input[value=&quot;mdl_seq&quot;]\'); if(r) r.click(); return false;">{merge_label}</a><br><em>(maximum of):</em>')),
+          HTML(glue('<a href="?mdl_key={d_sp$mdl_key}" onclick="var r=document.querySelector(\'#ds_layer_container input[value=&quot;mdl_key&quot;]\'); if(r) r.click(); return false;">{merge_label}</a><br><em>(maximum of):</em>')),
           tags$ul(sub_items)
         )
       )
@@ -722,49 +694,29 @@ server <- function(input, output, session) {
     )
   })
 
-  # * get_rast ----
-  get_rast <- reactive({
-    req(input$sel_sp, input$ds_layer, input$sel_mask)
-
-    # mdl_seq = 18232 # Balaenoptera ricei
-    # mdl_seq = 18513 # Haliotis cracherodii (rng_iucn)
-
-    # get selected taxon row
-    sp_row <- d_spp |> filter(mdl_seq == input$sel_sp)
-
-    # get mdl_seq for selected layer
-    layer_col     <- input$ds_layer
-    layer_mdl_seq <- sp_row[[layer_col]]
-
-    if (is.na(layer_mdl_seq)) {
-      # layer not available for this species
-      return(NULL)
-    }
-
-    d <- tbl(con_sdm, "model_cell") |>
-      filter(mdl_seq == !!layer_mdl_seq) |>
-      select(cell_id, value) |>
-      collect()
-
-    if (nrow(d) == 0) return(NULL)
-
-    r <- init(r_cell[[1]], NA)
-    r[d$cell_id] <- d$value
-    r_mask <- r_masks[[input$sel_mask]]
-    r <- mask(r, r_mask)
-
-    # species range may fall entirely outside program areas
-    if (all(is.na(values(r)))) return(NULL)
-
-    names(r) <- "value"
-
-    r
+  # * sel_layer: the mdl_key for the selected species + layer (NULL if unavailable) ----
+  # v8 renders via titiler-v8 XYZ tiles (not an in-R terra raster), so this returns just the
+  # merged model's mdl_key; the SELECT is built + served in the render observer below.
+  sel_layer <- reactive({
+    req(input$sel_sp, input$ds_layer)
+    sp_row        <- d_spp |> filter(mdl_key == input$sel_sp)
+    layer_mdl_key <- sp_row[[input$ds_layer]]
+    if (is.null(layer_mdl_key) || length(layer_mdl_key) == 0 || is.na(layer_mdl_key)) return(NULL)
+    layer_mdl_key
   })
+
+  # geographic bbox (lon/lat) of a model's cells, for fit_bounds
+  mdl_bbox <- function(mdl_key) {
+    b <- dbGetQuery(con_sdm, glue(
+      "SELECT min(c.lon) x0, min(c.lat) y0, max(c.lon) x1, max(c.lat) y1
+       FROM model_cell mc JOIN cell c USING (cell_id) WHERE mc.mdl_key = '{mdl_key}'"))
+    if (is.na(b$x0)) NULL else c(b$x0, b$y0, b$x1, b$y1)
+  }
 
   # * get_name ----
   get_name <- reactive({
     d_spp |>
-      filter(mdl_seq == input$sel_sp) |>
+      filter(mdl_key == input$sel_sp) |>
       pull(scientific_name)
   })
 
@@ -864,11 +816,11 @@ server <- function(input, output, session) {
   observeEvent(input$sel_sp, {
     req(input$sel_sp)
 
-    sp_row <- d_spp |> filter(mdl_seq == input$sel_sp)
+    sp_row <- d_spp |> filter(mdl_key == input$sel_sp)
 
     # determine which layers are available
     available <- c()
-    if (!is.na(sp_row$mdl_seq)) available <- c(available, "Merged Model" = "mdl_seq")
+    if (!is.na(sp_row$mdl_key)) available <- c(available, "Merged Model" = "mdl_key")
     for (dk in ds_keys) {
       if (dk %in% names(sp_row) && !is.na(sp_row[[dk]])) {
         available <- c(available, setNames(dk, d_datasets$name_display[d_datasets$ds_key == dk]))
@@ -881,7 +833,7 @@ server <- function(input, output, session) {
       selected_layer <- url_layer
       rx_ds_layer(NULL)  # clear after use
     } else {
-      selected_layer <- "mdl_seq"
+      selected_layer <- "mdl_key"
     }
 
     updateRadioButtons(session, "ds_layer", choices = available, selected = selected_layer, inline = TRUE)
@@ -900,17 +852,12 @@ server <- function(input, output, session) {
     # clear existing marker when species/layer changes
     map_proxy |> clear_markers()
 
-    r <- get_rast()
+    layer_mdl_key <- sel_layer()
 
-    # handle case when layer not available
-    if (is.null(r)) {
-      map_proxy |>
-        clear_layer("r_lyr") |>
-        clear_layer("r_lyr_src") |>
-        clear_legend()
-      showNotification(
-        "No data to display \u2014 this species lacks this layer, or its distribution falls outside the selected mask",
-        type = "warning")
+    # handle case when the layer isn't available for this species
+    if (is.null(layer_mdl_key)) {
+      map_proxy |> clear_layer("r_lyr") |> clear_layer("r_src") |> clear_legend()
+      showNotification("No data to display \u2014 this species lacks this layer", type = "warning")
       return()
     }
 
@@ -920,10 +867,10 @@ server <- function(input, output, session) {
     rng_r  <- c(1,100)
 
     # get species info for legend and browser title
-    sp_row        <- d_spp |> filter(mdl_seq == input$sel_sp)
+    sp_row        <- d_spp |> filter(mdl_key == input$sel_sp)
     sp_name       <- sp_row$scientific_name
     layer_name    <- layer_names[input$ds_layer]
-    layer_mdl_seq <- sp_row[[input$ds_layer]]
+    layer_mdl_key <- sp_row[[input$ds_layer]]
     title_str     <- glue("{sp_name} - {layer_name}")
 
     # update browser title and URL
@@ -932,35 +879,18 @@ server <- function(input, output, session) {
       glue("{sp_row$sp_cat}"),
       glue("{sp_row$sp_cat}: {sp_row$common_name}"))
     browser_title <- glue(
-      "{sp_name} distribution ({sp_cat_cmn}; mdl_seq: {layer_mdl_seq}) from {layer_name} | BOEM Marine Sensitivity")
+      "{sp_name} distribution ({sp_cat_cmn}; mdl_key: {layer_mdl_key}) from {layer_name} | BOEM Marine Sensitivity")
     session$sendCustomMessage("updateTitle", browser_title)
-    updateQueryString(glue("?mdl_seq={layer_mdl_seq}"), mode = "replace", session = session)
+    updateQueryString(glue("?mdl_key={layer_mdl_key}"), mode = "replace", session = session)
 
-    # update raster
+    # v8: serve the per-taxon surface as titiler-v8 XYZ tiles (S3 view-DB), rescaled 1-100
+    sql      <- glue("SELECT cell_id, val AS value FROM model_cell WHERE mdl_key = '{layer_mdl_key}'")
+    tile_url <- msens::cell_tile_url(sql, colormap = "spectral_r", rescale = c(1, 100),
+                                     mtime = db_mtime, base = tile_base_url)
     map_proxy |>
       clear_layer("r_lyr") |>
-      clear_layer("r_lyr_src") |>
       clear_legend() |>
-      # add_image_source(
-      #   id     = "r_src",
-      #   data   = r,
-      #   colors = cols_r
-      # ) |>
-      # add_raster_layer(
-      #   id                = "r_lyr",
-      #   source            = "r_src",
-      #   raster_opacity    = 0.8,
-      #   raster_resampling = "nearest",
-      #   before_id         = "er_ln"
-      # ) |>
-      # add_fixed_range_raster() ----
-      add_fixed_range_raster(
-        data   = r,
-        id     = "r_lyr",
-        colors = cols_r,
-        raster_opacity    = 0.8,
-        raster_resampling = "nearest",
-        before_id         = "er_ln") |>
+      msens::add_cell_tiles(tile_url, id = "r_lyr", raster_opacity = 0.8, before_id = "er_ln") |>
       add_legend(
         title_str,
         values   = rng_r,
@@ -968,7 +898,7 @@ server <- function(input, output, session) {
         position = "bottom-right"
       ) |>
       fit_bounds(
-        bbox    = trim(r) |> st_bbox() |> as.numeric(),
+        bbox    = { bb <- mdl_bbox(layer_mdl_key); if (is.null(bb)) er_bbox else bb },
         animate = T
       ) |>
       clear_controls("layers") |>
