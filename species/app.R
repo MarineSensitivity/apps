@@ -34,7 +34,7 @@ options(
 verbose <- T
 
 # version ----
-ver <- "v7"
+ver <- "v8"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -61,7 +61,7 @@ tbl_pra <- glue("ply_programareas_2026_{ver}")
 tbl_pra_pm <- "ply_programareas_2026"
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
-cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
+cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
 mask_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
 pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
 sdm_db   <- glue("{dir_big}/sdm.duckdb")
