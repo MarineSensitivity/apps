@@ -58,7 +58,7 @@ future::plan(future::multisession, workers = 2)
 verbose <- interactive()
 
 # version ----
-ver <- "v7"
+ver <- "v8"
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -83,7 +83,7 @@ pmtiles_base_url <- ifelse(
   "https://file.marinesensitivity.org/pmtiles")
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
-cell_tif <- glue("{dir_data}/derived/r_bio-oracle_planarea.tif")
+cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
 sdm_db <- glue("{dir_big}/sdm.duckdb")
 er_gpkg <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
 lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")
@@ -136,7 +136,7 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 # tile server ----
 # browser-facing titilecache (Varnish) URL; used verbatim in the tile URL
 # template sent to mapbox-gl, and for cell_stats() calls from R.
-tile_base_url <- "https://titilecache.marinesensitivity.org"
+tile_base_url <- "https://titiler-v8.marinesensitivity.org"
 # cache-bust tag tied to the sdm.duckdb mtime: if the DB is rebuilt, every
 # cell_tile_url() and cell_stats() URL changes, invalidating the Varnish +
 # browser cache automatically. distinct from the dataset version (`v6`).
@@ -154,13 +154,13 @@ cell_sql <- function(metric_key, subregion_key = "FULL") {
     grepl("^[A-Za-z0-9_]+$",   subregion_key))
   if (subregion_key == "FULL") {
     glue(
-      "SELECT cm.cell_id, cm.value ",
+      "SELECT cm.cell_id, cm.val AS value ",
       "FROM cell_metric cm ",
       "JOIN metric m ON cm.metric_seq = m.metric_seq ",
       "WHERE m.metric_key = '{metric_key}'")
   } else {
     glue(
-      "SELECT cm.cell_id, cm.value ",
+      "SELECT cm.cell_id, cm.val AS value ",
       "FROM cell_metric cm ",
       "JOIN metric     m  ON cm.metric_seq = m.metric_seq ",
       "JOIN zone_cell  zc ON cm.cell_id    = zc.cell_id ",
@@ -168,7 +168,7 @@ cell_sql <- function(metric_key, subregion_key = "FULL") {
       "WHERE m.metric_key = '{metric_key}' ",
       "AND   z.tbl       = '{tbl_sr}' ",
       "AND   z.fld       = 'subregion_key' ",
-      "AND   z.value     = '{subregion_key}'")
+      "AND   z.val       = '{subregion_key}'")
   }
 }
 
