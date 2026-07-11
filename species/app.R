@@ -863,14 +863,11 @@ server <- function(input, output, session) {
       }
     }
 
-    # check if URL specified a layer to select
+    # check if URL specified a layer to select. keep rx_ds_layer set (cleared later, in the
+    # render observer) so it can skip the stale default-layer render — avoids the
+    # merged->input "jigger" when deep-linking straight to a non-merged input.
     url_layer <- rx_ds_layer()
-    if (!is.null(url_layer) && url_layer %in% available) {
-      selected_layer <- url_layer
-      rx_ds_layer(NULL)  # clear after use
-    } else {
-      selected_layer <- "mdl_key"
-    }
+    selected_layer <- if (!is.null(url_layer) && url_layer %in% available) url_layer else "mdl_key"
 
     updateRadioButtons(session, "ds_layer", choices = available, selected = selected_layer, inline = TRUE)
   })
@@ -878,6 +875,15 @@ server <- function(input, output, session) {
   # * input$sel_sp or ds_layer -> update map ----
   observeEvent(list(input$sel_sp, input$ds_layer, input$sel_mask), {
     req(input$sel_sp, input$ds_layer)
+
+    # deep-link jigger fix: while a URL-specified layer is pending (rx_ds_layer), skip any
+    # render whose ds_layer hasn't caught up to it (don't flash the merged model first);
+    # once ds_layer matches the target, clear the pending flag and render it directly.
+    pend <- rx_ds_layer()
+    if (!is.null(pend)) {
+      if (!identical(input$ds_layer, pend)) return()
+      rx_ds_layer(NULL)
+    }
 
     if (verbose) {
       message("observeEvent(input$sel_sp/ds_layer): ", input$sel_sp, " / ", input$ds_layer)
