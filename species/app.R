@@ -213,9 +213,38 @@ spp_choices <- d_spp |>
 sel_sp_default <- d_spp |> filter(scientific_name == "Dermochelys coriacea") |> pull(mdl_key)
 if (length(sel_sp_default) == 0) sel_sp_default <- d_spp$mdl_key[1]
 
-# v8: the served layer is always the merged model
-mdl_key_lookup <- d_spp |>
-  transmute(merged_mdl_key = mdl_key, ds_layer = "mdl_key", input_mdl_key = mdl_key)
+# * native_asset: per-taxon input surfaces (Phase 4b) ----
+# each raw input model a taxon is built from, published in a pyramided native format the
+# species app overlays as its whole (often global) range: AquaMaps -> COG (titiler /cog),
+# vector ranges -> PMTiles (client-side filter by mdl_key). Present once publish_native +
+# release have run; absent -> graceful merged-only.
+native_asset <- tryCatch(
+  tbl(con_sdm, "native_asset") |> collect(),
+  error = function(e) tibble(
+    ms_merge_key = character(), mdl_key = character(), ds_key = character(),
+    asset_type = character(), asset_url = character(), rescale_min = integer(),
+    rescale_max = integer(), colormap = character(), source_layer = character(),
+    xmin = double(), ymin = double(), xmax = double(), ymax = double()))
+
+# wide per-taxon input columns: one column per ds_key holding that input's raw mdl_key (or NA),
+# so `sp_row[[ds_key]]` gives the input to render for the selected taxon (v7 mapsp pattern).
+d_inputs <- native_asset |>
+  distinct(ms_merge_key, ds_key, mdl_key) |>
+  pivot_wider(names_from = ds_key, values_from = mdl_key, values_fn = dplyr::first)
+d_spp <- d_spp |> left_join(d_inputs, by = c("mdl_key" = "ms_merge_key"))
+input_ds_keys <- intersect(ds_keys, names(d_inputs))   # ds_keys offered as input layers
+
+# render lookup: raw input mdl_key -> how to draw it (asset_type/url/rescale/colormap/bbox)
+native_by_key <- split(
+  native_asset |> distinct(mdl_key, .keep_all = TRUE),
+  (native_asset |> distinct(mdl_key, .keep_all = TRUE))$mdl_key)
+
+# URL routing: a ?mdl_key=<key> may name the merged model OR any raw input -> resolve to
+# (merged model, ds_layer) so the picker opens on that layer.
+mdl_key_lookup <- bind_rows(
+  d_spp   |> transmute(merged_mdl_key = mdl_key, ds_layer = "mdl_key", input_mdl_key = mdl_key),
+  native_asset |> distinct(ms_merge_key, ds_key, mdl_key) |>
+    transmute(merged_mdl_key = ms_merge_key, ds_layer = ds_key, input_mdl_key = mdl_key))
 
 # ui ----
 ui <- page_sidebar(
@@ -446,6 +475,10 @@ server <- function(input, output, session) {
 
   rx_url_initialized <- reactiveVal(FALSE)
 
+  # v8: surfaces render as titiler tiles (COG/cell-SQL) / PMTiles, not an in-R terra raster,
+  # so the v7 click-to-inspect-cell popup has no local raster to sample -> no-op for now.
+  get_rast <- reactive(NULL)
+
   # url parameters ----
   observe({
     # only process URL params on initial load, not after updateQueryString
@@ -453,7 +486,7 @@ server <- function(input, output, session) {
 
     query <- parseQueryString(session$clientData$url_search)
     if (!is.null(query$mdl_key)) {
-      url_mdl_key <- as.integer(query$mdl_key)
+      url_mdl_key <- query$mdl_key   # v8 mdl_key is a string (e.g. "ms_merge|WORMS:137209")
 
       # look up which species and layer this mdl_key belongs to
       lookup_row <- mdl_key_lookup |>
@@ -885,31 +918,62 @@ server <- function(input, output, session) {
     session$sendCustomMessage("updateTitle", browser_title)
     updateQueryString(glue("?mdl_key={layer_mdl_key}"), mode = "replace", session = session)
 
-    # v8: serve the per-taxon surface as titiler-v8 XYZ tiles (S3 view-DB), rescaled 1-100
-    sql      <- glue("SELECT cell_id, val AS value FROM model_cell WHERE mdl_key = '{layer_mdl_key}'")
-    tile_url <- msens::cell_tile_url(sql, colormap = "spectral_r", rescale = c(1, 100),
-                                     mtime = db_mtime, base = tile_base_url)
+    # v8 Phase 4b: the merged model + AquaMaps inputs are raster surfaces (titiler XYZ tiles on
+    # "r_lyr"); vector-range inputs are PMTiles polygons (client-filtered by mdl_key on "r_pm").
+    # Merged serves the US surface via cell-SQL; native COG/PMTiles inputs show the whole global
+    # range. Only one is shown at a time, so clear both first.
+    is_merged <- input$ds_layer == "mdl_key"
+    asset     <- if (!is_merged) native_by_key[[layer_mdl_key]] else NULL
+
+    # fit target: merged -> US model extent; input -> its own (often global) bbox; else world
+    fit_bbox <- if (is_merged) {
+      bb <- mdl_bbox(layer_mdl_key); if (is.null(bb)) er_bbox else bb
+    } else if (!is.null(asset) && !is.na(asset$xmin)) {
+      c(asset$xmin, asset$ymin, asset$xmax, asset$ymax)
+    } else c(-180, -60, 180, 85)
+
+    map_proxy <- map_proxy |>
+      clear_layer("r_lyr") |> clear_layer("r_pm") |> clear_legend()
+
+    if (is_merged || (!is.null(asset) && asset$asset_type == "cog")) {
+      tile_url <- if (is_merged) {
+        sql <- glue("SELECT cell_id, val AS value FROM model_cell WHERE mdl_key = '{layer_mdl_key}'")
+        msens::cell_tile_url(sql, colormap = "spectral_r", rescale = c(1, 100),
+                             mtime = db_mtime, base = tile_base_url)
+      } else {
+        msens::cog_tile_url(asset$asset_url,
+                            colormap = coalesce(asset$colormap, "spectral_r"),
+                            rescale  = c(coalesce(asset$rescale_min, 1L), coalesce(asset$rescale_max, 100L)),
+                            base = tile_base_url)
+      }
+      map_proxy  <- map_proxy |>
+        msens::add_cell_tiles(tile_url, id = "r_lyr", raster_opacity = 0.8, before_id = "er_ln") |>
+        add_legend(title_str, values = rng_r, colors = cols_r, position = "bottom-right")
+      active_lyr <- c("Raster cell values" = "r_lyr")
+    } else if (!is.null(asset) && asset$asset_type == "pmtiles") {
+      pm_col     <- "#3388ff"
+      map_proxy  <- map_proxy |>
+        add_pmtiles_source(id = "pm_src", url = asset$asset_url) |>
+        add_fill_layer(
+          id = "r_pm", source = "pm_src", source_layer = asset$source_layer,
+          filter = list("==", list("get", "mdl_key"), layer_mdl_key),
+          fill_color = pm_col, fill_opacity = 0.5, before_id = "er_ln") |>
+        add_categorical_legend(
+          legend_title = title_str, values = "range (presence)", colors = pm_col,
+          position = "bottom-right")
+      active_lyr <- c("Range (presence)" = "r_pm")
+    } else {
+      showNotification("No native surface available for this input", type = "warning")
+      active_lyr <- character(0)
+    }
+
     map_proxy |>
-      clear_layer("r_lyr") |>
-      clear_legend() |>
-      msens::add_cell_tiles(tile_url, id = "r_lyr", raster_opacity = 0.8, before_id = "er_ln") |>
-      add_legend(
-        title_str,
-        values   = rng_r,
-        colors   = cols_r,
-        position = "bottom-right"
-      ) |>
-      fit_bounds(
-        bbox    = { bb <- mdl_bbox(layer_mdl_key); if (is.null(bb)) er_bbox else bb },
-        animate = T
-      ) |>
+      fit_bounds(bbox = fit_bbox, animate = TRUE) |>
       clear_controls("layers") |>
-      add_layers_control(
-        layers = list(
-          "Program Area outlines" = "pra_ln",
-          "Program Area labels"   = "pra_lbl",
-          "Ecoregion outlines"    = "er_ln",
-          "Raster cell values"    = "r_lyr"))
+      add_layers_control(layers = c(list(
+        "Program Area outlines" = "pra_ln",
+        "Program Area labels"   = "pra_lbl",
+        "Ecoregion outlines"    = "er_ln"), as.list(active_lyr)))
 
     # add ecoregion fill layer if er_clr parameter was provided
     er_clr <- rx_er_clr()
