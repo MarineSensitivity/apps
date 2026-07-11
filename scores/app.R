@@ -1,6 +1,6 @@
 # TODO:
 # - [ ] on click, add marker (rast) or highlight (pa)
-# - [use new features mapgl 0.3](https://walker-data.com/mapgl/news/index.html#mapgl-03)
+# - [use new features mapgl 0.3](https://walker-data.com/scores/news/index.html#mapgl-03)
 #   - [ ] on hover, show rast value using `enable_shiny_hover()`
 #   - [ ] legend pretty, more compact with `legend_style()`
 # - [ ] on light theme, change basemap to light too
@@ -52,7 +52,7 @@ options(readr.show_col_types = F)
 future::plan(future::multisession, workers = 2)
 
 # profile performance of app:
-#   profvis::profvis(shiny::runApp(here::here("mapgl")))
+#   profvis::profvis(shiny::runApp(here::here("scores")))
 
 # variables ----
 verbose <- interactive()
@@ -90,9 +90,9 @@ lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")
 metrics_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
 pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
 sr_pra_csv <- glue("{dir_v}/subregion_programareas.csv")
-sr_bb_csv <- here("mapgl/cache/subregion_bboxes.csv")
+sr_bb_csv <- here("scores/cache/subregion_bboxes.csv")
 taxonomy_csv <- here(
-  "mapgl/data/taxonomic_hierarchy_worms_2025-10-30.csv")
+  "scores/data/taxonomic_hierarchy_worms_2025-10-30.csv")
 tbl_er <- "ply_ecoregions_2025"
 tbl_sr <- glue("ply_subregions_2026_{ver}")
 tbl_pra <- glue("ply_programareas_2026_{ver}")
@@ -240,7 +240,7 @@ get_lyr_name <- function(lyr) {
 # data prep ----
 
 # * pra_pts: program area label points (cached) ----
-pra_pts_csv <- here("mapgl/cache/pra_label_pts.csv")
+pra_pts_csv <- here("scores/cache/pra_label_pts.csv")
 if (!file.exists(pra_pts_csv)) {
   pra_pts <- read_sf(pra_gpkg) |>
     st_shift_longitude() |>
@@ -455,7 +455,7 @@ d_sr_pra <- read_csv(sr_pra_csv)
 # * r_metrics ----
 r_metrics <- rast(metrics_tif)
 # NOTE: the old `r_init` terra raster was a ~4 GiB cached default-layer
-# raster (see `mapgl/cache/r_init_full.tif`) used to seed the initial
+# raster (see `scores/cache/r_init_full.tif`) used to seed the initial
 # map's image source via msens::add_cells(). With tiles it's no longer
 # needed — the browser fetches only the viewport's tiles on startup
 # (~4-16 PNGs @ ~5-20 KB each), served cached from Varnish after the
@@ -547,7 +547,7 @@ outside_pra_tile_url <- msens::cell_tile_url(
   mtime = db_mtime, base = tile_base_url)
 
 # NOTE: the previous r_outside_pra terra raster (cached to
-# mapgl/cache/r_cells_outside_pra.tif) is gone — the same "cells with
+# scores/cache/r_cells_outside_pra.tif) is gone — the same "cells with
 # metric values but outside any Program Area" mask is now rendered by
 # the msens TiTiler factory via `outside_pra_tile_url` (defined above,
 # SQL: cell_metric cell_ids NOT IN any zone where fld='programarea_key').
@@ -558,7 +558,7 @@ outside_pra_tile_url <- msens::cell_tile_url(
 # zone_metric for subregions was added by the cell_metrics_to_zone_metrics
 # chunk in calc_scores.qmd; if it's missing for some reason this still
 # falls back to on-the-fly aggregation across cell_metric x zone_cell.
-flower_default_csv <- here("mapgl/cache/flower_default_subregions.csv")
+flower_default_csv <- here("scores/cache/flower_default_subregions.csv")
 if (!file_exists(flower_default_csv)) {
   if (verbose) message("Building flower_default_subregions cache...")
   d_flower_default <- tbl(con_sdm, "zone") |>
@@ -938,7 +938,7 @@ server <- function(input, output, session) {
           "component scores, and species found in cells or Program Areas. Also see:"),
         tags$ul(
           tags$li(tags$a(
-            href   = "../mapsp/",
+            href   = "../species/",
             target = "_blank",
             "Species app"), " for mapping individual species distributions"),
           tags$li(tags$a(
@@ -1921,7 +1921,7 @@ server <- function(input, output, session) {
     d_spp |>
       mutate(
         model_url = glue(
-          "../mapsp/?mdl_seq={mdl_seq}"
+          "../species/?mdl_seq={mdl_seq}"
         ),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(

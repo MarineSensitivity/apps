@@ -124,7 +124,7 @@ con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
 # data prep ----
 
 # * pra_pts: program area label points (cached) ----
-pra_pts_csv <- here("mapsp/cache/pra_label_pts.csv")
+pra_pts_csv <- here("species/cache/pra_label_pts.csv")
 if (!file.exists(pra_pts_csv)) {
   pra_pts <- read_sf(pra_gpkg) |>
     st_shift_longitude() |>
@@ -149,7 +149,7 @@ r_masks <- list(
 # cached bbox (numeric xmin,ymin,xmax,ymax in the 0-360 longitude convention
 # of r_cell / r_masks) used by the initial map render. trim() strips outer
 # all-NA rows/cols so the bbox hugs actual ecoregion cells.
-er_bbox_csv <- here("mapsp/cache/ecoregions_bbox.csv")
+er_bbox_csv <- here("species/cache/ecoregions_bbox.csv")
 if (!file.exists(er_bbox_csv)) {
   er_bbox <- r_masks[["ecoregion_key"]] |>
     trim() |>
@@ -381,7 +381,7 @@ server <- function(input, output, session) {
           "Also see:"),
         tags$ul(
           tags$li(tags$a(
-            href   = "../mapgl/",
+            href   = "../scores/",
             target = "_blank",
             "Composite Scores app"), " for aggregated sensitivity maps"),
           tags$li(tags$a(
