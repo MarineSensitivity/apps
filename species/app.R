@@ -186,17 +186,19 @@ ds_keys_mask <- d_datasets |> filter(is_mask) |> pull(ds_key)
 # titiler-v8; per-dataset "original" layers await Phase 4b native publishing. Alias v8 columns
 # to the names the UI/popup downstream expect.
 d_spp <- tbl(con_sdm, "taxon") |>
-  filter(is_valid_usa, is_marine, !is.na(ms_merge_key)) |>
+  filter(is_valid_usa, is_marine, !is.na(ms_merge_key),
+         !sp_cat %in% c("reptile", "amphibian")) |>   # not scored -> not in the picker
   select(
-    taxon_id, taxon_authority, scientific_name, sp_cat,
+    taxon_id, taxon_authority, scientific_name, common_name, sp_cat,
     n_ds = n_datasets, mdl_key = ms_merge_key,
     redlist_code = iucn_code, esa_code = extrisk_code, er_score,
     rarity, is_mmpa, is_mbta) |>
   collect() |>
   mutate(
-    common_name = NA_character_,
     esa_source  = NA_character_,
-    label = glue("{sp_cat}: {scientific_name}"),
+    lbl_cmn = ifelse(!is.na(common_name) & common_name != "",
+                     glue(" ({common_name})", .trim = F), ""),
+    label = glue("{sp_cat}: {scientific_name}{lbl_cmn}"),
     worms_url = ifelse(
       taxon_authority == "worms" & !is.na(taxon_id),
       glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}" target="_blank">{taxon_id}</a>'),
