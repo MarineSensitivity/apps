@@ -64,7 +64,7 @@ mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
 mask_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
 pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
-sdm_db   <- glue("{dir_big}/sdm.duckdb")
+sdm_db   <- { s <- glue("{dir_big}/serve.duckdb"); if (file.exists(s)) s else glue("{dir_big}/sdm.duckdb") }
 # titiler-v8 serves the merged surfaces from the S3 view-DB; mtime cache-busts the tile URLs
 tile_base_url <- "https://titiler-v8.marinesensitivity.org"
 db_mtime <- format(file.info(sdm_db)$mtime, "%Y%m%dT%H%M%SZ", tz = "UTC")

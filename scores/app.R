@@ -84,7 +84,9 @@ pmtiles_base_url <- ifelse(
 
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
-sdm_db <- glue("{dir_big}/sdm.duckdb")
+# server reads the S3-backed view DB (serve.duckdb, views over marine-atlas Parquet — shared
+# with titiler-v8, no multi-GB rsync); local dev uses the full sdm.duckdb
+sdm_db <- { s <- glue("{dir_big}/serve.duckdb"); if (file.exists(s)) s else glue("{dir_big}/sdm.duckdb") }
 er_gpkg <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
 lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")
 metrics_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
