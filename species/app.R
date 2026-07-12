@@ -293,6 +293,16 @@ ui <- page_sidebar(
       Shiny.addCustomMessageHandler('updateTitle', function(title) {
         document.title = title;
       });
+      // open a map popup at a clicked location on the first click (mapgl's marker popup
+      // otherwise needs a second click on the marker to open).
+      Shiny.addCustomMessageHandler('clickPopup', function(m) {
+        var w = HTMLWidgets.find('#' + m.map);
+        var map = w && w.getMap ? w.getMap() : null;
+        if (!map || typeof mapboxgl === 'undefined') return;
+        if (window._msPopup) { window._msPopup.remove(); }
+        window._msPopup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '260px' })
+          .setLngLat([m.lng, m.lat]).setHTML(m.html).addTo(map);
+      });
       $(document).on('shiny:connected', function() {
         var params = new URLSearchParams(window.location.search);
         if (params.get('splash') === 'false') {
@@ -1048,9 +1058,10 @@ server <- function(input, output, session) {
 
     if (is.na(val)) {
       mapboxgl_proxy("map") |> clear_markers() |>
-        add_markers(data = c(lng, lat), marker_id = "click_marker",
-                    popup = glue('<div style="padding:6px;color:black;">Cell {cell_id}<br>',
-                                 'Lon {round(lng,3)}, Lat {round(lat,3)}<br><i>no value here</i></div>'))
+        add_markers(data = c(lng, lat), marker_id = "click_marker")
+      session$sendCustomMessage("clickPopup", list(map = "map", lng = lng, lat = lat,
+        html = glue('<div style="padding:6px;color:black;">Cell {cell_id}<br>',
+                    'Lon {round(lng,3)}, Lat {round(lat,3)}<br><i>no value here</i></div>')))
       return()
     }
 
@@ -1088,14 +1099,13 @@ server <- function(input, output, session) {
       '</div>'
     )
 
+    # drop the pin AND open the popup immediately (single click) — mapgl's marker popup
+    # otherwise needs a second click on the marker to open.
     mapboxgl_proxy("map") |>
       clear_markers() |>
-      add_markers(
-        data      = c(click$lng, click$lat),
-        popup     = popup_html,
-        marker_id = "click_marker",
-        color     = bg_color
-      )
+      add_markers(data = c(click$lng, click$lat), marker_id = "click_marker", color = bg_color)
+    session$sendCustomMessage("clickPopup",
+      list(map = "map", lng = click$lng, lat = click$lat, html = popup_html))
   })
 
   # marker_click: set flag so map_click doesn't recreate marker ----
