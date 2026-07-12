@@ -476,9 +476,10 @@ server <- function(input, output, session) {
 
   rx_url_initialized <- reactiveVal(FALSE)
 
-  # v8: surfaces render as titiler tiles (COG/cell-SQL) / PMTiles, not an in-R terra raster,
-  # so the v7 click-to-inspect-cell popup has no local raster to sample -> no-op for now.
-  get_rast <- reactive(NULL)
+  # v8 click-to-inspect: surfaces are titiler tiles / PMTiles, not an in-R raster, so record
+  # what's currently shown (mdl_key + how it's served) and sample the value on click by
+  # cell_id (merged cell-SQL) or a titiler /cog/point query (COG input).
+  rx_shown <- reactiveVal(NULL)
 
   # url parameters ----
   observe({
@@ -980,6 +981,13 @@ server <- function(input, output, session) {
       active_lyr <- character(0)
     }
 
+    # record what's shown so a map click can sample its value (merged -> cell-SQL by cell_id;
+    # cog -> titiler /cog/point; pmtiles -> presence only)
+    rx_shown(list(
+      mdl_key = layer_mdl_key, name = sp_name,
+      type    = if (is_merged) "merged" else (asset$asset_type %||% "pmtiles"),
+      url     = if (!is_merged && identical(asset$asset_type, "cog")) asset$asset_url else NA_character_))
+
     # outline overlay: show Program Areas, Ecoregions, or None (the "Outlines:" selector)
     pa_vis <- if (input$sel_mask == "programarea_key") "visible" else "none"
     er_vis <- if (input$sel_mask == "ecoregion_key")   "visible" else "none"
@@ -1012,28 +1020,39 @@ server <- function(input, output, session) {
       return()
     }
 
-    r <- get_rast()
-    if (is.null(r)) return()
+    shown <- rx_shown()
+    if (is.null(shown)) return()
+    lng <- click$lng; lat <- click$lat
 
-    # create point and handle longitude wrapping
-    pt <- vect(
-      data.frame(x = click$lng, y = click$lat),
-      geom = c("x", "y"),
-      crs = "EPSG:4326"
-    ) |>
-      st_as_sf() |>
-      st_shift_longitude()
+    # global 0.05° cell_id (row-major, top-left origin) — matches the grid the surfaces use
+    col <- floor((lng + 180) / 0.05); row <- floor((90 - lat) / 0.05)
+    if (col < 0 || col >= 7200 || row < 0 || row >= 3600) return()
+    cell_id <- as.integer(row) * 7200L + as.integer(col) + 1L
 
-    # extract value and cell info
-    extracted <- terra::extract(r, pt, cells = TRUE)
-    if (nrow(extracted) == 0) return()
+    # sample the value of the shown layer at this cell
+    val <- if (shown$type == "merged") {
+      v <- tryCatch(dbGetQuery(con_sdm, glue(
+        "SELECT val FROM model_cell WHERE mdl_key = '{shown$mdl_key}' AND cell_id = {cell_id}")),
+        error = function(e) NULL)
+      if (!is.null(v) && nrow(v)) as.numeric(v$val[1]) else NA_real_
+    } else if (identical(shown$type, "cog") && !is.na(shown$url)) {
+      pv <- tryCatch(
+        httr2::request(glue("{tile_base_url}/cog/point/{lng},{lat}")) |>
+          httr2::req_url_query(url = shown$url) |> httr2::req_perform() |>
+          httr2::resp_body_json(),
+        error = function(e) NULL)
+      if (!is.null(pv) && length(pv$values)) as.numeric(pv$values[[1]]) else NA_real_
+    } else NA_real_   # pmtiles = presence; no per-cell value
 
-    cell_id <- extracted$cell
-    val     <- extracted$value
-    if (verbose)
-      message("map_click: cell_id=", cell_id, ", val=", val)
+    if (verbose) message("map_click: cell_id=", cell_id, ", val=", val)
 
-    if (is.na(val) || is.na(cell_id)) return()
+    if (is.na(val)) {
+      mapboxgl_proxy("map") |> clear_markers() |>
+        add_markers(data = c(lng, lat), marker_id = "click_marker",
+                    popup = glue('<div style="padding:6px;color:black;">Cell {cell_id}<br>',
+                                 'Lon {round(lng,3)}, Lat {round(lat,3)}<br><i>no value here</i></div>'))
+      return()
+    }
 
     # calculate background color based on value
     n_cols <- 11
