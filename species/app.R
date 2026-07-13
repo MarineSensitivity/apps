@@ -222,9 +222,11 @@ native_asset <- tryCatch(
   tbl(con_sdm, "native_asset") |> collect(),
   error = function(e) tibble(
     ms_merge_key = character(), mdl_key = character(), ds_key = character(),
-    asset_type = character(), asset_url = character(), rescale_min = integer(),
-    rescale_max = integer(), colormap = character(), source_layer = character(),
-    xmin = double(), ymin = double(), xmax = double(), ymax = double()))
+    asset_type = character(), representation = character(), asset_url = character(),
+    rescale_min = integer(), rescale_max = integer(), colormap = character(),
+    source_layer = character(), xmin = double(), ymin = double(), xmax = double(), ymax = double()))
+# older releases had no `representation` column (all rows were the single per-model asset)
+if (!"representation" %in% names(native_asset)) native_asset$representation <- "native"
 
 # wide per-taxon input columns: one column per ds_key holding that input's raw mdl_key (or NA),
 # so `sp_row[[ds_key]]` gives the input to render for the selected taxon (v7 mapsp pattern).
@@ -234,10 +236,14 @@ d_inputs <- native_asset |>
 d_spp <- d_spp |> left_join(d_inputs, by = c("mdl_key" = "ms_merge_key"))
 input_ds_keys <- intersect(ds_keys, names(d_inputs))   # ds_keys offered as input layers
 
-# render lookup: raw input mdl_key -> how to draw it (asset_type/url/rescale/colormap/bbox)
-native_by_key <- split(
-  native_asset |> distinct(mdl_key, .keep_all = TRUE),
-  (native_asset |> distinct(mdl_key, .keep_all = TRUE))$mdl_key)
+# render lookup: raw input mdl_key -> how to draw it (asset_type/url/rescale/colormap/bbox).
+# native_asset now carries BOTH representations per mdl_key (original `native` + interpolated
+# `model`); the input overlay shows the ORIGINAL source range (the merged cell-tile surface is
+# already the interpolated view), so prefer representation == "native" per model.
+native_pick <- native_asset |>
+  arrange(mdl_key, representation != "native") |>   # native (FALSE=0) sorts before model
+  distinct(mdl_key, .keep_all = TRUE)
+native_by_key <- split(native_pick, native_pick$mdl_key)
 
 # URL routing: a ?mdl_key=<key> may name the merged model OR any raw input -> resolve to
 # (merged model, ds_layer) so the picker opens on that layer.
@@ -754,9 +760,12 @@ server <- function(input, output, session) {
 
   # geographic bbox (lon/lat) of a model's cells, for fit_bounds
   mdl_bbox <- function(mdl_key) {
+    # filter by the internal integer mdl_id (resolved from the stable mdl_key) so the
+    # Hive-partitioned model_cell prunes to one partition instead of scanning all models.
     b <- dbGetQuery(con_sdm, glue(
       "SELECT min(c.lon) x0, min(c.lat) y0, max(c.lon) x1, max(c.lat) y1
-       FROM model_cell mc JOIN cell c USING (cell_id) WHERE mc.mdl_key = '{mdl_key}'"))
+       FROM model_cell mc JOIN cell c USING (cell_id)
+       WHERE mc.mdl_id = (SELECT mdl_id FROM model WHERE mdl_key = '{mdl_key}')"))
     if (is.na(b$x0)) NULL else c(b$x0, b$y0, b$x1, b$y1)
   }
 
@@ -961,8 +970,9 @@ server <- function(input, output, session) {
 
     if (is_merged || (!is.null(asset) && asset$asset_type == "cog")) {
       tile_url <- if (is_merged) {
-        sql <- glue("SELECT cell_id, val AS value FROM model_cell WHERE mdl_key = '{layer_mdl_key}'")
-        msens::cell_tile_url(sql, colormap = "spectral_r", rescale = c(1, 100),
+        # stable-mdl_key fast-path: titiler resolves mdl_key -> internal partition id and reads one
+        # serve partition. mdl_key stays constant across releases (the internal id may renumber).
+        msens::cell_tile_url(mdl_key = layer_mdl_key, colormap = "spectral_r", rescale = c(1, 100),
                              mtime = db_mtime, base = tile_base_url)
       } else {
         msens::cog_tile_url(asset$asset_url,
@@ -1042,7 +1052,8 @@ server <- function(input, output, session) {
     # sample the value of the shown layer at this cell
     val <- if (shown$type == "merged") {
       v <- tryCatch(dbGetQuery(con_sdm, glue(
-        "SELECT val FROM model_cell WHERE mdl_key = '{shown$mdl_key}' AND cell_id = {cell_id}")),
+        "SELECT val FROM model_cell
+         WHERE mdl_id = (SELECT mdl_id FROM model WHERE mdl_key = '{shown$mdl_key}') AND cell_id = {cell_id}")),
         error = function(e) NULL)
       if (!is.null(v) && nrow(v)) as.numeric(v$val[1]) else NA_real_
     } else if (identical(shown$type, "cog") && !is.na(shown$url)) {
