@@ -800,13 +800,16 @@ server <- function(input, output, session) {
 
   # geographic bbox (lon/lat) of a model's cells, for fit_bounds
   mdl_bbox <- function(mdl_key) {
-    # filter by the internal integer mdl_id (resolved from the stable mdl_key) so the
-    # Hive-partitioned model_cell prunes to one partition instead of scanning all models.
-    b <- dbGetQuery(con_sdm, glue(
+    # model_cell is an S3-GLOB view that needs LIST credentials the app container lacks — if the
+    # read fails, return NULL so callers fall back to the US study-area extent (er_bbox) rather
+    # than crashing the session. (The merged tiles themselves render via titiler, which resolves
+    # mdl_key->mdl_id and reads the exact partition server-side.)
+    b <- tryCatch(dbGetQuery(con_sdm, glue(
       "SELECT min(c.lon) x0, min(c.lat) y0, max(c.lon) x1, max(c.lat) y1
        FROM model_cell mc JOIN cell c USING (cell_id)
-       WHERE mc.mdl_id = (SELECT mdl_id FROM model WHERE mdl_key = '{mdl_key}')"))
-    if (is.na(b$x0)) NULL else c(b$x0, b$y0, b$x1, b$y1)
+       WHERE mc.mdl_id = (SELECT mdl_id FROM model WHERE mdl_key = '{mdl_key}')")),
+      error = function(e) NULL)
+    if (is.null(b) || is.na(b$x0)) NULL else c(b$x0, b$y0, b$x1, b$y1)
   }
 
   # * get_name ----
