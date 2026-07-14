@@ -518,6 +518,9 @@ server <- function(input, output, session) {
   # what's currently shown (mdl_key + how it's served) and sample the value on click by
   # cell_id (merged cell-SQL) or a titiler /cog/point query (COG input).
   rx_shown <- reactiveVal(NULL)
+  # last species the map recentered on — only re-fit bounds when the SPECIES changes, so
+  # switching layers / original↔interpolated keeps the user's current zoom (proxy swaps in place)
+  rx_fitted_sp <- reactiveVal(NULL)
 
   # url parameters ----
   observe({
@@ -1057,8 +1060,13 @@ server <- function(input, output, session) {
     # outline overlay: show Program Areas, Ecoregions, or None (the "Outlines:" selector)
     pa_vis <- if (input$sel_mask == "programarea_key") "visible" else "none"
     er_vis <- if (input$sel_mask == "ecoregion_key")   "visible" else "none"
+    # recenter ONLY when the species changed; switching layers/representations for the same
+    # species swaps the source in place (map proxy) without bouncing the user's view.
+    if (!identical(input$sel_sp, rx_fitted_sp())) {
+      map_proxy |> fit_bounds(bbox = fit_bbox, animate = TRUE)
+      rx_fitted_sp(input$sel_sp)
+    }
     map_proxy |>
-      fit_bounds(bbox = fit_bbox, animate = TRUE) |>
       set_layout_property("pra_ln",  "visibility", pa_vis) |>
       set_layout_property("pra_lbl", "visibility", pa_vis) |>
       set_layout_property("er_ln",   "visibility", er_vis) |>
