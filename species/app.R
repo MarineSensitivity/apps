@@ -237,13 +237,21 @@ d_spp <- d_spp |> left_join(d_inputs, by = c("mdl_key" = "ms_merge_key"))
 input_ds_keys <- intersect(ds_keys, names(d_inputs))   # ds_keys offered as input layers
 
 # render lookup: raw input mdl_key -> how to draw it (asset_type/url/rescale/colormap/bbox).
-# native_asset now carries BOTH representations per mdl_key (original `native` + interpolated
-# `model`); the input overlay shows the ORIGINAL source range (the merged cell-tile surface is
-# already the interpolated view), so prefer representation == "native" per model.
-native_pick <- native_asset |>
-  arrange(mdl_key, representation != "native") |>   # native (FALSE=0) sorts before model
-  distinct(mdl_key, .keep_all = TRUE)
-native_by_key <- split(native_pick, native_pick$mdl_key)
+# native_asset carries BOTH representations per mdl_key: the ORIGINAL source surface
+# (representation=="native": AquaMaps 0.5° COG, vector-range PMTiles) and the INTERPOLATED
+# 0.05°-grid surface used in scoring (representation=="model": a gridded COG). Keep every
+# representation; the layer bar offers an Original/Interpolated toggle per input and the
+# render picks the row. pick_asset falls back to native when a rep is absent (e.g. vector
+# inputs have no model COG).
+native_by_key <- split(native_asset, native_asset$mdl_key)
+reps_for   <- function(mk) if (is.null(native_by_key[[mk]])) character(0) else unique(native_by_key[[mk]]$representation)
+pick_asset <- function(mk, rep = "native") {
+  a <- native_by_key[[mk]]
+  if (is.null(a) || !nrow(a)) return(NULL)
+  r <- a[a$representation == rep, , drop = FALSE]
+  if (!nrow(r)) r <- a[order(a$representation != "native"), , drop = FALSE]   # fallback: native first
+  r[1, ]
+}
 
 # URL routing: a ?mdl_key=<key> may name the merged model OR any raw input -> resolve to
 # (merged model, ds_layer) so the picker opens on that layer.
@@ -259,6 +267,8 @@ ui <- page_sidebar(
     tags$style(HTML("
       .mapboxgl-popup-content{color:black;}
       #ds_layer_container {display: none;}
+      #representation_container {display: none;}
+      .layer-bar .rep-pill { margin: 0 1px; font-style: italic; }
       .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
       .header-right .action-button { background: none; border: none; color: inherit; cursor: pointer; text-decoration: underline; font-size: 0.9em; padding: 0; }
       .modal-footer { flex-wrap: wrap; justify-content: center; }
@@ -373,6 +383,18 @@ ui <- page_sidebar(
       "Display Layer",
       choices  = c("Merged Model" = "mdl_key"),   # v8: only the merged surface is served
       selected = "mdl_key",
+      inline   = TRUE
+    )
+  ),
+  # hidden radioButtons for the native/model (Original/Interpolated) toggle; driven by the
+  # layer-bar rep pills, shown only for inputs that publish both representations (AquaMaps)
+  div(
+    id = "representation_container",
+    radioButtons(
+      "representation",
+      "Representation",
+      choices  = c("Original (native)" = "native", "Interpolated (model)" = "model"),
+      selected = "native",
       inline   = TRUE
     )
   ),
@@ -630,10 +652,28 @@ server <- function(input, output, session) {
           glue(" (maximum of {n_ds - 1} inputs)"))) # assume 1 merged model + n_ds-1 inputs
     } else {
       bar_class <- "layer-bar is-input"
+      in_key  <- sp_row[[current_layer]]                 # this input's raw mdl_key
+      reps    <- reps_for(in_key)
+      cur_rep <- input$representation %||% "native"
+      # Original (native source resolution) vs Interpolated (0.05\u00B0 scoring grid) \u2014 only when
+      # the input publishes both (AquaMaps); vector ranges have just the native PMTiles.
+      rep_toggle <- if (length(reps) > 1) tagList(
+        span(" \u2014 "),
+        tags$a(
+          class   = paste0("layer-pill rep-pill", if (cur_rep == "native") " active" else ""),
+          title   = "the source SDM at its native resolution",
+          onclick = "var r=document.querySelector('#representation_container input[value=\"native\"]'); if(r) r.click();",
+          "Original"),
+        tags$a(
+          class   = paste0("layer-pill rep-pill", if (cur_rep == "model") " active" else ""),
+          title   = "resampled to the 0.05\u00B0 scoring grid",
+          onclick = "var r=document.querySelector('#representation_container input[value=\"model\"]'); if(r) r.click();",
+          "Interpolated")) else NULL
       left_content <- tagList(
         span(class = "layer-icon", "\u25B6"),
         span(class = "layer-label",
           glue("Viewing input: {layer_name}")),
+        rep_toggle,
         span(" \u2014 "),
         tags$a(
           class   = "merged-link",
@@ -893,7 +933,7 @@ server <- function(input, output, session) {
   })
 
   # * input$sel_sp or ds_layer -> update map ----
-  observeEvent(list(input$sel_sp, input$ds_layer, input$sel_mask), {
+  observeEvent(list(input$sel_sp, input$ds_layer, input$sel_mask, input$representation), {
     req(input$sel_sp, input$ds_layer)
 
     # deep-link jigger fix: while a URL-specified layer is pending (rx_ds_layer), skip any
@@ -950,7 +990,10 @@ server <- function(input, output, session) {
     # Merged serves the US surface via cell-SQL; native COG/PMTiles inputs show the whole global
     # range. Only one is shown at a time, so clear both first.
     is_merged <- input$ds_layer == "mdl_key"
-    asset     <- if (!is_merged) native_by_key[[layer_mdl_key]] else NULL
+    # pick the selected representation (Original=native / Interpolated=model); falls back to
+    # native when the input has only one (vector ranges). The merged surface is always the
+    # interpolated view, so no rep applies there.
+    asset     <- if (!is_merged) pick_asset(layer_mdl_key, input$representation %||% "native") else NULL
 
     # fit target: merged -> US model extent; input -> its own (often global) bbox from
     # native_asset; a pmtiles input without a per-model bbox falls back to the taxon's
