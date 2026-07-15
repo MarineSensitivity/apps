@@ -56,14 +56,16 @@ zoom_to_res <- function(z) max(1L, min(10L, findInterval(as.numeric(z), ZOOM_BRE
 # resolution actually served (store-capped) for a given map zoom
 zoom_res_capped <- function(z) min(zoom_to_res(z), RES_STORE_MAX)
 
-# h3t SQL/URL helpers — single source of truth in obisindicators/R/h3t.R ----
-# (needs only base64enc + glue; not the full package / gsl / h3)
+# h3t SQL/URL + taxon helpers — single source of truth in obisindicators/R/ ----
+# (needs only base64enc + glue; not the full package / gsl / h3). taxon.R must be
+# sourced too: obis_h3t_sql(aphiaid=) calls .h3t_taxon_tree_cte() defined there.
 h3t_src <- Sys.glob(c(
   "/share/github/marinebon/obisindicators/R/h3t.R",          # MST server
   "../../../marinebon/obisindicators/R/h3t.R",               # local sibling checkout
   "~/Github/marinebon/obisindicators/R/h3t.R"))[1]
 if (is.na(h3t_src))
   stop("could not locate obisindicators/R/h3t.R — clone marinebon/obisindicators alongside this repo")
+source(file.path(dirname(h3t_src), "taxon.R"))
 source(h3t_src)
 
 # choices ----
@@ -257,6 +259,17 @@ ui <- function(request) page_sidebar(
       "input.custom_taxon",
       selectInput("rank", "Rank", RANKS, selected = "class"),
       textInput("taxon_val", "Value", placeholder = "e.g. Aves")),
+
+    checkboxInput("custom_aphiaid", "Children of a WoRMS AphiaID (any rank)", FALSE),
+    conditionalPanel(
+      "input.custom_aphiaid",
+      textInput("aphiaid_val", "AphiaID(s)", placeholder = "e.g. 2688 = Cetacea"),
+      div(class = "small text-muted mb-2",
+          "Includes every descendant taxon, resolved from the WoRMS ",
+          tags$code("taxon"), " table — works at ranks that aren't columns ",
+          "(e.g. Infraorder). Examples: ", tags$b("2688"), " Cetacea, ",
+          tags$b("148899"), " Bacillariophyceae (diatoms), ", tags$b("1837"),
+          " Aves. Comma-separate to combine.")),
 
     checkboxInput("custom_sql", "Advanced: custom SQL", FALSE),
     conditionalPanel(
@@ -504,7 +517,11 @@ server <- function(input, output, session) {
                 "(filter on ", tags$code("rank"), " + ", tags$code("taxon"), ")."),
         tags$li(tags$code("occ_h3"), " — species-level occurrence counts at resolution ",
                 "tiers 3 / 5 / 7. Use for finer ranks, multi-taxon or year filters; ",
-                "compute indicators on the fly (slower).")),
+                "compute indicators on the fly (slower)."),
+        tags$li(tags$code("taxon"), " — WoRMS taxonomy (taxonID = AphiaID, ",
+                tags$code("parentNameUsageID"), "). Walk it recursively to filter ",
+                tags$code("occ_h3.aphiaid"), " by all descendants of any taxon, at ",
+                "any rank (even ranks absent from ", tags$code("occ_h3"), ").")),
       tags$h6(class = "mt-3", "Entity-relationship diagram"),
       # empty target — mermaid renders OFF-DOM (body temp node, which has real
       # layout) then we inject the SVG. rendering in-place with mermaid.run()
@@ -607,6 +624,16 @@ server <- function(input, output, session) {
       if (length(p)) p else NULL
     }
   })
+  # arbitrary-rank children filter: parse one or more integer AphiaIDs. Takes
+  # precedence over the rank/preset taxon filter (see obis_h3t_sql()).
+  aphiaid_r <- reactive({
+    if (!isTRUE(input$custom_aphiaid) || !nzchar(input$aphiaid_val %||% ""))
+      return(NULL)
+    ids <- suppressWarnings(as.integer(
+      strsplit(trimws(input$aphiaid_val), "\\s*,\\s*")[[1]]))
+    ids <- ids[!is.na(ids)]
+    if (length(ids)) ids else NULL
+  })
   years_r <- reactive({
     y <- input$years %||% c(YR_MIN, YR_MAX)
     if (identical(as.integer(y), c(YR_MIN, YR_MAX))) NULL else as.integer(y)
@@ -625,6 +652,7 @@ server <- function(input, output, session) {
     obis_h3t_sql(
       indicator       = input$indicator,
       taxon           = taxon_r(),
+      aphiaid         = aphiaid_r(),
       years           = years_r(),
       res_placeholder = res_ph)
   })

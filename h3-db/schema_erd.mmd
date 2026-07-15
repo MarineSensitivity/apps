@@ -33,5 +33,14 @@ erDiagram
     VARCHAR species "scientific name"
     BIGINT records "occurrence records"
   }
+  taxon {
+    BIGINT taxonID PK "WoRMS AphiaID"
+    BIGINT parentNameUsageID "parent AphiaID (recursive)"
+    BIGINT acceptedNameUsageID "accepted AphiaID"
+    VARCHAR scientificName "scientific name"
+    VARCHAR taxonRank "rank incl. Infraorder"
+    VARCHAR taxonomicStatus "accepted/unaccepted"
+  }
   idx_h3 ||--o{ occ_h3 : "all-taxa rollup"
   idx_h3_taxon ||--o{ occ_h3 : "per-taxon rollup"
+  taxon ||--o{ occ_h3 : "aphiaid subtree filter"
