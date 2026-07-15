@@ -1058,10 +1058,19 @@ server <- function(input, output, session) {
       clear_layer("r_lyr") |> clear_layer("r_src") |>
       clear_layer("r_pm")  |> clear_layer("pm_src") |> clear_legend()
 
+    # merged layer: prefer the whole-range merged COG (anonymous /cog, and the ONLY surface for a
+    # non-US species that has no model_cell); am-only taxa lack a merged COG -> model_cell fallback.
+    merged_cog_url <- NA_character_
+    if (is_merged) {
+      mc <- native_by_key[[layer_mdl_key]]
+      if (!is.null(mc)) { mc <- mc[mc$ds_key == "ms_merge", , drop = FALSE]
+        if (nrow(mc)) merged_cog_url <- mc$asset_url[1] }
+    }
     if (is_merged || (!is.null(asset) && asset$asset_type == "cog")) {
-      tile_url <- if (is_merged) {
-        # stable-mdl_key fast-path: titiler resolves mdl_key -> internal partition id and reads one
-        # serve partition. mdl_key stays constant across releases (the internal id may renumber).
+      tile_url <- if (is_merged && !is.na(merged_cog_url)) {
+        msens::cog_tile_url(merged_cog_url, colormap = "spectral_r", rescale = c(1, 100), base = tile_base_url)
+      } else if (is_merged) {
+        # model_cell fallback (am-only taxa): titiler resolves the stable mdl_key -> serve partition.
         msens::cell_tile_url(mdl_key = layer_mdl_key, colormap = "spectral_r", rescale = c(1, 100),
                              mtime = db_mtime, base = tile_base_url)
       } else {
@@ -1095,8 +1104,10 @@ server <- function(input, output, session) {
     # cog -> titiler /cog/point; pmtiles -> presence only)
     rx_shown(list(
       mdl_key = layer_mdl_key, name = sp_name,
-      type    = if (is_merged) "merged" else (asset$asset_type %||% "pmtiles"),
-      url     = if (!is_merged && identical(asset$asset_type, "cog")) asset$asset_url else NA_character_))
+      type    = if (is_merged && !is.na(merged_cog_url)) "cog"
+                else if (is_merged) "merged" else (asset$asset_type %||% "pmtiles"),
+      url     = if (is_merged && !is.na(merged_cog_url)) merged_cog_url
+                else if (!is_merged && identical(asset$asset_type, "cog")) asset$asset_url else NA_character_))
 
     # outline overlay: show Program Areas, Ecoregions, or None (the "Outlines:" selector)
     pa_vis <- if (input$sel_mask == "programarea_key") "visible" else "none"
