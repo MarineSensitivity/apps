@@ -393,14 +393,6 @@ ui <- page_sidebar(
           width    = "100%")))
   ),
   uiOutput("layer_bar"),
-  # zoom to the current layer's extent on demand (auto-fit on layer switch is off so users can
-  # compare models at the same view; this button restores fit-to-extent when they want it)
-  div(
-    style = "margin: 2px 0 4px 0;",
-    actionButton(
-      "btn_zoom_extent", "Zoom to layer extent",
-      icon  = icon("expand"),
-      class = "btn-sm btn-outline-secondary")),
   # hidden radioButtons to maintain ds_layer input
   div(
     id = "ds_layer_container",
@@ -425,7 +417,17 @@ ui <- page_sidebar(
     )
   ),
   card(
-    mapboxglOutput("map")
+    style = "position: relative;",
+    mapboxglOutput("map"),
+    # "Zoom to layer" overlaid at the map's top-left, right of the layer selector. Auto-fit on layer
+    # switch is off (so users can compare models at one view); this restores fit-to-extent on demand.
+    tags$div(
+      style = "position: absolute; top: 10px; left: 52px; z-index: 2;",
+      actionButton(
+        "btn_zoom_extent", "Zoom to layer",
+        icon  = icon("expand"),
+        class = "btn-sm",
+        style = "background:#fff; color:#333; border:1px solid #bbb; box-shadow:0 1px 4px rgba(0,0,0,.3);"))
   )
 )
 
