@@ -185,14 +185,22 @@ ds_keys_mask <- d_datasets |> filter(is_mask) |> pull(ds_key)
 # query taxon base data (v8 schema). Only the MERGED surface (`ms_merge_key`) is served via
 # titiler-v8; per-dataset "original" layers await Phase 4b native publishing. Alias v8 columns
 # to the names the UI/popup downstream expect.
-d_spp <- tbl(con_sdm, "taxon") |>
-  filter(is_valid_usa, is_marine, !is.na(ms_merge_key),
-         !sp_cat %in% c("reptile", "amphibian")) |>   # not scored -> not in the picker
+# base picker set = all valid marine taxa (is_valid_global if present, else is_valid_usa); each row
+# carries is_valid_usa so the "Only species in US waters" checkbox can filter to US presence. A taxon
+# is is_valid_usa iff it has >=1 merged cell in US waters (merge_taxon: n_usa>0) — so the ~750 AquaMaps
+# over-predictions whose IUCN range is wholly outside the US (Sotalia etc.) are is_valid_usa=FALSE.
+taxon_cols <- colnames(tbl(con_sdm, "taxon"))
+d_spp_tbl <- tbl(con_sdm, "taxon") |>
+  filter(is_marine, !is.na(ms_merge_key), !sp_cat %in% c("reptile", "amphibian"))
+# base picker set = all valid marine taxa (is_valid_global if present, else is_valid_usa)
+d_spp_tbl <- if ("is_valid_global" %in% taxon_cols)
+  filter(d_spp_tbl, is_valid_global) else filter(d_spp_tbl, is_valid_usa)
+d_spp <- d_spp_tbl |>
   select(
     taxon_id, taxon_authority, scientific_name, common_name, sp_cat,
     n_ds = n_datasets, mdl_key = ms_merge_key,
     redlist_code = iucn_code, esa_code = extrisk_code, er_score,
-    rarity, is_mmpa, is_mbta) |>
+    rarity, is_mmpa, is_mbta, is_valid_usa) |>
   collect() |>
   mutate(
     esa_source  = NA_character_,
@@ -204,14 +212,18 @@ d_spp <- tbl(con_sdm, "taxon") |>
       glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}" target="_blank">{taxon_id}</a>'),
       NA_character_))
 
-spp_choices <- d_spp |>
+# grouped-by-category choice lists; the checkbox swaps between US-waters-only and all valid marine
+.make_choices <- function(df) df |>
   arrange(sp_cat, label) |>
   group_by(sp_cat) |>
   summarise(layer = list(setNames(mdl_key, label)), .groups = "drop") |>
   deframe()
+spp_choices_all <- .make_choices(d_spp)
+spp_choices_us  <- .make_choices(d_spp |> filter(is_valid_usa))
+spp_choices     <- spp_choices_us   # default view = "Only species in US waters" (checkbox TRUE)
 
-sel_sp_default <- d_spp |> filter(scientific_name == "Dermochelys coriacea") |> pull(mdl_key)
-if (length(sel_sp_default) == 0) sel_sp_default <- d_spp$mdl_key[1]
+sel_sp_default <- d_spp |> filter(scientific_name == "Dermochelys coriacea", is_valid_usa) |> pull(mdl_key)
+if (length(sel_sp_default) == 0) sel_sp_default <- (d_spp |> filter(is_valid_usa) |> pull(mdl_key))[1]
 
 # * native_asset: per-taxon input surfaces (Phase 4b) ----
 # each raw input model a taxon is built from, published in a pyramided native format the
@@ -361,7 +373,13 @@ ui <- page_sidebar(
           "sel_sp",
           "Species:",
           choices = NULL,
-          width   = "100%"))),
+          width   = "100%"),
+        tags$div(
+          style = "margin-top: -8px;",
+          checkboxInput(
+            "us_only",
+            "Only species in US waters",
+            value = TRUE)))),
     column(3,
       tags$div(
         id = "tour_mask",
@@ -375,6 +393,14 @@ ui <- page_sidebar(
           width    = "100%")))
   ),
   uiOutput("layer_bar"),
+  # zoom to the current layer's extent on demand (auto-fit on layer switch is off so users can
+  # compare models at the same view; this button restores fit-to-extent when they want it)
+  div(
+    style = "margin: 2px 0 4px 0;",
+    actionButton(
+      "btn_zoom_extent", "Zoom to layer extent",
+      icon  = icon("expand"),
+      class = "btn-sm btn-outline-secondary")),
   # hidden radioButtons to maintain ds_layer input
   div(
     id = "ds_layer_container",
@@ -521,6 +547,8 @@ server <- function(input, output, session) {
   # last species the map recentered on — only re-fit bounds when the SPECIES changes, so
   # switching layers / original↔interpolated keeps the user's current zoom (proxy swaps in place)
   rx_fitted_sp <- reactiveVal(NULL)
+  # current layer's fit extent, updated on each layer render; the "Zoom to layer extent" button reads it
+  rx_fit_bbox <- reactiveVal(er_bbox)
 
   # url parameters ----
   observe({
@@ -535,31 +563,26 @@ server <- function(input, output, session) {
       lookup_row <- mdl_key_lookup |>
         filter(input_mdl_key == url_mdl_key)
 
-      # check if mdl_key is a valid merged model in spp_choices
-      all_mdl_keys <- unlist(spp_choices, use.names = FALSE)
+      # resolve against ALL valid marine taxa (US + global); a non-US target shared via URL relaxes
+      # the "Only species in US waters" checkbox so it can appear in the dropdown.
+      us_keys  <- unlist(spp_choices_us,  use.names = FALSE)
+      all_keys <- unlist(spp_choices_all, use.names = FALSE)
+      select_target <- function(key) {
+        is_us <- key %in% us_keys
+        if (!is_us) updateCheckboxInput(session, 'us_only', value = FALSE)
+        updateSelectizeInput(
+          session, 'sel_sp',
+          choices  = if (is_us) spp_choices_us else spp_choices_all,
+          server   = T, selected = key)
+      }
 
       if (nrow(lookup_row) > 0) {
         # found: select the species (merged model) and store layer to apply later
-        merged_seq <- lookup_row$merged_mdl_key[1]
-        ds_layer   <- lookup_row$ds_layer[1]
-
-        updateSelectizeInput(
-          session,
-          'sel_sp',
-          choices  = spp_choices,
-          server   = T,
-          selected = merged_seq
-        )
-        rx_ds_layer(ds_layer)
-      } else if (url_mdl_key %in% all_mdl_keys) {
+        rx_ds_layer(lookup_row$ds_layer[1])
+        select_target(lookup_row$merged_mdl_key[1])
+      } else if (url_mdl_key %in% all_keys) {
         # valid merged model
-        updateSelectizeInput(
-          session,
-          'sel_sp',
-          choices  = spp_choices,
-          server   = T,
-          selected = url_mdl_key
-        )
+        select_target(url_mdl_key)
       } else {
         # model not found — show disclaimer modal
         updateSelectizeInput(
@@ -608,6 +631,21 @@ server <- function(input, output, session) {
 
     # mark URL initialization complete
     rx_url_initialized(TRUE)
+  })
+
+  # * us_only checkbox: swap the species dropdown between US-waters-only and all valid marine taxa,
+  # keeping the current selection if it survives the filter (else fall back to the default).
+  observeEvent(input$us_only, ignoreInit = TRUE, {
+    ch   <- if (isTRUE(input$us_only)) spp_choices_us else spp_choices_all
+    cur  <- isolate(input$sel_sp)
+    keep <- if (!is.null(cur) && cur %in% unlist(ch, use.names = FALSE)) cur else sel_sp_default
+    updateSelectizeInput(session, 'sel_sp', choices = ch, server = TRUE, selected = keep)
+  })
+
+  # * btn_zoom_extent: fit the map to the currently displayed layer's extent on demand ----
+  observeEvent(input$btn_zoom_extent, {
+    bb <- rx_fit_bbox()
+    if (!is.null(bb)) mapboxgl_proxy("map") |> fit_bounds(bbox = bb, animate = TRUE)
   })
 
   # * layer_bar ----
@@ -1009,6 +1047,7 @@ server <- function(input, output, session) {
     } else if (!is.null(asset) && !is.na(asset$xmin)) {
       c(asset$xmin, asset$ymin, asset$xmax, asset$ymax)
     } else { bb <- mdl_bbox(sp_row$mdl_key); if (is.null(bb)) er_bbox else bb }
+    rx_fit_bbox(fit_bbox)   # remember this layer's extent for the "Zoom to layer extent" button
 
     # clear BOTH the previous raster (r_lyr/r_src) and pmtiles (r_pm/pm_src) layer+source;
     # clear_layer removes a source of that id too, so re-adding a source doesn't collide
