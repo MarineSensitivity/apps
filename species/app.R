@@ -422,7 +422,7 @@ ui <- page_sidebar(
     # "Zoom to layer" overlaid at the map's top-left, right of the layer selector. Auto-fit on layer
     # switch is off (so users can compare models at one view); this restores fit-to-extent on demand.
     tags$div(
-      style = "position: absolute; top: 10px; left: 52px; z-index: 2;",
+      style = "position: absolute; top: 27px; left: 75px; z-index: 2;",   # top-aligned + 10px right of the layers control (card pad 17 + ctrl margin 10 + icon 38)
       actionButton(
         "btn_zoom_extent", "Zoom to layer",
         icon  = icon("expand"),
