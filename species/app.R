@@ -119,6 +119,34 @@ add_fixed_range_raster <- function(
 # maplibre() |>
 #   add_fixed_range_raster(raster1, "layer1", range = c(1, 100),  colors = viridisLite::viridis(256), raster_opacity = 0.7)
 
+# OBIS occurrence overlay ----
+# optional per-species OBIS occurrence grid, shown as a toggle (default off). The apps/h3-db hexagon
+# layer is the `h3t` maplibre vector-tile protocol (maplibregl.addProtocol), which Mapbox GL — this
+# app's map — does not support, so that exact layer can't render here. Instead we fetch the SAME OBIS
+# occurrences server-aggregated to a grid via the OBIS API (GeoJSON, record count `n` per cell) and
+# add them as a Mapbox-native fill layer. Honors "hexagon of OBIS occurrence data (or centroid pt)"
+# as a grid of occurrence counts.
+OBIS_GRID_PREC <- 3L                                              # geohash precision (3 ~= 150 km cells)
+OBIS_VIRIDIS5  <- c("#440154", "#3b528b", "#21918c", "#5ec962", "#fde725")
+
+# fetch OBIS occurrence grid for a taxon -> sf (cols: n, geometry). NULL on any failure / no records.
+# Prefer the WoRMS AphiaID (taxonid=) when present; fall back to scientific name.
+obis_grid <- function(aphiaid = NULL, scientificname = NULL, precision = OBIS_GRID_PREC) {
+  qp <- if (!is.null(aphiaid) && !is.na(aphiaid)) glue("taxonid={aphiaid}")
+        else if (!is.null(scientificname) && !is.na(scientificname))
+          glue("scientificname={utils::URLencode(scientificname, reserved = TRUE)}")
+        else return(NULL)
+  url <- glue("https://api.obis.org/v3/occurrence/grid/{precision}?{qp}")
+  tryCatch({
+    resp <- curl::curl_fetch_memory(url, handle = curl::new_handle(timeout = 25L))
+    if (resp$status_code >= 400) return(NULL)
+    txt <- rawToChar(resp$content)
+    if (!nzchar(txt)) return(NULL)
+    g <- sf::read_sf(txt)
+    if (nrow(g) == 0 || !"n" %in% names(g)) return(NULL)
+    g
+  }, error = function(e) NULL)
+}
 
 # database ----
 # source(here("../workflows/libs/db.R")) # con
@@ -362,6 +390,13 @@ ui <- page_sidebar(
       "tgl_sphere",
       "Sphere",
       T
+    ),
+    # OBIS occurrences overlay: per-species grid of OBIS record counts (default off), fetched from
+    # the OBIS API. Applies to any taxon resolvable by AphiaID or scientific name.
+    input_switch(
+      "tgl_obis",
+      "OBIS occurrences",
+      F
     ),
     uiOutput("species_info")
   ),
@@ -1134,6 +1169,49 @@ server <- function(input, output, session) {
       map_proxy |>
         add_er_fill_layer(er_clr)
     }
+  })
+
+  # * OBIS occurrences overlay ----
+  # per-species OBIS occurrence grid (record counts) from the OBIS API, added as a Mapbox-native
+  # GeoJSON fill layer (see the OBIS overlay note at the top — Mapbox can't run the h3t protocol).
+  # Fires on the toggle and on species change: always tear the layer down first, then re-add it when
+  # the toggle is on. Guard against firing before a species is selected.
+  observeEvent(list(input$tgl_obis, input$sel_sp), ignoreInit = TRUE, {
+    map_proxy <- mapboxgl_proxy("map")
+    map_proxy |> clear_layer(c("obis_occ_fill", "obis_occ"))   # layer first, then its source
+    if (!isTRUE(input$tgl_obis)) return()
+    req(input$sel_sp)
+
+    sp_row  <- d_spp |> filter(mdl_key == input$sel_sp)
+    if (nrow(sp_row) != 1) return()
+    aphiaid <- if (identical(sp_row$taxon_authority, "worms") && !is.na(sp_row$taxon_id))
+                 suppressWarnings(as.integer(sp_row$taxon_id)) else NA_integer_
+
+    g <- obis_grid(aphiaid = aphiaid, scientificname = sp_row$scientific_name)
+    if (is.null(g)) {
+      showNotification(glue("No OBIS occurrences found for {sp_row$scientific_name}."), type = "message")
+      return()
+    }
+
+    # color ramp over the robust p02–p98 record-count range (fallback to min–max)
+    ns <- g$n[is.finite(g$n)]
+    lo <- as.numeric(stats::quantile(ns, 0.02, names = FALSE))
+    hi <- as.numeric(stats::quantile(ns, 0.98, names = FALSE))
+    if (!is.finite(lo) || !is.finite(hi) || lo >= hi) { lo <- min(ns); hi <- max(ns) }
+    if (lo >= hi) { lo <- 0; hi <- max(hi, 1) }
+    brks <- seq(lo, hi, length.out = length(OBIS_VIRIDIS5))
+
+    map_proxy |>
+      add_source(id = "obis_occ", data = g) |>
+      add_fill_layer(
+        id = "obis_occ_fill", source = "obis_occ",
+        fill_color   = interpolate(column = "n", values = brks, stops = OBIS_VIRIDIS5),
+        fill_opacity = 0.6,
+        tooltip      = get_column("n")) |>
+      add_legend(
+        glue("OBIS occurrences: {sp_row$scientific_name}"),
+        values = round(c(lo, hi), 0), colors = OBIS_VIRIDIS5,
+        position = "bottom-left")
   })
 
   # map_click ----
