@@ -600,7 +600,7 @@ ui <- page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     tags$style(HTML("
-      .mapboxgl-popup-content{color:black;}
+      .maplibregl-popup-content{color:black;}
       .bslib-full-screen .girafe_container_std {
         height: calc(100vh - 120px) !important;
         width: 100% !important;
@@ -732,7 +732,7 @@ ui <- page_sidebar(
         var map = widget.getMap();
         if (!map) return;
         praHandlersAdded = true;
-        praPopup = new mapboxgl.Popup({
+        praPopup = new maplibregl.Popup({
           closeButton: false, closeOnClick: false
         });
         map.on('mousemove', 'pra_lyr', function(e) {
@@ -813,7 +813,7 @@ ui <- page_sidebar(
         div(id = "map-overlay", class = "map-loading-overlay",
           div(class = "map-loading-spinner"),
           span("Loading map\u2026")),
-        mapboxglOutput("map"))
+        maplibreOutput("map"))
     ),
     nav_panel(
       title = "Plot of Scores",
@@ -911,7 +911,7 @@ ui <- page_sidebar(
           div(id = "map-rpt-overlay", class = "map-loading-overlay",
             div(class = "map-loading-spinner"),
             span("Loading map\u2026")),
-          mapboxglOutput("map_rpt", height = "700px"))
+          maplibreOutput("map_rpt", height = "700px"))
       )
     )
   )
@@ -1006,17 +1006,17 @@ server <- function(input, output, session) {
     step(
       title    = "Go to location",
       text     = "Search for a place name and the map will fly there \u2014 useful for jumping to a specific Program Area, port, or feature.",
-      el       = ".mapboxgl-ctrl-geocoder",
+      el       = ".maplibregl-ctrl-geocoder",
       position = "left")$
     step(
       title    = "Full screen",
       text     = "Expand the map to fill the entire window.",
-      el       = ".mapboxgl-ctrl-fullscreen",
+      el       = ".maplibregl-ctrl-fullscreen",
       position = "left")$
     step(
       title    = "Zoom in / out",
       text     = "Zoom and reset the view. You can also use the mouse wheel, pinch gesture, or double-click.",
-      el       = ".mapboxgl-ctrl-zoom-in",
+      el       = ".maplibregl-ctrl-zoom-in",
       position = "left")$
     step(
       title    = "Plot of Scores tab",
@@ -1135,8 +1135,8 @@ server <- function(input, output, session) {
     cols_r <- get_pal_colors("spectral_r", n_cols)
     rng_r  <- signif(initial_rescale, digits = 3)
 
-    mapboxgl(
-      style      = mapbox_style("dark"),
+    maplibre(
+      style      = carto_style("dark-matter"),
       projection = ifelse(sphere, "globe", "mercator")
     ) |>
       fit_bounds(initial_bbox) |>
@@ -1196,7 +1196,7 @@ server <- function(input, output, session) {
   }
 
   # map ----
-  output$map <- renderMapboxgl({
+  output$map <- renderMaplibre({
     build_initial_map(sphere = input$tgl_sphere)
   })
 
@@ -1285,8 +1285,8 @@ server <- function(input, output, session) {
                 "Raster cell values"          = "r_lyr",
                 "Cells outside Program Areas" = "outside_pra_lyr"))
         }
-        apply_cell_update(mapboxgl_proxy("map"))
-        apply_cell_update(mapboxgl_proxy("map_rpt"))
+        apply_cell_update(maplibre_proxy("map"))
+        apply_cell_update(maplibre_proxy("map_rpt"))
 
         if (verbose) {
           message(glue("update map cell - end"))
@@ -1490,8 +1490,8 @@ server <- function(input, output, session) {
                 "Program Area values"         = "pra_lyr",
                 "Cells outside Program Areas" = "outside_pra_lyr"))
         }
-        apply_pra_update(mapboxgl_proxy("map"))
-        apply_pra_update(mapboxgl_proxy("map_rpt"))
+        apply_pra_update(maplibre_proxy("map"))
+        apply_pra_update(maplibre_proxy("map_rpt"))
 
         if (verbose) {
           message(glue("update map pra - end"))
@@ -2082,7 +2082,7 @@ server <- function(input, output, session) {
   # reuses build_initial_map() from the Map tab so layer/subregion/sphere
   # toggles in the sidebar apply here too; add_msens_draw_control() is
   # chained on top.
-  output$map_rpt <- renderMapboxgl({
+  output$map_rpt <- renderMaplibre({
     build_initial_map(sphere = input$tgl_sphere) |>
       add_msens_draw_control()
   })
@@ -2133,7 +2133,7 @@ server <- function(input, output, session) {
   # rpt_areas_sf() invalidates; clears stale layers first.
   observe({
     sf_data <- rpt_areas_sf()
-    proxy   <- mapboxgl_proxy("map_rpt")
+    proxy   <- maplibre_proxy("map_rpt")
     proxy |>
       clear_layer("rpt_added_lbl") |>
       clear_layer("rpt_added_ln") |>
@@ -2197,7 +2197,7 @@ server <- function(input, output, session) {
     key <- if (!is.null(clicked))
       clicked$properties$programarea_key %||% clicked$properties$planarea_key
     for (mid in c("map", "map_rpt")) {
-      proxy <- mapboxgl_proxy(mid)
+      proxy <- maplibre_proxy(mid)
       proxy |> clear_layer("pra_highlight_ln")
       if (!is.null(key) && nzchar(key)) {
         proxy |> add_line_layer(
@@ -2222,7 +2222,7 @@ server <- function(input, output, session) {
         cell_id  = clicked$cell_id,
         geometry = st_sfc(st_point(c(clicked$lng, clicked$lat)), crs = 4326))
     for (mid in c("map", "map_rpt")) {
-      proxy <- mapboxgl_proxy(mid)
+      proxy <- maplibre_proxy(mid)
       proxy |> clear_layer("cell_highlight")
       if (!is.null(pt)) {
         proxy |> add_circle_layer(

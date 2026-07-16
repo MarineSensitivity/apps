@@ -119,33 +119,38 @@ add_fixed_range_raster <- function(
 # maplibre() |>
 #   add_fixed_range_raster(raster1, "layer1", range = c(1, 100),  colors = viridisLite::viridis(256), raster_opacity = 0.7)
 
-# OBIS occurrence overlay ----
-# optional per-species OBIS occurrence grid, shown as a toggle (default off). The apps/h3-db hexagon
-# layer is the `h3t` maplibre vector-tile protocol (maplibregl.addProtocol), which Mapbox GL — this
-# app's map — does not support, so that exact layer can't render here. Instead we fetch the SAME OBIS
-# occurrences server-aggregated to a grid via the OBIS API (GeoJSON, record count `n` per cell) and
-# add them as a Mapbox-native fill layer. Honors "hexagon of OBIS occurrence data (or centroid pt)"
-# as a grid of occurrence counts.
-OBIS_GRID_PREC <- 3L                                              # geohash precision (3 ~= 150 km cells)
-OBIS_VIRIDIS5  <- c("#440154", "#3b528b", "#21918c", "#5ec962", "#fde725")
+# OBIS occurrence overlay (h3t) ----
+# optional per-species OBIS occurrence hexagons (default off), reusing the apps/h3-db `h3t` layer.
+# Now that this map is MapLibre (aligned with the scores app), the h3t maplibre vector-tile protocol
+# (add_h3t_source → maplibregl.addProtocol) renders here. The tile SQL/URL is the single source of
+# truth in obisindicators::obis_h3t_sql()/obis_h3t_url(); locate the sibling checkout like h3-db does.
+# Guarded: if obisindicators isn't present, has_obis = FALSE and the toggle is hidden, so the app
+# still runs. obis_h3t_sql(aphiaid=) filters to the species' WoRMS-AphiaID subtree.
+H3T_HOST            <- "https://h3t.marinesensitivity.org"
+H3T_TILES_BASE      <- "h3tiles://h3t.marinesensitivity.org/h3t/{z}/{x}/{y}.h3t"
+H3T_RELEASE         <- format(Sys.Date(), "v%Y%m%d")
+H3T_VIRIDIS5        <- c("#440154", "#3b528b", "#21918c", "#5ec962", "#fde725")
+H3T_STATS_TIMEOUT_S <- 12L
 
-# fetch OBIS occurrence grid for a taxon -> sf (cols: n, geometry). NULL on any failure / no records.
-# Prefer the WoRMS AphiaID (taxonid=) when present; fall back to scientific name.
-obis_grid <- function(aphiaid = NULL, scientificname = NULL, precision = OBIS_GRID_PREC) {
-  qp <- if (!is.null(aphiaid) && !is.na(aphiaid)) glue("taxonid={aphiaid}")
-        else if (!is.null(scientificname) && !is.na(scientificname))
-          glue("scientificname={utils::URLencode(scientificname, reserved = TRUE)}")
-        else return(NULL)
-  url <- glue("https://api.obis.org/v3/occurrence/grid/{precision}?{qp}")
+h3t_src <- Sys.glob(c(
+  "/share/github/marinebon/obisindicators/R/h3t.R",   # MST server
+  "../../marinebon/obisindicators/R/h3t.R",           # local sibling checkout
+  "~/Github/marinebon/obisindicators/R/h3t.R"))[1]
+has_obis <- !is.na(h3t_src)
+if (has_obis) {
+  source(file.path(dirname(h3t_src), "taxon.R"))      # .h3t_taxon_tree_cte() for aphiaid filtering
+  source(h3t_src)                                     # obis_h3t_sql() / obis_h3t_url()
+}
+
+# per-species OBIS occurrence stats (from the h3t /stats endpoint) -> color-ramp range
+h3t_stats <- function(sql, res_h3 = 4) {
+  q   <- gsub("\n", "", base64enc::base64encode(charToRaw(sql)))
+  url <- glue("{H3T_HOST}/h3t/stats?q={utils::URLencode(q, reserved = TRUE)}&res_h3={res_h3}")
   tryCatch({
-    resp <- curl::curl_fetch_memory(url, handle = curl::new_handle(timeout = 25L))
-    if (resp$status_code >= 400) return(NULL)
-    txt <- rawToChar(resp$content)
-    if (!nzchar(txt)) return(NULL)
-    g <- sf::read_sf(txt)
-    if (nrow(g) == 0 || !"n" %in% names(g)) return(NULL)
-    g
-  }, error = function(e) NULL)
+    resp <- curl::curl_fetch_memory(url, handle = curl::new_handle(timeout = H3T_STATS_TIMEOUT_S))
+    body <- rawToChar(resp$content)
+    if (nzchar(body)) jsonlite::fromJSON(body) else list()
+  }, error = function(e) list(error = conditionMessage(e)))
 }
 
 # database ----
@@ -305,7 +310,7 @@ ui <- page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     tags$style(HTML("
-      .mapboxgl-popup-content{color:black;}
+      .maplibregl-popup-content{color:black;}
       #ds_layer_container {display: none;}
       #representation_container {display: none;}
       .layer-bar .rep-pill { margin: 0 1px; font-style: italic; }
@@ -354,9 +359,9 @@ ui <- page_sidebar(
       Shiny.addCustomMessageHandler('clickPopup', function(m) {
         var w = HTMLWidgets.find('#' + m.map);
         var map = w && w.getMap ? w.getMap() : null;
-        if (!map || typeof mapboxgl === 'undefined') return;
+        if (!map || typeof maplibregl === 'undefined') return;
         if (window._msPopup) { window._msPopup.remove(); }
-        window._msPopup = new mapboxgl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '260px' })
+        window._msPopup = new maplibregl.Popup({ closeButton: true, closeOnClick: true, maxWidth: '260px' })
           .setLngLat([m.lng, m.lat]).setHTML(m.html).addTo(map);
       });
       $(document).on('shiny:connected', function() {
@@ -391,9 +396,9 @@ ui <- page_sidebar(
       "Sphere",
       T
     ),
-    # OBIS occurrences overlay: per-species grid of OBIS record counts (default off), fetched from
-    # the OBIS API. Applies to any taxon resolvable by AphiaID or scientific name.
-    input_switch(
+    # OBIS occurrences overlay: per-species h3t hexagons of OBIS record counts (default off; shown
+    # only when obisindicators is available, and applies to taxa with a WoRMS AphiaID).
+    if (has_obis) input_switch(
       "tgl_obis",
       "OBIS occurrences",
       F
@@ -453,7 +458,7 @@ ui <- page_sidebar(
   ),
   card(
     style = "position: relative;",
-    mapboxglOutput("map"),
+    maplibreOutput("map"),
     # "Zoom to layer" overlaid at the map's top-left, right of the layer selector. Auto-fit on layer
     # switch is off (so users can compare models at one view); this restores fit-to-extent on demand.
     tags$div(
@@ -682,7 +687,7 @@ server <- function(input, output, session) {
   # * btn_zoom_extent: fit the map to the currently displayed layer's extent on demand ----
   observeEvent(input$btn_zoom_extent, {
     bb <- rx_fit_bbox()
-    if (!is.null(bb)) mapboxgl_proxy("map") |> fit_bounds(bbox = bb, animate = TRUE)
+    if (!is.null(bb)) maplibre_proxy("map") |> fit_bounds(bbox = bb, animate = TRUE)
   })
 
   # * layer_bar ----
@@ -898,11 +903,11 @@ server <- function(input, output, session) {
   })
 
   # * map ----
-  output$map <- renderMapboxgl({
+  output$map <- renderMaplibre({
     # input <- list(tgl_sphere = T)
 
-    mapboxgl(
-      style = mapbox_style("dark"),
+    maplibre(
+      style = carto_style("dark-matter"),
       projection = ifelse(input$tgl_sphere, "globe", "mercator")
     ) |>
       fit_bounds(er_bbox) |>
@@ -1030,7 +1035,7 @@ server <- function(input, output, session) {
       message("observeEvent(input$sel_sp/ds_layer): ", input$sel_sp, " / ", input$ds_layer)
     }
 
-    map_proxy <- mapboxgl_proxy("map")
+    map_proxy <- maplibre_proxy("map")
 
     # clear existing marker when species/layer changes
     map_proxy |> clear_markers()
@@ -1171,13 +1176,13 @@ server <- function(input, output, session) {
     }
   })
 
-  # * OBIS occurrences overlay ----
-  # per-species OBIS occurrence grid (record counts) from the OBIS API, added as a Mapbox-native
-  # GeoJSON fill layer (see the OBIS overlay note at the top — Mapbox can't run the h3t protocol).
-  # Fires on the toggle and on species change: always tear the layer down first, then re-add it when
-  # the toggle is on. Guard against firing before a species is selected.
+  # * OBIS occurrences overlay (h3t) ----
+  # per-species OBIS occurrence hexagons (record counts) from the h3t service, reusing the apps/h3-db
+  # layer (works now the map is MapLibre). Fires on the toggle and species change: tear the layer down
+  # first, then re-add it when on and the taxon carries a WoRMS AphiaID (the h3t store filters by it).
   observeEvent(list(input$tgl_obis, input$sel_sp), ignoreInit = TRUE, {
-    map_proxy <- mapboxgl_proxy("map")
+    if (!has_obis) return()
+    map_proxy <- maplibre_proxy("map")
     map_proxy |> clear_layer(c("obis_occ_fill", "obis_occ"))   # layer first, then its source
     if (!isTRUE(input$tgl_obis)) return()
     req(input$sel_sp)
@@ -1186,32 +1191,37 @@ server <- function(input, output, session) {
     if (nrow(sp_row) != 1) return()
     aphiaid <- if (identical(sp_row$taxon_authority, "worms") && !is.na(sp_row$taxon_id))
                  suppressWarnings(as.integer(sp_row$taxon_id)) else NA_integer_
+    if (is.na(aphiaid)) {
+      showNotification(
+        "OBIS occurrences need a WoRMS AphiaID — not available for this taxon.", type = "warning")
+      return()
+    }
 
-    g <- obis_grid(aphiaid = aphiaid, scientificname = sp_row$scientific_name)
-    if (is.null(g)) {
+    # indicator "n" = number of OBIS occurrence records per hexagon, filtered to this species' subtree
+    sql   <- obis_h3t_sql(indicator = "n", aphiaid = aphiaid, res_max = 7L)
+    stats <- h3t_stats(sql)
+    if (!is.null(stats$error) || (stats$n %||% 0) < 1) {
       showNotification(glue("No OBIS occurrences found for {sp_row$scientific_name}."), type = "message")
       return()
     }
 
     # color ramp over the robust p02–p98 record-count range (fallback to min–max)
-    ns <- g$n[is.finite(g$n)]
-    lo <- as.numeric(stats::quantile(ns, 0.02, names = FALSE))
-    hi <- as.numeric(stats::quantile(ns, 0.98, names = FALSE))
-    if (!is.finite(lo) || !is.finite(hi) || lo >= hi) { lo <- min(ns); hi <- max(ns) }
-    if (lo >= hi) { lo <- 0; hi <- max(hi, 1) }
-    brks <- seq(lo, hi, length.out = length(OBIS_VIRIDIS5))
+    lo <- stats$p02 %||% stats$min %||% 0
+    hi <- stats$p98 %||% stats$max %||% 1
+    if (!is.finite(lo) || !is.finite(hi) || lo >= hi) { lo <- 0; hi <- max(hi, 1, na.rm = TRUE) }
+    brks  <- seq(lo, hi, length.out = length(H3T_VIRIDIS5))
+    tiles <- obis_h3t_url(base_url = H3T_TILES_BASE, sql = sql, release = H3T_RELEASE)
 
     map_proxy |>
-      add_source(id = "obis_occ", data = g) |>
+      add_h3t_source(id = "obis_occ", tiles = tiles) |>
       add_fill_layer(
-        id = "obis_occ_fill", source = "obis_occ",
-        fill_color   = interpolate(column = "n", values = brks, stops = OBIS_VIRIDIS5),
+        id = "obis_occ_fill", source = "obis_occ", source_layer = "obis_occ",
+        fill_color   = interpolate(column = "value", values = brks, stops = H3T_VIRIDIS5),
         fill_opacity = 0.6,
-        tooltip      = get_column("n")) |>
+        tooltip      = get_column("value")) |>
       add_legend(
         glue("OBIS occurrences: {sp_row$scientific_name}"),
-        values = round(c(lo, hi), 0), colors = OBIS_VIRIDIS5,
-        position = "bottom-left")
+        values = round(c(lo, hi), 0), colors = H3T_VIRIDIS5, position = "bottom-left")
   })
 
   # map_click ----
@@ -1252,7 +1262,7 @@ server <- function(input, output, session) {
     if (verbose) message("map_click: cell_id=", cell_id, ", val=", val)
 
     if (is.na(val)) {
-      mapboxgl_proxy("map") |> clear_markers() |>
+      maplibre_proxy("map") |> clear_markers() |>
         add_markers(data = c(lng, lat), marker_id = "click_marker")
       session$sendCustomMessage("clickPopup", list(map = "map", lng = lng, lat = lat,
         html = glue('<div style="padding:6px;color:black;">Cell {cell_id}<br>',
@@ -1296,7 +1306,7 @@ server <- function(input, output, session) {
 
     # drop the pin AND open the popup immediately (single click) — mapgl's marker popup
     # otherwise needs a second click on the marker to open.
-    mapboxgl_proxy("map") |>
+    maplibre_proxy("map") |>
       clear_markers() |>
       add_markers(data = c(click$lng, click$lat), marker_id = "click_marker", color = bg_color)
     session$sendCustomMessage("clickPopup",
