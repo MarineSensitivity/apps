@@ -1803,173 +1803,67 @@ server <- function(input, output, session) {
 
   # * get_spp_tbl ----
   get_spp_tbl <- reactive({
-    if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
-      # ** subregion default ----
-      # FULL falls back to USA (the only superset zone in zone_taxon)
-      sr_key   <- input$sel_subregion %||% "FULL"
-      z_sr_key <- if (sr_key == "FULL") "FULL" else sr_key
-      sr_lbl   <- if (sr_key == "FULL") "Full study area" else
-        names(sr_choices)[sr_choices == sr_key]
-
-      if (verbose) {
-        message(glue(
-          "Getting species table for subregion: {sr_lbl} ({z_sr_key})"))
-      }
-
-      rx$spp_tbl_hdr      <- glue("Species in {sr_lbl}")
-      rx$spp_tbl_filename <- glue("species_{z_sr_key}")
-
-      d_spp <- tbl(con_sdm, "zone_taxon") |>
-        select(-is_mmpa, -is_mbta) |>
-        filter(
-          zone_tbl   == !!tbl_sr,
-          zone_fld   == "subregion_key",
-          zone_value == !!z_sr_key
-        ) |>
-        inner_join(
-          tbl(con_sdm, "taxon") |>
-            filter(is_ok, !is.na(mdl_seq)) |>
-            select(taxon_id, is_mmpa, is_mbta),
-          by = "taxon_id"
-        ) |>
-        collect() |>
-        rename(er_code = rl_code) |>
-        mutate(er_score = er_score / 100)
-    }
+    # Species table computed LIVE via msens, not read from a precomputed table.
+    #
+    # v7 read `zone_taxon`, but v8 never builds one — and this query had been
+    # duplicated inline here against v7 column names (is_ok, mdl_seq, value)
+    # that v8 renamed. Both together meant the tab came up empty with
+    # "Can't select columns that don't exist", and the CSV download could never
+    # produce a file. msens::species_for_zone()/species_for_cells() are
+    # schema-adaptive and unit-tested against BOTH schemas, so the app and the
+    # tests can no longer drift. Measured on v8, the largest zone (subregion
+    # USA, ~349k cells, ~10k species) takes ~5 s, so precomputation isn't needed.
 
     # ** cell ----
     if (input$sel_unit == "cell" && !is.null(rx$clicked_cell)) {
-      # see original: https://github.com/MarineSensitivity/workflows/blob/76d711aed5ea319bde44158efade00a02c1031e4/ingest_aquamaps_to_sdm_duckdb.qmd#L1817-L1954
-
       cell_id <- rx$clicked_cell$cell_id
-
-      if (verbose) {
+      if (verbose)
         message(glue("Getting species table for cell id: {cell_id}"))
-      }
-
-      # cell_id <- 4151839
-      rx$spp_tbl_hdr <- glue("Species for Cell ID: {cell_id}")
+      rx$spp_tbl_hdr      <- glue("Species for Cell ID: {cell_id}")
       rx$spp_tbl_filename <- glue("species_cellid-{cell_id}")
-
-      tbl_taxon <- tbl(con_sdm, "taxon") |>
-        filter(is_ok) |>
-        select(
-          sp_cat,
-          sp_common = common_name,
-          sp_scientific = scientific_name,
-          taxon_id,
-          taxon_authority,
-          er_code = extrisk_code,
-          er_score,
-          is_mmpa,
-          is_mbta,
-          mdl_seq
-        ) |>
-        mutate(er_score = er_score / 100)
-
-      d_spp <- tbl(con_sdm, "model_cell") |>
-        filter(cell_id == !!cell_id) |>
-        inner_join(
-          tbl_taxon,
-          by = join_by(mdl_seq)
-        ) |>
-        inner_join(
-          tbl(con_sdm, "cell") |>
-            select(cell_id, area_km2),
-          by = join_by(cell_id)
-        ) |>
-        group_by(
-          mdl_seq,
-          sp_cat,
-          sp_common,
-          sp_scientific,
-          taxon_id,
-          taxon_authority,
-          er_code,
-          er_score,
-          is_mmpa,
-          is_mbta
-        ) |>
-        summarize(
-          area_km2 = sum(area_km2, na.rm = T),
-          avg_suit = mean(value, na.rm = T) / 100,
-          .groups = "drop"
-        ) |>
-        collect() |>
-        mutate(
-          suit_er = avg_suit * er_score,
-          suit_er_area = avg_suit * er_score * area_km2
-        ) |>
-        group_by(sp_cat) |>
-        mutate(
-          cat_suit_er_area = sum(suit_er_area, na.rm = T)
-        ) |>
-        ungroup() |>
-        mutate(
-          pct_cat = suit_er_area / cat_suit_er_area
-        )
+      return(msens::species_for_cells(
+        con_sdm,
+        data.frame(cell_id = as.integer(cell_id), pct_covered = 100)))
     }
-
-    # ** pa ---
-    # if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
-    #   pa_key <- rx$clicked_pa$properties$planarea_key
-    #   pa_name <- rx$clicked_pa$properties$planarea_name
-    #
-    #   rx$spp_tbl_hdr <- glue("Species for Planning Area: {pa_name}")
-    #   rx$spp_tbl_filename <- glue(
-    #     "species_planarea-{str_replace(pa_name, ' ', '-') |> str_to_lower()}"
-    #   )
-    #
-    #   # debug #  pa_key = "CGA"; pa_name = "Central Gulf of America"
-    #
-    #   # model stats in given zone
-    #   # ℹ In argument: `value == "WAO"`
-    #   # Caused by error:
-    #   #   ! Object `value` not found.
-    #
-    #   d_spp <- tbl(con_sdm, "zone_taxon") |>
-    #     filter(
-    #       zone_fld == "planarea_key",
-    #       zone_value == !!pa_key
-    #     ) |>
-    #     collect()
-    # }
 
     # ** pra ----
     if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
-      pra_key <- rx$clicked_pra$properties$programarea_key
+      pra_key  <- rx$clicked_pra$properties$programarea_key
       pra_name <- rx$clicked_pra$properties$programarea_name
-
-      if (verbose) {
+      if (verbose)
         message(glue("Getting species table for Program Area: {pra_name}"))
-      }
-
-      rx$spp_tbl_hdr <- glue("Species for Program Area: {pra_name}")
+      rx$spp_tbl_hdr      <- glue("Species for Program Area: {pra_name}")
       rx$spp_tbl_filename <- glue(
-        "species_programarea-{str_replace(pra_name, ' ', '-') |> str_to_lower()}"
-      )
-
-      d_spp <- tbl(con_sdm, "zone_taxon") |>
-        select(-is_mmpa, -is_mbta) |>
-        filter(
-          zone_fld == "programarea_key",
-          zone_value == !!pra_key
-        ) |>
-        left_join(
-          tbl(con_sdm, "taxon") |>
-            select(taxon_id, is_mmpa, is_mbta),
-          by = "taxon_id"
-        ) |>
-        collect() |>
-        rename(er_code = rl_code) |>
-        mutate(er_score = er_score / 100)
+        "species_programarea-{str_replace(pra_name, ' ', '-') |> str_to_lower()}")
+      return(msens::species_for_zone(con_sdm, "programarea_key", pra_key))
     }
 
+    # ** subregion default ----
+    # "Full study area" is a UI-only choice with no zone row of its own; USA is
+    # the superset zone. (The old code mapped FULL -> "FULL", which matches
+    # nothing, so the default view returned no species at all.)
+    sr_key   <- input$sel_subregion %||% "FULL"
+    z_sr_key <- if (sr_key == "FULL") "USA" else sr_key
+    sr_lbl   <- if (sr_key == "FULL") "Full study area" else
+      names(sr_choices)[sr_choices == sr_key]
+    if (verbose)
+      message(glue("Getting species table for subregion: {sr_lbl} ({z_sr_key})"))
+    rx$spp_tbl_hdr      <- glue("Species in {sr_lbl}")
+    rx$spp_tbl_filename <- glue("species_{z_sr_key}")
+    msens::species_for_zone(con_sdm, "subregion_key", z_sr_key)
+  })
+
+  # rename columns for display: kept as its own reactive so the raw msens
+  # output (used by the download + composition plot) stays unformatted.
+  fmt_spp_tbl <- reactive({
+    d_spp <- get_spp_tbl()
     # rename columns
     d_spp |>
       mutate(
+        # from /scores_v8/ this must point at the v8 species app; the old
+        # "../species/?mdl_seq=" resolved to the *v7* app and used the v7 key.
         model_url = glue(
-          "../species/?mdl_seq={mdl_seq}"
+          "../species_v8/?mdl_key={mdl_key}"
         ),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(
@@ -2002,7 +1896,7 @@ server <- function(input, output, session) {
         er_score,
         is_mmpa,
         is_mbta,
-        model_id = mdl_seq,
+        model_id = mdl_key,
         model_url,
         area_km2,
         avg_suit,
@@ -2014,7 +1908,7 @@ server <- function(input, output, session) {
   # * spp_tbl ----
   output$spp_tbl <- renderDT(
     {
-      d <- get_spp_tbl()
+      d <- fmt_spp_tbl()
 
       # store for download
       rx$spp_tbl <- d
@@ -2098,7 +1992,7 @@ server <- function(input, output, session) {
     # TODO:
     # - [ ] birds
     # - [ ] ranks_with_variety
-    d <- get_spp_tbl() |>
+    d <- fmt_spp_tbl() |>
       filter(taxon_authority == "worms") |>
       inner_join(
         d_taxonomy |>
