@@ -8,6 +8,24 @@
 
 var COLS = ["timestamp","app","app_version","client_id","session_id","event","params","page","referrer","user_agent"];
 
+// Health check. Without this, opening the /exec URL in a browser returns
+// "Script function not found: doGet", which looks like a broken or unauthorized
+// deployment and sends you hunting through deployment settings. It is not — the
+// client only ever POSTs. A GET now answers {ok:true,...} so the endpoint can be
+// verified at a glance. Reports the row count so you can confirm writes land.
+function doGet(e) {
+  try {
+    var sh = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: true, endpoint: "msens-usage-log", rows: sh.getLastRow() - 1 }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService
+      .createTextOutput(JSON.stringify({ ok: false, error: String(err) }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
 function doPost(e) {
   try {
     var sh   = SpreadsheetApp.getActiveSpreadsheet().getSheets()[0];
