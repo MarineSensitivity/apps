@@ -599,6 +599,11 @@ dark <- bs_theme()
 ui <- page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
+    # usage tracking: GA4 (aggregate) + a batched beacon to the usage-log Sheet
+    # (detail). Both legs are driven from the browser, so no reactive ever
+    # performs network I/O — see msens::ga_js(). The Sheet leg is a silent no-op
+    # unless MSENS_LOG_URL is set, so local dev writes nothing.
+    msens::ga_head("scores", app_version = ver),
     tags$style(HTML("
       .maplibregl-popup-content{color:black;}
       .bslib-full-screen .girafe_container_std {
@@ -922,6 +927,47 @@ server <- function(input, output, session) {
   # observe(session$setCurrentTheme(
   #   if (isTRUE(input$tgl_dark)) dark else light
   # ))
+
+  # usage tracking ----
+  # msens::ms_track() only pushes a websocket message the session already has
+  # open — it makes no HTTP request, so instrumenting a hot control (a layer
+  # switch, a species pick) can't add latency to the reactive that follows.
+  # `ignoreInit = TRUE` everywhere so app startup doesn't emit a burst of
+  # synthetic "selections" the user never made.
+  trk <- function(event, ...) msens::ms_track(session, event, ...)
+
+  # which tab users actually work in (the navset already carries an id)
+  observeEvent(input$main_tabs, trk("select_tab", tab = input$main_tabs),
+               ignoreInit = TRUE)
+
+  # sidebar controls — `sel_lyr` is the layer question; the rest give the
+  # context a layer choice was made in.
+  observeEvent(input$sel_subregion,
+               trk("select_subregion", subregion = input$sel_subregion),
+               ignoreInit = TRUE)
+  observeEvent(input$sel_unit,
+               trk("select_unit", unit = input$sel_unit),
+               ignoreInit = TRUE)
+  observeEvent(input$sel_lyr,
+               trk("select_layer",
+                   layer     = input$sel_lyr,
+                   subregion = input$sel_subregion,
+                   unit      = input$sel_unit),
+               ignoreInit = TRUE)
+  observeEvent(input$sel_palette,
+               trk("select_palette", palette = input$sel_palette),
+               ignoreInit = TRUE)
+
+  # engagement / help
+  observeEvent(input$btn_about, trk("open_about"),        ignoreInit = TRUE)
+  observeEvent(input$btn_tour,  trk("start_tour"),        ignoreInit = TRUE)
+  observeEvent(input$btn_tbl_info, trk("open_table_info"), ignoreInit = TRUE)
+
+  # report area building (the funnel into "Generate report")
+  observeEvent(input$btn_add_drawn,
+               trk("report_add_area", area_type = "drawn"), ignoreInit = TRUE)
+  observeEvent(input$btn_add_pra,
+               trk("report_add_area", area_type = "program_area"), ignoreInit = TRUE)
 
   # show_welcome helper ----
   show_welcome <- function() {
@@ -2034,6 +2080,16 @@ server <- function(input, output, session) {
     content = function(file) {
       req(rx$spp_tbl_hdr, rx$spp_tbl)
       write_csv(rx$spp_tbl, file)
+      # what was actually downloaded, and how much of it — tracked here rather
+      # than on the button so a failed/aborted render isn't counted as a
+      # download. The Sheet leg keeps the full (unbounded) area label that GA4
+      # would bucket away.
+      trk("download_species_csv",
+          n_rows    = nrow(rx$spp_tbl),
+          area      = rx$spp_tbl_hdr,
+          subregion = input$sel_subregion,
+          unit      = input$sel_unit,
+          layer     = input$sel_lyr)
     }
   )
 
@@ -2328,9 +2384,11 @@ server <- function(input, output, session) {
   observeEvent(input$btn_rpt_submit, {
     areas <- rx$rpt_areas
     if (length(areas) == 0) {
+      trk("report_submit", status = "no_areas")
       showNotification("Add at least one area first.", type = "error")
       return()
     }
+    t_rpt <- Sys.time()
 
     # unique ID for this report request — associates the pre-opened
     # placeholder tab (JS side) with the response when it arrives
@@ -2345,6 +2403,23 @@ server <- function(input, output, session) {
     endpoint <- Sys.getenv(
       "MSENS_REPORT_URL",
       unset = "https://api.marinesensitivity.org/report")
+
+    # the report is the highest-value "download" in the toolkit, and the file
+    # itself is fetched from file.marinesensitivity.org (a different host, with
+    # no JS) — so this is the ONLY place it can be counted. Logged at submit,
+    # then again on resolve/reject with the outcome + duration.
+    # rx$rpt_areas is an UNNAMED list of list(label, kind, value) — pull the
+    # fields out explicitly rather than via names().
+    area_lbl  <- vapply(areas, function(a) a$label %||% "", character(1))
+    area_kind <- vapply(areas, function(a) a$kind  %||% "", character(1))
+    trk("report_submit",
+        status   = "submitted",
+        rpt_ver  = input$rpt_ver,
+        format   = input$rpt_format,
+        n_areas  = length(areas),
+        area_kinds = paste(sort(unique(area_kind)), collapse = ","),
+        areas    = paste(area_lbl, collapse = "; "),
+        title    = input$rpt_title)
 
     # sticky indeterminate progress notification with a bootstrap spinner;
     # removed in both the resolve and reject handlers below.
@@ -2378,7 +2453,10 @@ server <- function(input, output, session) {
       promises::then(
         onFulfilled = function(resp) {
           removeNotification(notif_id)
+          rpt_ms <- round(as.numeric(difftime(Sys.time(), t_rpt, units = "secs")) * 1000)
           if (is.null(resp$url)) {
+            trk("report_result", status = "no_url", ms = rpt_ms,
+                format = input$rpt_format, error = resp$error %||% "")
             showNotification(
               paste0(
                 "Report finished but returned no URL",
@@ -2386,6 +2464,10 @@ server <- function(input, output, session) {
               type = "error", duration = 10)
             return()
           }
+          # the delivered artifact: report_url is what the user ends up with
+          trk("report_result", status = "ok", ms = rpt_ms,
+              rpt_ver = input$rpt_ver, format = input$rpt_format,
+              n_areas = length(areas), report_url = resp$url)
           session$sendCustomMessage("openUrl", list(url = resp$url, reqId = req_id))
           showNotification(
             "Report ready — downloading.",
@@ -2393,6 +2475,9 @@ server <- function(input, output, session) {
         },
         onRejected = function(e) {
           removeNotification(notif_id)
+          trk("report_result", status = "error",
+              ms = round(as.numeric(difftime(Sys.time(), t_rpt, units = "secs")) * 1000),
+              format = input$rpt_format, error = conditionMessage(e))
           showNotification(
             paste("Report request failed:", conditionMessage(e)),
             type = "error", duration = 10)

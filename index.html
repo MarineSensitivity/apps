@@ -4,6 +4,32 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Marine Sensitivity Tool</title>
+
+  <!-- Google tag (gtag.js) — GA4 property 413466008 -->
+  <!--
+    ONE measurement ID across every MarineSensitivity product: gtag scopes the
+    `_ga` cookie to the registrable domain, so a single stream spans
+    marinesensitivity.org and app.marinesensitivity.org. Products are separated
+    in reporting by `content_group`.
+  -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-9HW6L751XG"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){ dataLayer.push(arguments); }
+    gtag('js', new Date());
+    gtag('config', 'G-9HW6L751XG', { content_group: 'apps-landing' });
+
+    // which card sends people into which app — the only signal this page carries
+    document.addEventListener('click', function (e) {
+      var a = e.target.closest && e.target.closest('a.card');
+      if (!a) return;
+      gtag('event', 'select_app', {
+        content_group: 'apps-landing',
+        app_selected: (a.getAttribute('href') || '').replace(/\//g, '')
+      });
+    }, true);
+  </script>
+
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -114,7 +140,7 @@
 
   <div class="cards">
 
-    <a class="card" href="mapgl/">
+    <a class="card" href="/scores_v8/">
       <span class="card-icon">&#x1f5fa;&#xfe0f;</span>
       <h2>Composite Scores</h2>
       <p>
@@ -122,17 +148,17 @@
         Visualize extinction risk-weighted species presence with flower plots
         and interactive maps.
       </p>
-      <span class="tag">mapgl &rarr;</span>
+      <span class="tag">scores &rarr;</span>
     </a>
 
-    <a class="card" href="mapsp/">
+    <a class="card" href="/species_v8/">
       <span class="card-icon">&#x1f420;</span>
       <h2>Species Distributions</h2>
       <p>
         View individual species distribution models, compare data sources,
         and examine regulatory status including ESA, IUCN, MMPA and MBTA listings.
       </p>
-      <span class="tag">mapsp &rarr;</span>
+      <span class="tag">species &rarr;</span>
     </a>
 
   </div>
