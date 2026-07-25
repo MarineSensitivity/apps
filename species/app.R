@@ -540,7 +540,14 @@ server <- function(input, output, session) {
   # transiently with an unresolvable value, then again with the SAME species.
   # Logging those would inflate species counts with selections the user never
   # made, so drop unresolved values and repeats of the last logged taxon.
-  last_sp <- reactiveVal(NULL)
+  #
+  # SEEDED WITH THE DEFAULT: the app opens on sel_sp_default, and that arrives
+  # as a normal input change (ignoreInit only skips observer creation, when the
+  # input is still NULL). Without seeding, every session would log a selection
+  # of the default species that no user made — quietly making it the most
+  # "viewed" taxon in the data. A deep-linked species differs from the default,
+  # so it still logs.
+  last_sp <- reactiveVal(as.character(sel_sp_default[1]))
   observeEvent(input$sel_sp, {
     sp <- d_spp |> filter(mdl_key == input$sel_sp)
     if (nrow(sp) != 1) return()                              # mid-swap, not a selection
