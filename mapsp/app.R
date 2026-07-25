@@ -245,6 +245,15 @@ mdl_seq_lookup <- d_spp |>
 ui <- page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
+    # usage tracking: GA4 (aggregate) + a batched beacon to the usage-log Sheet
+    # (detail). Both legs are driven from the browser, so no reactive ever
+    # performs network I/O — see msens::ga_js(). The Sheet leg is a silent no-op
+    # unless MSENS_LOG_URL is set, so local dev writes nothing.
+    #
+    # content_group is the PRODUCT ('species'), shared with the v8 app, so the
+    # two generations aggregate together; app_version (`ver`) is what separates
+    # v7 from v8 in reporting.
+    msens::ga_head("species", app_version = ver),
     tags$style(HTML("
       .mapboxgl-popup-content{color:black;}
       #ds_layer_container {display: none;}
@@ -299,6 +308,44 @@ ui <- page_sidebar(
       });
       Shiny.addCustomMessageHandler('saveSplashPref', function(val) {
         localStorage.setItem('msens_mapsp_show_splash', val);
+      });
+
+      // ---- species search terms (incl. the ones that find NOTHING) ----------
+      // The server only ever sees a *completed* selection, so a search that
+      // returned no match — arguably the more actionable signal — is invisible
+      // to it. Hook selectize's `type` event to capture the query itself,
+      // debounced to the settled string (otherwise every keystroke of
+      // 'Dermochelys' would be its own event).
+      //
+      // A generic $(document).on('change','select') handler (as used in the
+      // CalCOFI app) does NOT work here: selectize hides the underlying <select>
+      // and its .val() is the model id, not anything human-readable.
+      //
+      // Only the query is logged, never a result count: with server=TRUE
+      // selectize cannot distinguish a hit from a miss (a zero-match query
+      // leaves the loaded options in place; a matching one makes the server
+      // replace them — both end up with currentResults.total == options.length).
+      // Recover it at analysis time by joining the query against the taxon list,
+      // or by treating a search with no following select_species as a miss.
+      $(document).on('shiny:connected', function() {
+        var attach = function(tries) {
+          var el = document.getElementById('sel_sp');
+          if (!el || !el.selectize) {
+            if (tries > 0) setTimeout(function(){ attach(tries - 1); }, 500);
+            return;
+          }
+          var st = el.selectize, timer = null, last = '';
+          st.on('type', function(str) {
+            clearTimeout(timer);
+            timer = setTimeout(function() {
+              str = (str || '').trim();
+              if (str.length < 3 || str === last) return;   // ignore prefixes/repeats
+              last = str;
+              if (window.msTrack) window.msTrack('search_species', { query: str });
+            }, 900);
+          });
+        };
+        attach(20);   // selectize is created async with server=TRUE
       });
     "))
   ),
@@ -363,6 +410,57 @@ ui <- page_sidebar(
 
 # server ----
 server <- function(input, output, session) {
+  # usage tracking ----
+  # msens::ms_track() only pushes a websocket message the session already has
+  # open — no HTTP request — so instrumenting the species picker adds no latency
+  # to the map render that follows. `ignoreInit = TRUE` so the default species
+  # and default toggles at startup aren't logged as user selections.
+  trk <- function(event, ...) msens::ms_track(session, event, ...)
+
+  # WHICH SPECIES — the headline signal. input$sel_sp is a v7 mdl_seq, so
+  # resolve it against d_spp here: the browser only has an opaque id, and the
+  # names are exactly what makes the usage log readable. High cardinality
+  # (~16k taxa) is why this detail belongs in the Sheet leg — GA4 buckets
+  # dimensions this wide into "(other)" past its daily cardinality limit.
+  #
+  # De-duplicated: a ?mdl_seq= deep link (and the layer-choice refresh) calls
+  # updateSelectizeInput, which re-fires this observer — transiently with an
+  # unresolvable value, then again with the SAME species. Logging those would
+  # inflate species counts with selections the user never made.
+  #
+  # SEEDED WITH THE DEFAULT: the app opens on sel_sp_default, and that arrives
+  # as a normal input change (ignoreInit only skips observer creation, when the
+  # input is still NULL). Without seeding, every session would log a selection
+  # of the default species that no user made — quietly making it the most
+  # "viewed" taxon in the data. A deep-linked species differs from the default,
+  # so it still logs.
+  last_sp <- reactiveVal(as.character(sel_sp_default[1]))
+  observeEvent(input$sel_sp, {
+    sp <- d_spp |> filter(mdl_seq == input$sel_sp)
+    if (nrow(sp) != 1) return()                        # mid-swap, not a selection
+    if (identical(last_sp(), input$sel_sp)) return()   # same taxon re-emitted
+    last_sp(input$sel_sp)
+    trk("select_species",
+        mdl_seq         = sp$mdl_seq[1],
+        scientific_name = sp$scientific_name[1],
+        common_name     = sp$common_name[1],
+        sp_cat          = sp$sp_cat[1],
+        taxon_id        = sp$taxon_id[1],
+        worms_id        = sp$worms_id[1],
+        n_datasets      = sp$n_ds[1],
+        redlist_code    = sp$redlist_code[1])
+  }, ignoreInit = TRUE)
+
+  # which surface is being looked at: the merged model vs a specific raw input
+  observeEvent(input$ds_layer,
+               trk("select_layer", layer = input$ds_layer,
+                   mdl_seq = if (is.null(input$sel_sp)) "" else input$sel_sp),
+               ignoreInit = TRUE)
+  observeEvent(input$sel_mask, trk("select_outlines", outlines = input$sel_mask),
+               ignoreInit = TRUE)
+  observeEvent(input$btn_about, trk("open_about"), ignoreInit = TRUE)
+  observeEvent(input$btn_tour,  trk("start_tour"), ignoreInit = TRUE)
+
   # show_welcome helper ----
   show_welcome <- function() {
     showModal(modalDialog(
