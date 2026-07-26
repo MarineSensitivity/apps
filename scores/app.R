@@ -1821,20 +1821,21 @@ server <- function(input, output, session) {
         message(glue("Getting species table for cell id: {cell_id}"))
       rx$spp_tbl_hdr      <- glue("Species for Cell ID: {cell_id}")
       rx$spp_tbl_filename <- glue("species_cellid-{cell_id}")
-      # A per-CELL list has no precomputed equivalent, so it must aggregate
-      # `model_cell` live. That works locally, but on the server `model_cell` is
-      # an S3 view partitioned by mdl_id (per-model point reads for tiles), so a
-      # cell-wide scan errors out. Degrade with an explanation instead of a red
-      # "An error has occurred" — zone tables above are unaffected.
+      # Served by the CELL-oriented `cell_model` surface: the same rows as
+      # model_cell but partitioned by a 2.5-degree spatial tile and kept as LOCAL
+      # Parquet on the server. msens::species_for_cells() picks it up
+      # automatically and prunes to the relevant tiles. model_cell alone could
+      # not answer this at all — it is partitioned by mdl_id for per-model tile
+      # reads, so a per-cell question meant scanning ~580M rows over HTTPS.
+      # tryCatch stays as a guard: a missing cell_model should explain itself
+      # rather than surface a bare "An error has occurred".
       return(tryCatch(
         msens::species_for_cells(
           con_sdm,
           data.frame(cell_id = as.integer(cell_id), pct_covered = 100)),
         error = function(e) {
           showNotification(
-            paste0("Per-cell species lists aren't available on this server ",
-                   "(the served model_cell is organized by model, not by cell). ",
-                   "Use Program areas or a study area instead."),
+            paste("Couldn't load species for this cell:", conditionMessage(e)),
             type = "warning", duration = 12)
           rx$spp_tbl_hdr <- glue("Species for Cell ID: {cell_id} — unavailable")
           NULL
