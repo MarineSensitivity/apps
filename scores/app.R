@@ -1821,9 +1821,24 @@ server <- function(input, output, session) {
         message(glue("Getting species table for cell id: {cell_id}"))
       rx$spp_tbl_hdr      <- glue("Species for Cell ID: {cell_id}")
       rx$spp_tbl_filename <- glue("species_cellid-{cell_id}")
-      return(msens::species_for_cells(
-        con_sdm,
-        data.frame(cell_id = as.integer(cell_id), pct_covered = 100)))
+      # A per-CELL list has no precomputed equivalent, so it must aggregate
+      # `model_cell` live. That works locally, but on the server `model_cell` is
+      # an S3 view partitioned by mdl_id (per-model point reads for tiles), so a
+      # cell-wide scan errors out. Degrade with an explanation instead of a red
+      # "An error has occurred" — zone tables above are unaffected.
+      return(tryCatch(
+        msens::species_for_cells(
+          con_sdm,
+          data.frame(cell_id = as.integer(cell_id), pct_covered = 100)),
+        error = function(e) {
+          showNotification(
+            paste0("Per-cell species lists aren't available on this server ",
+                   "(the served model_cell is organized by model, not by cell). ",
+                   "Use Program areas or a study area instead."),
+            type = "warning", duration = 12)
+          rx$spp_tbl_hdr <- glue("Species for Cell ID: {cell_id} — unavailable")
+          NULL
+        }))
     }
 
     # ** pra ----
