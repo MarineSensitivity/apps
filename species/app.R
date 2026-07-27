@@ -767,11 +767,16 @@ server <- function(input, output, session) {
       # how people arrive: a shared/deep link naming a specific model. Tracked
       # with its resolution outcome, so dead links (a mdl_key retired by a
       # version bump) show up as a countable `not_found` rather than silently.
+      # `resolution`, NOT `status`: status is a RESERVED name that ms_event()
+      # hoists into its own Sheet column, which is meant for ok/error health.
+      # Putting "input_model" there mixes a resolution KIND in with the
+      # ok/error values ms_track_query() writes, spoiling that column for
+      # filtering and charting.
       trk("deeplink_mdl_key",
-          mdl_key = url_mdl_key,
-          status  = if (nrow(lookup_row) > 0) "input_model"
-                    else if (url_mdl_key %in% all_keys) "merged_model"
-                    else "not_found")
+          mdl_key    = url_mdl_key,
+          resolution = if (nrow(lookup_row) > 0) "input_model"
+                       else if (url_mdl_key %in% all_keys) "merged_model"
+                       else "not_found")
 
       if (nrow(lookup_row) > 0) {
         # found: select the species (merged model) and store layer to apply later
