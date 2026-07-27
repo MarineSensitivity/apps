@@ -59,6 +59,24 @@ verbose <- interactive()
 
 # version ----
 ver <- "v8"
+
+# APP_VERSION — the deployed commit, stamped on every logged event so a Sheet
+# row ties back to the exact code that produced it (falls back to `ver`).
+#
+# `-c safe.directory=*` is required, not optional: shiny-server runs the app as
+# `shiny` while the deployed clone is owned by the user who pulled it, and git
+# refuses to read a repo it considers "dubious ownership" — which would silently
+# drop every logged app_version to the fallback.
+APP_VERSION <- local({
+  sha <- tryCatch(
+    suppressWarnings(system2(
+      "git", c("-c", "safe.directory=*", "-C", shQuote(here()),
+               "rev-parse", "--short", "HEAD"),
+      stdout = TRUE, stderr = FALSE))[1],
+    error = function(e) NA_character_)
+  if (!is.null(sha) && !is.na(sha) && nzchar(sha)) sha else ver
+})
+
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -596,14 +614,21 @@ d_taxonomy <- read_csv(taxonomy_csv, guess_max = Inf)
 light <- bs_theme()
 # dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
 dark <- bs_theme()
-ui <- page_sidebar(
+# ui is a FUNCTION of the request, not a static object, for one reason: the
+# client IP. shiny-server does not proxy the websocket upgrade — it opens a
+# fresh localhost connection to the R worker — so the server session sees
+# REMOTE_ADDR 127.0.0.1 and no X-Forwarded-For (Caddy sets it correctly; it is
+# lost at the shiny-server hop). This page request is the only one that still
+# carries the real address, so it is captured here and baked into the snippet.
+ui <- function(req) page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     # usage tracking: GA4 (aggregate) + a batched beacon to the usage-log Sheet
     # (detail). Both legs are driven from the browser, so no reactive ever
     # performs network I/O — see msens::ga_js(). The Sheet leg is a silent no-op
     # unless MSENS_LOG_URL is set, so local dev writes nothing.
-    msens::ga_head("scores", app_version = ver),
+    msens::ga_head("scores", app_version = APP_VERSION,
+                   ip = msens::ms_client_ip(req)),
     tags$style(HTML("
       .maplibregl-popup-content{color:black;}
       .bslib-full-screen .girafe_container_std {
@@ -934,6 +959,11 @@ server <- function(input, output, session) {
   # switch, a species pick) can't add latency to the reactive that follows.
   # `ignoreInit = TRUE` everywhere so app startup doesn't emit a burst of
   # synthetic "selections" the user never made.
+  # push the session token (and a fallback IP) to the browser before any event,
+  # so no logged row is missing them. The IP is only a fallback: the page
+  # request already supplied the real one — see msens::ms_track_session().
+  msens::ms_track_session(session)
+
   trk <- function(event, ...) msens::ms_track(session, event, ...)
 
   # which tab users actually work in (the navset already carries an id)
@@ -2365,6 +2395,9 @@ server <- function(input, output, session) {
           removeNotification(notif_id)
           rpt_ms <- round(as.numeric(difftime(Sys.time(), t_rpt, units = "secs")) * 1000)
           if (is.null(resp$url)) {
+            # ms / status / error are RESERVED names: ms_event() hoists them
+            # into their own Sheet columns, so they stay numeric and filterable
+            # instead of being buried in the params JSON.
             trk("report_result", status = "no_url", ms = rpt_ms,
                 format = input$rpt_format, error = resp$error %||% "")
             showNotification(

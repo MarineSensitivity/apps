@@ -6,7 +6,7 @@
 // The client (msens::ga_js) posts {rows:[{...}, ...]} as text/plain so the
 // request stays CORS-simple (this endpoint does not answer OPTIONS).
 
-var COLS = ["timestamp","app","app_version","client_id","session_id","event","params","page","referrer","user_agent"];
+var COLS = ["timestamp","ip","session","event","params","n_rows","ms","status","error","app_version","app","client_id","session_id","page","referrer","user_agent"];
 
 // Health check. Without this, opening the /exec URL in a browser returns
 // "Script function not found: doGet", which looks like a broken or unauthorized
