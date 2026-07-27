@@ -35,6 +35,24 @@ verbose <- T
 
 # version ----
 ver <- "v7"
+
+# APP_VERSION — the deployed commit, stamped on every logged event so a Sheet
+# row ties back to the exact code that produced it (falls back to `ver`).
+#
+# `-c safe.directory=*` is required, not optional: shiny-server runs the app as
+# `shiny` while the deployed clone is owned by the user who pulled it, and git
+# refuses to read a repo it considers "dubious ownership" — which would silently
+# drop every logged app_version to the fallback.
+APP_VERSION <- local({
+  sha <- tryCatch(
+    suppressWarnings(system2(
+      "git", c("-c", "safe.directory=*", "-C", shQuote(here()),
+               "rev-parse", "--short", "HEAD"),
+      stdout = TRUE, stderr = FALSE))[1],
+    error = function(e) NA_character_)
+  if (!is.null(sha) && !is.na(sha) && nzchar(sha)) sha else ver
+})
+
 is_server <- Sys.info()[["sysname"]] == "Linux"
 dir_private <- ifelse(
   is_server,
@@ -242,7 +260,13 @@ mdl_seq_lookup <- d_spp |>
       mutate(ds_layer = "mdl_seq", input_mdl_seq = merged_mdl_seq) )
 
 # ui ----
-ui <- page_sidebar(
+# ui is a FUNCTION of the request, not a static object, for one reason: the
+# client IP. shiny-server does not proxy the websocket upgrade — it opens a
+# fresh localhost connection to the R worker — so the server session sees
+# REMOTE_ADDR 127.0.0.1 and no X-Forwarded-For (Caddy sets it correctly; it is
+# lost at the shiny-server hop). This page request is the only one that still
+# carries the real address, so it is captured here and baked into the snippet.
+ui <- function(req) page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     # usage tracking: GA4 (aggregate) + a batched beacon to the usage-log Sheet
@@ -253,7 +277,8 @@ ui <- page_sidebar(
     # content_group is the PRODUCT ('species'), shared with the v8 app, so the
     # two generations aggregate together; app_version (`ver`) is what separates
     # v7 from v8 in reporting.
-    msens::ga_head("species", app_version = ver),
+    msens::ga_head("species", app_version = APP_VERSION,
+                   ip = msens::ms_client_ip(req)),
     tags$style(HTML("
       .mapboxgl-popup-content{color:black;}
       #ds_layer_container {display: none;}
@@ -415,6 +440,11 @@ server <- function(input, output, session) {
   # open — no HTTP request — so instrumenting the species picker adds no latency
   # to the map render that follows. `ignoreInit = TRUE` so the default species
   # and default toggles at startup aren't logged as user selections.
+  # push the session token (and a fallback IP) to the browser before any event,
+  # so no logged row is missing them. The IP is only a fallback: the page
+  # request already supplied the real one — see msens::ms_track_session().
+  msens::ms_track_session(session)
+
   trk <- function(event, ...) msens::ms_track(session, event, ...)
 
   # WHICH SPECIES — the headline signal. input$sel_sp is a v7 mdl_seq, so
