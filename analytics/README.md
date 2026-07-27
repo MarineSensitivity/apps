@@ -57,6 +57,43 @@ Two non-obvious details, both load-bearing:
 
 ## Events
 
+### What each column is for
+
+`ip` is the **client** address, captured from the page request (see below).
+`session` is the Shiny session token, so rows can be grouped into one visit even
+across tabs. `n_rows`, `ms`, `status` and `error` are **reserved parameter
+names**: `ms_event()` hoists them out of `params` into their own columns, which
+keeps `n_rows`/`ms` numeric and chartable rather than buried in JSON. Anything
+else you pass lands in `params`. `app_version` is the deployed **git commit**, so
+a row ties back to the exact code that produced it.
+
+### Why the IP is captured in the UI, not the server
+
+**shiny-server does not proxy the websocket upgrade** — it opens a fresh
+localhost connection to the R worker. So by the time your `server` function runs,
+`session$request` has no `X-Forwarded-For` and `REMOTE_ADDR` is `127.0.0.1`. This
+was verified on the CalCOFI server with a throwaway app that dumped both hops:
+
+| request | X-Forwarded-For | REMOTE_ADDR | HTTP_HOST |
+|---|---|---|---|
+| page GET (what `ui` sees) | `194.116.23.209` ✅ | 127.0.0.1 | app.calcofi.io |
+| websocket handshake (what `session$request` sees) | *gone* | 127.0.0.1 | 127.0.0.1:37159 |
+
+Caddy sets the header correctly and it arrives intact; shiny-server loses it at
+the next hop. **No proxy directive can fix this** — not `header_up`, not
+`trusted_proxies`, not a cookie. The address has to be read where it still
+exists, which is why each app's `ui` is a `function(req)`:
+
+```r
+ui <- function(req) page_sidebar(
+  tags$head(msens::ga_head("scores", app_version = APP_VERSION,
+                           ip = msens::ms_client_ip(req))), ...)
+```
+
+`ms_track_session()` also reports an IP, but only as a **fallback** — if it
+overrode the page value, the websocket's `127.0.0.1` would clobber the good
+address moments after the page set it.
+
 **scores** — `select_tab`, `select_subregion`, `select_unit`, `select_layer`,
 `select_palette`, `open_about`, `start_tour`, `open_table_info`, `report_add_area`,
 `download_species_csv` (with `n_rows`, `area`, and the layer context),
@@ -92,8 +129,13 @@ Recover it at analysis time instead, more reliably, either way:
 1. **Create a Google Sheet.** Make the first row exactly `msens::ms_log_header()`:
 
    ```
-   timestamp | app | app_version | client_id | session_id | event | params | page | referrer | user_agent
+   timestamp | ip | session | event | params | n_rows | ms | status | error | app_version | app | client_id | session_id | page | referrer | user_agent
    ```
+
+   > **Changed 2026-07-27 (10 → 16 columns).** If your Sheet still has the old
+   > header, replace that first row — new rows are written by column *position*,
+   > so a stale header mislabels them. Existing rows keep their old alignment;
+   > archive them to another tab if you want one clean table.
 
 2. **Add the Apps Script.** Extensions → Apps Script, paste [`Code.gs`](Code.gs), then
    Deploy → New deployment → type **Web app**, execute as **Me**, who has access
