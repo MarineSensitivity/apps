@@ -905,8 +905,10 @@ ui <- function(req) page_sidebar(
           selectInput(
             "rpt_ver",
             "Data version",
-            choices  = c("v7", "v6", "v5", "v4c", "v4b", "v3"),
-            selected = "v7"),
+            # v8 was missing entirely — in the v8 app — so a report drawn here
+            # could only ever be generated against v7 data.
+            choices  = c("v8", "v7", "v6", "v5", "v4c", "v4b", "v3"),
+            selected = "v8"),
           radioButtons(
             "rpt_format",
             "Output format",
