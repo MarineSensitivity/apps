@@ -907,7 +907,9 @@ ui <- function(req) page_sidebar(
           selectInput(
             "rpt_ver",
             "Data version",
-            choices  = c("v7", "v6", "v5", "v4c", "v4b", "v3"),
+            # v8 is offered here too (the API serves every version), but this is
+            # the v7 app so v7 stays the default.
+            choices  = c("v8", "v7", "v6", "v5", "v4c", "v4b", "v3"),
             selected = "v7"),
           radioButtons(
             "rpt_format",
