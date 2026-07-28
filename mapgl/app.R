@@ -2176,16 +2176,16 @@ server <- function(input, output, session) {
   })
 
   # * rpt_drawn_sf: most-recently-drawn polygon on map_rpt ----
-  # `input$map_rpt_drawn_features` is a GeoJSON string (see mapgl JS:
-  # updateDrawnFeatures — Shiny.setInputValue(..., JSON.stringify(fc))),
-  # so parse it directly rather than round-tripping through the proxy.
+  # mapgl's draw control pushes its FeatureCollection to
+  # `input$map_rpt_drawn_features`. The SHAPE of that value depends on the
+  # mapgl version — older builds stringified it, current builds send the
+  # object (Shiny then delivers a list) — so parsing is msens::drawn_features_sf(),
+  # which handles both and is unit-tested against both (test-drawn-features.R).
+  # This app previously required `is.character()` and so silently ignored every
+  # polygon drawn under the newer mapgl.
   rpt_drawn_sf <- reactive({
-    fc_json <- input$map_rpt_drawn_features
-    req(fc_json, is.character(fc_json), nzchar(fc_json))
-    sf_feats <- tryCatch(
-      sf::read_sf(fc_json, quiet = TRUE),
-      error = function(e) NULL)
-    req(sf_feats, nrow(sf_feats) > 0)
+    sf_feats <- msens::drawn_features_sf(input$map_rpt_drawn_features)
+    req(sf_feats)
     sf_feats[nrow(sf_feats), ]
   })
 
