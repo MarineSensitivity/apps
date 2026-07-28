@@ -67,6 +67,7 @@ if (is.na(h3t_src))
   stop("could not locate obisindicators/R/h3t.R — clone marinebon/obisindicators alongside this repo")
 source(file.path(dirname(h3t_src), "taxon.R"))
 source(h3t_src)
+source(file.path(dirname(h3t_src), "eov.R"))   # obis_eov_sql() / obis_eov_seeds()
 
 # choices ----
 INDICATORS <- c(
@@ -75,18 +76,43 @@ INDICATORS <- c(
   "Shannon diversity"                       = "shannon",
   "Number of records"                       = "n")
 
-# real OBIS taxonomic groups (work once the global store is built; the current
-# South Atlantic demo store is species-only, so these return empty until then)
+# taxon-group presets, as WoRMS AphiaID subtree seeds ----
+# these were rank-column filters (list(class = "Aves")) until it turned out two
+# of them matched ZERO records on the global store: the rank a name occupies is
+# not stable, so `class = <name>` can never hit when OBIS's interpreted
+# classification files the name at a different rank.
+#   class='Actinopterygii' -> 0   (WoRMS ranks it a Gigaclass; OBIS's class
+#                                  column carries 'Teleostei', 44.2M records)
+#   class='Anthozoa'       -> 0   (a Subphylum; OBIS uses 'Hexacorallia' /
+#                                  'Octocorallia')
+# Seeding the AphiaID subtree instead is rank-agnostic and immune to that. The
+# LABELS are unchanged on purpose — they are the bookmarked `preset` values, so
+# links already shared keep resolving.
 PRESETS <- list(
-  "All taxa"                       = list(),
-  "Seabirds (class Aves)"          = list(class  = "Aves"),
-  "Bony fishes (Actinopterygii)"   = list(class  = "Actinopterygii"),
-  "Sharks & rays (Elasmobranchii)" = list(class  = "Elasmobranchii"),
-  "Marine mammals (Mammalia)"      = list(class  = "Mammalia"),
-  "Sea turtles (order Testudines)" = list(order  = "Testudines"),
-  "Corals & anemones (Anthozoa)"   = list(class  = "Anthozoa"),
-  "Mollusks (phylum Mollusca)"     = list(phylum = "Mollusca"),
-  "Crustaceans (Malacostraca)"     = list(class  = "Malacostraca"))
+  "All taxa"                       = NULL,
+  "Seabirds (class Aves)"          = 1836L,     # Aves        (Class)
+  "Bony fishes (Actinopterygii)"   = 10194L,    # Actinopterygii (Gigaclass)
+  "Sharks & rays (Elasmobranchii)" = 10193L,    # Elasmobranchii (Subclass)
+  "Marine mammals (Mammalia)"      = 1837L,     # Mammalia    (Class)
+  "Sea turtles (order Testudines)" = 2689L,     # Testudines  (Order)
+  "Corals & anemones (Anthozoa)"   = 1292L,     # Anthozoa    (Subphylum)
+  "Mollusks (phylum Mollusca)"     = 51L,       # Mollusca    (Phylum)
+  "Crustaceans (Malacostraca)"     = 1071L)     # Malacostraca (Class)
+
+# Essential Ocean Variables (GOOS/IOOS biology & ecosystems), defined
+# taxonomically by the IOOS Marine Life Data Network as root AphiaIDs per EOV:
+# https://github.com/ioos/marine_life_data_network/tree/main/eov_taxonomy
+# Sourced from obisindicators::obis_eov_seeds() so the app and the package can
+# never drift on what an EOV means.
+EOV_PRESETS <- local({
+  s <- obis_eov_seeds()
+  setNames(as.list(unique(s$eov)), s$label[!duplicated(s$eov)])
+})
+# The precomputed idx_h3_eov layer only exists once data-raw/migrate_add_eov.R
+# has been run against the served store. Until then EOVs take the live
+# AphiaID-subtree path, which answers the full global store in well under 2s.
+EOV_PRECOMPUTED <- FALSE
+
 RANKS <- c("phylum", "class", "order", "family", "genus", "species")
 
 # store schema (for the "Schema" modal that helps users write custom SQL) ----
@@ -253,7 +279,11 @@ ui <- function(request) page_sidebar(
               placeholder = "OBIS biodiversity by H3 hexagon"),
     selectInput("indicator", "Indicator", INDICATORS),
 
-    selectInput("preset", "Taxon group", names(PRESETS)),
+    # one grouped picker; the option VALUES are the labels, so existing
+    # bookmarked `preset=` links keep resolving
+    selectInput("preset", "Taxon group", choices = list(
+      "Taxonomic groups"                = names(PRESETS),
+      "Essential Ocean Variables (IOOS)" = names(EOV_PRESETS))),
     checkboxInput("custom_taxon", "Custom taxon filter", FALSE),
     conditionalPanel(
       "input.custom_taxon",
@@ -268,7 +298,7 @@ ui <- function(request) page_sidebar(
           "Includes every descendant taxon, resolved from the WoRMS ",
           tags$code("taxon"), " table — works at ranks that aren't columns ",
           "(e.g. Infraorder). Examples: ", tags$b("2688"), " Cetacea, ",
-          tags$b("148899"), " Bacillariophyceae (diatoms), ", tags$b("1837"),
+          tags$b("148899"), " Bacillariophyceae (diatoms), ", tags$b("1836"),
           " Aves. Comma-separate to combine.")),
 
     checkboxInput("custom_sql", "Advanced: custom SQL", FALSE),
@@ -616,23 +646,35 @@ server <- function(input, output, session) {
   }, ignoreInit = TRUE)
 
   # --- filters -> SQL -> tiles ----
+  # the selected preset is either a taxon group (AphiaID seeds) or an EOV; an
+  # unrecognised value (e.g. a bookmark from an older build) falls back to all taxa
+  preset_r <- reactive({
+    sel <- input$preset %||% "All taxa"
+    if (sel %in% names(EOV_PRESETS)) list(eov = EOV_PRESETS[[sel]], aphiaid = NULL)
+    else                             list(eov = NULL, aphiaid = PRESETS[[sel]])
+  })
+  # the rank-column filter is now ONLY the explicit "custom taxon" control —
+  # the presets moved to AphiaID subtrees (see PRESETS)
   taxon_r <- reactive({
     if (isTRUE(input$custom_taxon) && nzchar(input$taxon_val %||% ""))
       setNames(list(input$taxon_val), input$rank)
-    else {
-      p <- PRESETS[[input$preset]]
-      if (length(p)) p else NULL
-    }
+    else NULL
   })
-  # arbitrary-rank children filter: parse one or more integer AphiaIDs. Takes
-  # precedence over the rank/preset taxon filter (see obis_h3t_sql()).
+  # arbitrary-rank children filter: parse one or more integer AphiaIDs. An
+  # explicit entry overrides the preset's seeds (see obis_h3t_sql()).
   aphiaid_r <- reactive({
     if (!isTRUE(input$custom_aphiaid) || !nzchar(input$aphiaid_val %||% ""))
-      return(NULL)
+      return(preset_r()$aphiaid)
     ids <- suppressWarnings(as.integer(
       strsplit(trimws(input$aphiaid_val), "\\s*,\\s*")[[1]]))
     ids <- ids[!is.na(ids)]
-    if (length(ids)) ids else NULL
+    if (length(ids)) ids else preset_r()$aphiaid
+  })
+  # an EOV preset drives the query only while no custom filter overrides it
+  eov_r <- reactive({
+    if (isTRUE(input$custom_taxon) && nzchar(input$taxon_val %||% "")) return(NULL)
+    if (isTRUE(input$custom_aphiaid) && nzchar(input$aphiaid_val %||% "")) return(NULL)
+    preset_r()$eov
   })
   years_r <- reactive({
     y <- input$years %||% c(YR_MIN, YR_MAX)
@@ -649,6 +691,13 @@ server <- function(input, output, session) {
     # reference input$res ONLY in manual mode, so zoom-driven slider syncs in
     # auto mode do NOT establish a dependency here (no needless tile rebuilds)
     res_ph <- if (isTRUE(input$res_manual)) as.character(input$res) else "{{res}}"
+    if (!is.null(eov_r()))
+      return(obis_eov_sql(
+        eov             = eov_r(),
+        indicator       = input$indicator,
+        years           = years_r(),
+        res_placeholder = res_ph,
+        live            = !EOV_PRECOMPUTED))
     obis_h3t_sql(
       indicator       = input$indicator,
       taxon           = taxon_r(),
