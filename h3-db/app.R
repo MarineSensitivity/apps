@@ -108,10 +108,11 @@ EOV_PRESETS <- local({
   s <- obis_eov_seeds()
   setNames(as.list(unique(s$eov)), s$label[!duplicated(s$eov)])
 })
-# The precomputed idx_h3_eov layer only exists once data-raw/migrate_add_eov.R
-# has been run against the served store. Until then EOVs take the live
-# AphiaID-subtree path, which answers the full global store in well under 2s.
-EOV_PRECOMPUTED <- FALSE
+# The precomputed idx_h3_eov layer is baked into the served store as of
+# obis_h3_global_eov_v20260728 (data-raw/migrate_add_eov.R). Set FALSE to fall
+# back to the live AphiaID-subtree path, which also answers the full global
+# store in under 2s — useful when pointing at a store without the layer.
+EOV_PRECOMPUTED <- TRUE
 
 RANKS <- c("phylum", "class", "order", "family", "genus", "species")
 
