@@ -85,29 +85,95 @@ INDICATORS <- c(
 #                                  column carries 'Teleostei', 44.2M records)
 #   class='Anthozoa'       -> 0   (a Subphylum; OBIS uses 'Hexacorallia' /
 #                                  'Octocorallia')
-# Seeding the AphiaID subtree instead is rank-agnostic and immune to that. The
-# LABELS are unchanged on purpose — they are the bookmarked `preset` values, so
-# links already shared keep resolving.
+# Seeding the AphiaID subtree instead is rank-agnostic and immune to that.
+#
+# NOTE ON THE SHAPE: the list NAME is the stored/bookmarked `preset=` value and
+# must never change (links already shared would stop resolving); `label` is what
+# the dropdown shows and is free to be improved. Don't "tidy" this into a plain
+# named vector — that would recouple them and break existing bookmarks.
+#
+# Every label names the seed's WoRMS rank, because the old labels were
+# inconsistent (some said "class Aves", others just "Anthozoa") and because the
+# ranks are the point: they are not all classes, which is exactly why a
+# `class = <name>` filter cannot express them.
 PRESETS <- list(
-  "All taxa"                       = NULL,
-  "Seabirds (class Aves)"          = 1836L,     # Aves        (Class)
-  "Bony fishes (Actinopterygii)"   = 10194L,    # Actinopterygii (Gigaclass)
-  "Sharks & rays (Elasmobranchii)" = 10193L,    # Elasmobranchii (Subclass)
-  "Marine mammals (Mammalia)"      = 1837L,     # Mammalia    (Class)
-  "Sea turtles (order Testudines)" = 2689L,     # Testudines  (Order)
-  "Corals & anemones (Anthozoa)"   = 1292L,     # Anthozoa    (Subphylum)
-  "Mollusks (phylum Mollusca)"     = 51L,       # Mollusca    (Phylum)
-  "Crustaceans (Malacostraca)"     = 1071L)     # Malacostraca (Class)
+  "All taxa" = list(
+    id = NULL,   label = "All taxa"),
+  "Seabirds (class Aves)" = list(
+    id = 1836L,  label = "Seabirds (class Aves)"),
+  "Bony fishes (Actinopterygii)" = list(
+    id = 10194L, label = "Bony fishes (gigaclass Actinopterygii)"),
+  "Sharks & rays (Elasmobranchii)" = list(
+    id = 10193L, label = "Sharks & rays (class Elasmobranchii)"),
+  "Marine mammals (Mammalia)" = list(
+    id = 1837L,  label = "Marine mammals (class Mammalia)"),
+  "Sea turtles (order Testudines)" = list(
+    id = 2689L,  label = "Sea turtles (order Testudines)"),
+  "Corals & anemones (Anthozoa)" = list(
+    id = 1292L,  label = "Corals & anemones (subphylum Anthozoa)"),
+  "Mollusks (phylum Mollusca)" = list(
+    id = 51L,    label = "Mollusks (phylum Mollusca)"),
+  "Crustaceans (Malacostraca)" = list(
+    id = 1071L,  label = "Crustaceans (class Malacostraca)"))
+# choices for selectInput: names = displayed, values = stored/bookmarked
+PRESET_CHOICES <- setNames(names(PRESETS),
+                           vapply(PRESETS, function(p) p$label, character(1)))
 
 # Essential Ocean Variables (GOOS/IOOS biology & ecosystems), defined
 # taxonomically by the IOOS Marine Life Data Network as root AphiaIDs per EOV:
 # https://github.com/ioos/marine_life_data_network/tree/main/eov_taxonomy
 # Sourced from obisindicators::obis_eov_seeds() so the app and the package can
 # never drift on what an EOV means.
+# bookmarked value ("Fish") -> EOV key ("fish"). Same name/label split as
+# PRESETS above: the value is stable, the displayed text comes from
+# obis_eov_label(), which builds "Sea turtles (superfamily Chelonioidea)" from
+# the same seed definitions the query uses — so a label cannot drift from the
+# taxa it describes.
 EOV_PRESETS <- local({
   s <- obis_eov_seeds()
   setNames(as.list(unique(s$eov)), s$label[!duplicated(s$eov)])
 })
+EOV_CHOICES <- local({
+  lab <- obis_eov_label()                       # named by EOV key
+  setNames(names(EOV_PRESETS),
+           unname(lab[unlist(EOV_PRESETS, use.names = FALSE)]))
+})
+
+# full EOV definitions table, built from obis_eov_seeds() so it stays in sync
+eov_defs_ui <- function() {
+  s <- obis_eov_seeds()
+  aphia_url <- "https://www.marinespecies.org/aphia.php?p=taxdetails&id=%d"
+  rows <- lapply(unique(s$eov), function(k) {
+    d <- s[s$eov == k, ]
+    tags$tr(
+      tags$td(tags$b(d$label[1])),
+      tags$td(class = "small", d$desc[1]),
+      tags$td(class = "small text-muted", HTML(paste(sprintf(
+        "<i>%s</i> <span class='text-nowrap'>(%s, <a href='%s' target='_blank' rel='noopener'>%d</a>)</span>",
+        d$taxon, tolower(d$rank), sprintf(aphia_url, d$aphiaid), d$aphiaid),
+        collapse = ", "))))
+  })
+  tagList(
+    p(class = "small",
+      "Each EOV is defined taxonomically by the ",
+      tags$a(href = paste0("https://github.com/ioos/marine_life_data_network/",
+                           "tree/main/eov_taxonomy"), target = "_blank",
+             rel = "noopener", "IOOS Marine Life Data Network"),
+      " as a short list of root WoRMS AphiaIDs (", tags$code("IdentifierList.csv"),
+      "). A map for an EOV is every occurrence whose AphiaID falls anywhere in ",
+      "the descendant subtree of those seeds — so it captures taxa at ",
+      tags$i("any"), " rank below the seed, not just the seed itself."),
+    tags$table(class = "table table-sm align-middle",
+      tags$thead(tags$tr(
+        tags$th("EOV"), tags$th("Definition"),
+        tags$th("Seed taxa (rank, WoRMS AphiaID)"))),
+      tags$tbody(rows)),
+    p(class = "small text-muted mb-0",
+      "The 33 seeds span nine different WoRMS ranks, from Class to Species. ",
+      "That is why they are resolved by walking the taxonomic tree rather than ",
+      "by matching a rank column: a name filed at an unexpected rank would ",
+      "silently match nothing."))
+}
 # The precomputed idx_h3_eov layer is baked into the served store as of
 # obis_h3_global_eov_v20260728 (data-raw/migrate_add_eov.R). Set FALSE to fall
 # back to the live AphiaID-subtree path, which also answers the full global
@@ -283,8 +349,10 @@ ui <- function(request) page_sidebar(
     # one grouped picker; the option VALUES are the labels, so existing
     # bookmarked `preset=` links keep resolving
     selectInput("preset", "Taxon group", choices = list(
-      "Taxonomic groups"                = names(PRESETS),
-      "Essential Ocean Variables (IOOS)" = names(EOV_PRESETS))),
+      "Taxonomic groups"                 = PRESET_CHOICES,
+      "Essential Ocean Variables (IOOS)" = EOV_CHOICES)),
+    div(class = "small text-muted mt-n2 mb-2",
+        actionLink("eov_defs_link", "what defines each EOV? ↗", class = "small")),
     checkboxInput("custom_taxon", "Custom taxon filter", FALSE),
     conditionalPanel(
       "input.custom_taxon",
@@ -451,6 +519,7 @@ server <- function(input, output, session) {
   # map center/zoom) is captured so a link reproduces the exact view.
   setBookmarkExclude(c(
     "share", "about", "schema", "schema_link", "run_sql", "res_grab",
+    "eov_defs_link", "eov_defs_from_about",
     "map_bbox", "map_bounds", "map_click", "map_feature_click",
     "map_mouseover", "map_hover"))
 
@@ -525,8 +594,22 @@ server <- function(input, output, session) {
         tags$li(tags$b("Fill"), " (right): layer opacity (paint only, no refetch)."),
         tags$li("Hover a hexagon for its value; click to pin a popup."),
         tags$li("Drag any panel by its header; use ", tags$b("−"), " to collapse it.")),
+      p(tags$b("Taxon groups"), " are WoRMS AphiaID subtrees — every descendant ",
+        "of the named taxon at any rank. The ", tags$b("Essential Ocean Variables"),
+        " group follows the IOOS Marine Life Data Network definitions; ",
+        actionLink("eov_defs_from_about", "see the full EOV definitions"), "."),
       p(class = "text-muted mb-0", "Indicators: ES(50), species richness, Shannon diversity, # records.")))
   })
+
+  # --- EOV definitions modal (what exactly each EOV covers) ----
+  show_eov_defs <- function() {
+    showModal(modalDialog(
+      title = "Essential Ocean Variables — taxonomic definitions",
+      easyClose = TRUE, size = "l", footer = modalButton("Close"),
+      eov_defs_ui()))
+  }
+  observeEvent(input$eov_defs_link,       show_eov_defs())
+  observeEvent(input$eov_defs_from_about, { removeModal(); show_eov_defs() })
 
   # --- Schema modal (ERD + column dictionary) — helps write custom SQL ----
   show_schema_modal <- function() {
@@ -535,7 +618,7 @@ server <- function(input, output, session) {
       footer = modalButton("Close"),
       id = "schema-modal",
       p("Custom SQL runs read-only against the ", tags$code("obis"), " DuckDB store, ",
-        "which exposes the three tables below. Your ", tags$code("SELECT"),
+        "which exposes the tables below. Your ", tags$code("SELECT"),
         " must project ", tags$b("exactly"), " ", tags$code("cell_id"), ", ",
         tags$code("value"), ", and optionally ", tags$code("n"),
         " (no ", tags$code("SELECT *"), "). Substitute the tile's resolution with ",
@@ -552,7 +635,15 @@ server <- function(input, output, session) {
         tags$li(tags$code("taxon"), " — WoRMS taxonomy (taxonID = AphiaID, ",
                 tags$code("parentNameUsageID"), "). Walk it recursively to filter ",
                 tags$code("occ_h3.aphiaid"), " by all descendants of any taxon, at ",
-                "any rank (even ranks absent from ", tags$code("occ_h3"), ").")),
+                "any rank (even ranks absent from ", tags$code("occ_h3"), ")."),
+        tags$li(tags$code("eov"), " — Essential Ocean Variable membership, ",
+                tags$code("(eov, taxonID)"), ": each EOV's seed AphiaIDs already ",
+                "expanded to their full descendant set. Join to ",
+                tags$code("occ_h3.aphiaid"), " to filter to an EOV without a ",
+                "recursive walk."),
+        tags$li(tags$code("idx_h3_eov"), " — precomputed per-EOV indicators for ",
+                "resolutions 1-7 (filter on ", tags$code("eov"), " + ",
+                tags$code("res"), "). Fast path for an EOV map.")),
       tags$h6(class = "mt-3", "Entity-relationship diagram"),
       # empty target — mermaid renders OFF-DOM (body temp node, which has real
       # layout) then we inject the SVG. rendering in-place with mermaid.run()
@@ -652,7 +743,7 @@ server <- function(input, output, session) {
   preset_r <- reactive({
     sel <- input$preset %||% "All taxa"
     if (sel %in% names(EOV_PRESETS)) list(eov = EOV_PRESETS[[sel]], aphiaid = NULL)
-    else                             list(eov = NULL, aphiaid = PRESETS[[sel]])
+    else list(eov = NULL, aphiaid = PRESETS[[sel]]$id)
   })
   # the rank-column filter is now ONLY the explicit "custom taxon" control —
   # the presets moved to AphiaID subtrees (see PRESETS)
