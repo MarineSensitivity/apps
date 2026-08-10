@@ -1008,6 +1008,49 @@ ui <- function(req) page_sidebar(
 
 # server ----
 server <- function(input, output, session) {
+
+  # ?ver= — the version is a URL parameter, not a fork of this app ----
+  # Historically each MST release shipped as a FROZEN COPY of this app symlinked
+  # at /scores_v{n}, so every improvement stranded in the newest fork. The
+  # version is now data: `latest.txt` and `versions.json` say what exists, and
+  # each release's manifest.json says how to draw it.
+  #
+  # This app can currently only RENDER the release it was built against, because
+  # a version's tables and COGs have to be published before they can be shown --
+  # the v1-v7 backfill is what unlocks the rest. So the contract is established
+  # here (accept, validate, echo back into the URL) and an explicit request for a
+  # version that is not yet served says so plainly, rather than silently drawing
+  # the wrong one under the right label.
+  observeEvent(session$clientData$url_search, once = TRUE, {
+    q   <- parseQueryString(session$clientData$url_search)
+    req <- q$ver
+    if (is.null(req) || !nzchar(req)) return(invisible())
+
+    resolved <- tryCatch(msens::atlas_resolve_ver(req), error = function(e) NULL)
+    if (is.null(resolved)) {
+      showModal(modalDialog(
+        title = "Unknown data version", easyClose = TRUE,
+        p(HTML(glue("<code>?ver={htmltools::htmlEscape(req)}</code> is not a published ",
+                    "version. Showing <b>{ver}</b>."))),
+        p("Published versions are listed at ",
+          a(href = paste0(msens::atlas_base_url(), "/versions.json"),
+            target = "_blank", "versions.json"), ".")))
+    } else if (!identical(resolved, ver)) {
+      showModal(modalDialog(
+        title = glue("Version {resolved} is not served here yet"), easyClose = TRUE,
+        p(HTML(glue("This app currently renders <b>{ver}</b>. Support for rendering ",
+                    "any published version is in progress: {resolved}'s layers have to be ",
+                    "published before they can be drawn."))),
+        p("Showing ", tags$b(ver), " instead.")))
+    }
+  })
+
+  # echo the version into the URL so a shared link is explicit about what it shows
+  # (and keeps working once other versions render here)
+  observe({
+    updateQueryString(glue("?ver={ver}"), mode = "replace", session = session)
+  })
+
   # observe(session$setCurrentTheme(
   #   if (isTRUE(input$tgl_dark)) dark else light
   # ))
