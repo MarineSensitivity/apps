@@ -456,7 +456,10 @@ ui <- function(req) page_sidebar(
   useConductor(),
   title = div(
     style = "display: flex; align-items: center; width: 100%;",
-    span(glue("BOEM Marine Sensitivity ({ver}) species distribution")),
+    span("BOEM Marine Sensitivity ",
+         actionLink("show_versions", glue("({ver})"),
+                    title = "data version - click to switch"),
+         " species distribution"),
     div(
       class = "header-right",
       actionLink("btn_about", "About"),
@@ -548,6 +551,44 @@ ui <- function(req) page_sidebar(
 
 # server ----
 server <- function(input, output, session) {
+
+  # version picker ----
+  # One app renders any published release, so the header says which one is on
+  # screen and offers the rest. Markup comes from msens::version_picker_html()
+  # off the same versions.json the pipeline and docs read, so the three cannot
+  # disagree about what exists.
+
+  # ?ver= — the version is a URL parameter, not a fork of this app ----
+  # Same contract as the scores app: accept and validate, but say plainly when a
+  # published version cannot yet be RENDERED here, rather than silently drawing
+  # a different one under the requested label. (Kept separate from the
+  # ?mdl_key= deep-link observer below, which owns species selection.)
+  observeEvent(session$clientData$url_search, once = TRUE, {
+    q   <- parseQueryString(session$clientData$url_search)
+    req <- q$ver
+    if (is.null(req) || !nzchar(req)) return(invisible())
+    resolved <- tryCatch(msens::atlas_resolve_ver(req), error = function(e) NULL)
+    if (is.null(resolved)) {
+      showModal(modalDialog(
+        title = "Unknown data version", easyClose = TRUE,
+        p(HTML(glue("<code>?ver={htmltools::htmlEscape(req)}</code> is not a published ",
+                    "version. Showing <b>{ver}</b>.")))))
+    } else if (!identical(resolved, ver)) {
+      showModal(modalDialog(
+        title = glue("Version {resolved} is not served here yet"), easyClose = TRUE,
+        p(HTML(glue("This app currently renders <b>{ver}</b>. Showing it instead.")))))
+    }
+  })
+
+  observeEvent(input$show_versions, {
+    showModal(modalDialog(
+      title = "Data version", easyClose = TRUE, size = "l",
+      p("This app renders one published release of the Marine Sensitivity Toolkit."),
+      tryCatch(
+        msens::version_picker_html(ver),
+        error = function(e)
+          p(class = "text-muted", "Version list unavailable: ", conditionMessage(e)))))
+  })
   # usage tracking ----
   # msens::ms_track() only pushes a websocket message the session already has
   # open — no HTTP request — so instrumenting the species picker adds no latency

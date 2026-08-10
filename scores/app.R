@@ -840,7 +840,9 @@ ui <- function(req) page_sidebar(
   useConductor(),
   title = div(
     style = "display: flex; align-items: center; width: 100%;",
-    span(glue("BOEM Marine Sensitivity ({ver})")),
+    span("BOEM Marine Sensitivity ",
+         actionLink("show_versions", glue("({ver})"),
+                    title = "data version - click to switch")),
     div(
       class = "header-right",
       actionLink("btn_about", "About"),
@@ -1008,6 +1010,21 @@ ui <- function(req) page_sidebar(
 
 # server ----
 server <- function(input, output, session) {
+
+  # version picker ----
+  # One app renders any published release, so the header says which one is on
+  # screen and offers the rest. Markup comes from msens::version_picker_html()
+  # off the same versions.json the pipeline and docs read, so the three cannot
+  # disagree about what exists.
+  observeEvent(input$show_versions, {
+    showModal(modalDialog(
+      title = "Data version", easyClose = TRUE, size = "l",
+      p("This app renders one published release of the Marine Sensitivity Toolkit."),
+      tryCatch(
+        msens::version_picker_html(ver),
+        error = function(e)
+          p(class = "text-muted", "Version list unavailable: ", conditionMessage(e)))))
+  })
 
   # ?ver= — the version is a URL parameter, not a fork of this app ----
   # Historically each MST release shipped as a FROZEN COPY of this app symlinked
