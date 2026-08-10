@@ -162,6 +162,62 @@ tile_base_url <- "https://titiler-v8.marinesensitivity.org"
 # browser cache automatically. distinct from the dataset version (`v6`).
 db_mtime <- format(file.info(sdm_db)$mtime, "%Y%m%dT%H%M%SZ", tz = "UTC")
 
+# score COGs from the version manifest ----
+# Every layer this app draws is PRECOMPUTED, so asking titiler to run a SQL
+# SELECT per tile bought nothing while costing a bespoke factory, a SQL
+# validator guarding an injection surface, and a 1M-row cap the US grid already
+# sits just under. The manifest carries a COG href and a build-time rescale per
+# (metric, subregion) — the latter is what removes the /statistics round-trip on
+# every layer switch.
+#
+# Falls back to the SQL path whenever the manifest, the capability, or a
+# particular surface is missing, so an app pointed at a release that predates the
+# COGs still draws rather than blanking.
+manifest <- tryCatch(
+  msens::atlas_manifest(ver),
+  error = function(e) { message("manifest unavailable (", conditionMessage(e),
+                                ") - falling back to SQL tiles"); NULL })
+cog_tbl <- if (!is.null(manifest) && isTRUE(manifest$capabilities$score_cogs)) {
+  cols <- c("metric_key", "subregion_key", "cog", "rescale_min", "rescale_max", "colormap")
+  mt   <- manifest$metrics[, intersect(cols, names(manifest$metrics)), drop = FALSE]
+  # overlays (the "cells outside Program Areas" mask) are rasters the app draws
+  # but not quantities it scores, so the manifest keeps them separate; here they
+  # join the same lookup, keyed like a metric and carrying no rescale
+  ov <- manifest$overlays
+  if (!is.null(ov) && nrow(ov)) {
+    ov <- data.frame(metric_key = ov$overlay_key, subregion_key = ov$subregion_key,
+                     cog = ov$cog, rescale_min = NA_real_, rescale_max = NA_real_,
+                     colormap = ov$colormap, stringsAsFactors = FALSE)
+    mt <- rbind(mt[, names(ov)], ov)
+  }
+  mt
+} else NULL
+message("score COGs: ", if (is.null(cog_tbl)) "none (SQL fallback)" else nrow(cog_tbl))
+
+cog_of <- function(metric_key, subregion_key = "FULL") {
+  if (is.null(cog_tbl)) return(NULL)
+  i <- which(cog_tbl$metric_key == metric_key & cog_tbl$subregion_key == subregion_key)
+  if (!length(i) || is.na(cog_tbl$cog[i[1]])) return(NULL)
+  list(url      = cog_tbl$cog[i[1]],
+       rescale  = c(cog_tbl$rescale_min[i[1]], cog_tbl$rescale_max[i[1]]),
+       colormap = cog_tbl$colormap[i[1]])
+}
+
+# one place that answers "how do I draw this layer?", COG-first
+layer_tiles <- function(metric_key, subregion_key = "FULL", palette = "spectral_r") {
+  cg <- cog_of(metric_key, subregion_key)
+  if (!is.null(cg))
+    return(list(rescale = cg$rescale,
+                url = msens::cog_tile_url(cg$url, colormap = palette,
+                                          rescale = cg$rescale, base = tile_base_url)))
+  sql <- cell_sql(metric_key, subregion_key)
+  st  <- msens::cell_stats(sql, mtime = db_mtime, base = tile_base_url)
+  rs  <- c(st$min, st$max)
+  list(rescale = rs,
+       url = msens::cell_tile_url(sql, colormap = palette, rescale = rs,
+                                  mtime = db_mtime, base = tile_base_url))
+}
+
 # build the (cell_id, value) SELECT for a given metric + subregion; passed to
 # msens::cell_tile_url() / cell_stats(). strict allowlist on the identifiers
 # to keep the string string-interpolation-safe before it ever hits DuckDB.
@@ -541,12 +597,9 @@ sr_bbox <- function(sr_key) {
 # re-renders (sphere toggle, etc.). Varnish caches this anyway; warming
 # it once at boot keeps the critical path synchronous-but-fast.
 initial_sql      <- cell_sql(lyr_default, sr_choices[[1]])
-initial_stats    <- msens::cell_stats(initial_sql, mtime = db_mtime, base = tile_base_url)
-initial_rescale  <- c(initial_stats$min, initial_stats$max)
-initial_tile_url <- msens::cell_tile_url(
-  initial_sql,
-  colormap = "spectral_r", rescale = initial_rescale,
-  mtime    = db_mtime,     base    = tile_base_url)
+initial_lyr      <- layer_tiles(lyr_default, sr_choices[[1]])
+initial_rescale  <- initial_lyr$rescale
+initial_tile_url <- initial_lyr$url
 initial_bbox     <- sr_bbox(sr_choices[[1]])
 
 # "Cells outside Program Areas" overlay: a binary mask served by the same
@@ -561,10 +614,14 @@ outside_pra_sql <- paste0(
   "JOIN zone z ON zc.zone_seq = z.zone_seq ",
   "WHERE z.fld = 'programarea_key'",
   ")")
-outside_pra_tile_url <- msens::cell_tile_url(
-  outside_pra_sql,
-  color = "#222222",
-  mtime = db_mtime, base = tile_base_url)
+outside_pra_tile_url <- local({
+  cg <- cog_of("_outside_pra", "FULL")
+  if (!is.null(cg))
+    msens::cog_tile_url(cg$url, color = "#222222", base = tile_base_url)
+  else
+    msens::cell_tile_url(outside_pra_sql, color = "#222222",
+                         mtime = db_mtime, base = tile_base_url)
+})
 
 # NOTE: the previous r_outside_pra terra raster (cached to
 # scores/cache/r_cells_outside_pra.tif) is gone — the same "cells with
@@ -1187,18 +1244,14 @@ server <- function(input, output, session) {
         bbox     = initial_bbox))
     }
 
-    sql   <- cell_sql(m_key, sr_key)
-    stats <- msens::cell_stats(sql, mtime = db_mtime, base = tile_base_url)
-    rescl <- c(stats$min, stats$max)
+    lt <- layer_tiles(m_key, sr_key, palette = pal)
 
     list(
       m_key    = m_key,
       sr_key   = sr_key,
-      sql      = sql,
-      rescale  = rescl,
-      tile_url = msens::cell_tile_url(
-        sql, colormap = pal, rescale = rescl,
-        mtime = db_mtime, base = tile_base_url),
+      sql      = cell_sql(m_key, sr_key),
+      rescale  = lt$rescale,
+      tile_url = lt$url,
       bbox     = sr_bbox(sr_key))
   })
 
