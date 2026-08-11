@@ -120,7 +120,11 @@ build_bundle <- function(ver) {
     "https://file.marinesensitivity.org/pmtiles")
 
   mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
-  cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
+  # PER GRID, not a constant: usa05 (v1-v7) and global05 (v8) index cell ids
+  # differently, so reading the global lookup for a v7 click returns the wrong
+  # cell -- or none, which surfaced as "[subset] invalid name(s)" from extract().
+  # The grid registry knows which raster belongs to which release.
+  cell_tif <- glue("{dir_data}/derived/{msens::grid_registry()$cellid_tif[msens::grid_registry()$grid_id == msens::grid_for_ver(ver)][1]}")
   # server reads the S3-backed view DB (serve.duckdb, views over marine-atlas Parquet — shared
   # with titiler-v8, no multi-GB rsync); local dev uses the full sdm.duckdb
   sdm_db <- { s <- glue("{dir_big}/serve.duckdb"); if (file.exists(s)) s else glue("{dir_big}/sdm.duckdb") }
@@ -397,27 +401,7 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
 
   # data prep ----
 
-  # * pra_pts: program area label points (cached) ----
-  # per VERSION: this cache is program-area geometry, and a release without
-  # Program Areas (v1) was drawing v7's labels over an empty map
-  pra_pts_csv <- glue("{dir_cache}/pra_label_pts.csv")
-  if (!file.exists(pra_pts_csv)) {
-    pra_pts <- read_sf(pra_gpkg) |>
-      st_shift_longitude() |>
-      st_point_on_surface() |>
-      select(programarea_key, programarea_name) |>
-      mutate(
-        lng = st_coordinates(geom)[, 1],
-        lat = st_coordinates(geom)[, 2]) |>
-      st_drop_geometry()
-    write_csv(pra_pts, pra_pts_csv)
-  } else {
-    pra_pts <- read_csv(pra_pts_csv)
-  }
-
-  # * pra_full_sf: full program-area polygons, used to render areas added
-  # on the Report tab (so the user can see what they're submitting) ----
-  # Program-area polygons for the Report tab (the user's added areas go on to the
+# Program-area polygons for the Report tab (the user's added areas go on to the
   # scoring API, so this needs real geometry, not just something drawable). Read
   # the vintage's GeoParquet published beside its PMTiles -- geometry depends on
   # the VINTAGE, not the release, so one file serves every version that uses it.
@@ -457,6 +441,37 @@ pra_geom <- function() {
   g
 }
 
+  # * pra_pts: program area label points (cached) ----
+  # per VERSION: this cache is program-area geometry, and a release without
+  # Program Areas (v1) was drawing v7's labels over an empty map
+  pra_pts_csv <- glue("{dir_cache}/pra_label_pts.csv")
+  if (file.exists(pra_pts_csv)) {
+    pra_pts <- read_csv(pra_pts_csv, show_col_types = FALSE)
+  } else {
+    # pra_geom() resolves the release's OWN program areas (published FlatGeobuf,
+    # or the local gpkg) and returns NULL when it has none. Reading pra_gpkg
+    # directly here meant v1/v2 -- which predate Program Areas and ship no such
+    # file -- died at startup with "The file doesn't seem to exist", i.e. HTTP 500
+    # for the whole release rather than a map without labels.
+    g <- pra_geom()
+    pra_pts <- if (is.null(g) || !nrow(g)) {
+      tibble(programarea_key = character(), programarea_name = character(),
+             lng = numeric(), lat = numeric())
+    } else {
+      suppressWarnings(
+        g |> st_shift_longitude() |> st_point_on_surface() |>
+          select(programarea_key, programarea_name) |>
+          mutate(lng = st_coordinates(geometry)[, 1],
+                 lat = st_coordinates(geometry)[, 2]) |>
+          st_drop_geometry())
+    }
+    tryCatch(write_csv(pra_pts, pra_pts_csv), error = function(e)
+      message("could not cache program-area labels: ", conditionMessage(e)))
+  }
+
+  # * pra_full_sf: full program-area polygons, used to render areas added
+  # on the Report tab (so the user can see what they're submitting) ----
+  
   pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
 
   # * sr_choices ----
@@ -2005,18 +2020,31 @@ server_impl <- function(input, output, session) {
       lat <- click$lat
 
       # extract cell value at clicked location
+      # NO longitude shift. Both cell-id lookup images are stored in -180..180
+      # (verified: r_cellid.tif and r_cellid_global.tif both have xmin -180,
+      # xmax 180), so shifting a click to 0-360 moved every Americas point
+      # OUTSIDE the raster and extract() returned NA -- which is why clicking a
+      # cell stopped producing a popup. The 0-360 convention applies to the
+      # subregion EXTENTS, not to these rasters.
       pt <- vect(
         data.frame(x = lng, y = lat),
         geom = c("x", "y"),
         crs = "EPSG:4326"
       ) |>
-        st_as_sf() |>
-        st_shift_longitude() # [-180,180] -> [0,360]
-      # fresh handle: see r_cell_open() -- a bundle-cached SpatRaster is a stale
-      # external pointer in a later session and segfaults the process
-      cell_id <- terra::extract(r_cell_open()$cell_id, pt) |> pull(cell_id)
+        st_as_sf()
+      # By POSITION, not by name. These cell-id COGs are lookup images whose band
+      # is named whatever it was built from: r_cellid.tif calls it "r_cellid" and
+      # r_cellid_global.tif calls it "depth_mean" -- neither is "cell_id", so
+      # `r_cell$cell_id` was NULL and extract() failed with "[subset] invalid
+      # name(s)". That is why clicking a cell stopped showing its value.
+      #
+      # Fresh handle too: a bundle-cached SpatRaster is a stale external pointer
+      # in a later session and segfaults the process.
+      cell_id <- terra::extract(r_cell_open()[[1]], pt)[, 2]
 
-      if (!is.na(cell_id)) {
+      # length 0 when the click misses the raster entirely; `if (!is.na(x))` on a
+      # zero-length value is an error, which would kill the session
+      if (length(cell_id) == 1 && !is.na(cell_id)) {
         rx$clicked_cell <- list(
           lng = lng,
           lat = lat,
@@ -2319,14 +2347,20 @@ server_impl <- function(input, output, session) {
   # output (used by the download + composition plot) stays unformatted.
   fmt_spp_tbl <- reactive({
     d_spp <- get_spp_tbl()
+    if (is.null(d_spp) || !nrow(d_spp)) return(d_spp)
+    # The public model id differs by generation: v8 keys on the stable `mdl_key`,
+    # v1-v7 on `mdl_seq`, which is what the manifest's id_field records. Linking
+    # unconditionally on mdl_key made the Table of Species error out on every
+    # older release, because the column simply is not there.
+    id_col <- if ("mdl_key" %in% names(d_spp)) "mdl_key" else
+              if ("mdl_seq" %in% names(d_spp)) "mdl_seq" else NA_character_
     # rename columns
     d_spp |>
       mutate(
         # from /scores_v8/ this must point at the v8 species app; the old
         # "../species/?mdl_seq=" resolved to the *v7* app and used the v7 key.
-        model_url = glue(
-          "../species_v8/?mdl_key={mdl_key}"
-        ),
+        model_url = if (is.na(id_col)) NA_character_ else
+          glue("../species_v8/?ver={ver}&{id_col}={.data[[id_col]]}"),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(
           taxon_authority == "botw",
@@ -2454,12 +2488,19 @@ server_impl <- function(input, output, session) {
     # TODO:
     # - [ ] birds
     # - [ ] ranks_with_variety
+    # taxon_id arrives as integer from some releases and character from others,
+    # and the authority is spelled "worms" or "WORMS" depending on generation --
+    # an exact-type, exact-case join errored with "Can't join x$taxon_id with
+    # y$species_id due to incompatible types" and took the Composition tab down.
     d <- fmt_spp_tbl() |>
-      filter(taxon_authority == "worms") |>
+      filter(tolower(taxon_authority) == "worms") |>
+      mutate(taxon_id_chr = as.character(taxon_id)) |>
       inner_join(
         d_taxonomy |>
-          select(-component),
-        by = join_by(taxon_id == species_id)
+          select(-component) |>
+          mutate(species_id_chr = as.character(species_id)) |>
+          select(-species_id),
+        by = join_by(taxon_id_chr == species_id_chr)
       ) |>
       mutate(
         name = glue("{scientific} ({common}; worms:{taxon_id})"),
