@@ -408,9 +408,9 @@ build_bundle <- function(ver) {
       if (length(i)) zone_tbl$zone_set_key[i[1]] else NA_character_
     } else NA_character_
     if (!is.na(zk)) {
-      u <- glue("{msens::atlas_base_url()}/zones/{zk}/zones.parquet")
+      u <- glue("/vsicurl/{msens::atlas_base_url()}/zones/{zk}/zones.fgb")
       g <- tryCatch(read_sf(u), error = function(e) {
-        message("zone parquet unavailable (", conditionMessage(e), ") - falling back to gpkg"); NULL })
+        message("zone fgb unavailable (", conditionMessage(e), ") - falling back to gpkg"); NULL })
       if (!is.null(g) && "programarea_key" %in% names(g))
         return(g |> select(any_of(c("programarea_key", "programarea_name"))))
     }
