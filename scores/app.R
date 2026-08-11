@@ -879,6 +879,16 @@ pra_geom <- function() {
   })
   message("study areas: ", paste(names(sr_choices), collapse = ", "))
 
+  # Report version list: every published release, newest first, labelled with
+  # status so a pre-release or retired one is not mistaken for the promoted one.
+  rpt_ver_choices <- local({
+    v <- tryCatch(msens::atlas_versions(), error = function(e) NULL)
+    if (is.null(v) || !nrow(v)) return(setNames(ver, ver))
+    lab <- ifelse(v$status == "released", v$ver,
+                  sprintf("%s (%s)", v$ver, v$status))
+    setNames(v$ver, lab)
+  })
+
   # pre-compute initial tile state for build_initial_map() so startup doesn't
   # block on a network round-trip to /msens/statistics every time the map
   # re-renders (sphere toggle, etc.). Varnish caches this anyway; warming
@@ -1282,10 +1292,13 @@ ui_impl <- function(req) page_sidebar(
           selectInput(
             "rpt_ver",
             "Data version",
-            # v8 was missing entirely — in the v8 app — so a report drawn here
-            # could only ever be generated against v7 data.
-            choices  = c("v8", "v7", "v6", "v5", "v4c", "v4b", "v3"),
-            selected = "v8"),
+            # From the published registry, not a hand-kept list. The hardcoded
+            # one offered "v4c", which has never existed, while omitting v1, v2
+            # and v4 -- so a user could request a report for a version that is
+            # not there and could not request three that are. Defaults to the
+            # version currently on screen.
+            choices  = rpt_ver_choices,
+            selected = ver),
           radioButtons(
             "rpt_format",
             "Output format",
