@@ -92,6 +92,25 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
+# mapgl declares every optional bundle in its widget definition, so the PAGE
+# carries them whether or not the app calls them -- and it is the UI's
+# maplibreOutput() that emits them, not the server-side widget, so filtering the
+# rendered object achieves nothing (tried that first: the page still listed all
+# 39 files). Measured cold: 3.7 MB of JavaScript, of which html2canvas (194 KB)
+# and the globe minimap (149 KB) are never touched -- `add_globe_minimap` and
+# `screenshot` appear zero times here.
+#
+# Conservative by construction: an unknown name simply does not match, and every
+# bundle the app uses stays. If a feature is added that needs one of these, drop
+# it from this list rather than working around it.
+UNUSED_MAP_DEPS <- c("html2canvas", "mapbox-gl-globe-minimap")
+map_output <- function(...) {
+  x <- maplibreOutput(...)
+  d <- htmltools::findDependencies(x)
+  htmltools::attachDependencies(
+    x, Filter(function(dep) !(dep$name %in% UNUSED_MAP_DEPS), d))
+}
+
 # ---- per-version bundle -----------------------------------------------------
 #
 # Everything below depends on WHICH release is being rendered. It used to run
@@ -1230,7 +1249,7 @@ ui_impl <- function(req) page_sidebar(
         div(id = "map-overlay", class = "map-loading-overlay",
           div(class = "map-loading-spinner"),
           span("Loading map\u2026")),
-        maplibreOutput("map"))
+        map_output("map"))
     ),
     nav_panel(
       title = "Plot of Scores",
@@ -1333,7 +1352,7 @@ ui_impl <- function(req) page_sidebar(
           div(id = "map-rpt-overlay", class = "map-loading-overlay",
             div(class = "map-loading-spinner"),
             span("Loading map\u2026")),
-          maplibreOutput("map_rpt", height = "700px"))
+          map_output("map_rpt", height = "700px"))
       )
     )
   )
@@ -1663,13 +1682,6 @@ server_impl <- function(input, output, session) {
   # Conservative by construction: an unknown name is simply not matched, and
   # anything the app does use stays. If a feature is added later that needs one
   # of these, remove it from the list rather than working around this.
-  UNUSED_MAP_DEPS <- c("html2canvas", "mapbox-gl-globe-minimap")
-  drop_unused_deps <- function(m) {
-    if (!is.null(m$dependencies))
-      m$dependencies <- Filter(function(d) !(d$name %in% UNUSED_MAP_DEPS), m$dependencies)
-    m
-  }
-
   build_initial_map <- function(sphere = TRUE) {
     n_cols <- 11
     cols_r <- get_pal_colors("spectral_r", n_cols)
@@ -1739,7 +1751,7 @@ server_impl <- function(input, output, session) {
 
   # map ----
   output$map <- renderMaplibre({
-    drop_unused_deps(build_initial_map(sphere = input$tgl_sphere))
+    build_initial_map(sphere = input$tgl_sphere)
   })
 
   # hide the main map loading overlay once style.load fires
@@ -2574,7 +2586,7 @@ server_impl <- function(input, output, session) {
   # toggles in the sidebar apply here too; add_msens_draw_control() is
   # chained on top.
   output$map_rpt <- renderMaplibre({
-    drop_unused_deps(build_initial_map(sphere = input$tgl_sphere)) |>
+    build_initial_map(sphere = input$tgl_sphere) |>
       add_msens_draw_control()
   })
 
