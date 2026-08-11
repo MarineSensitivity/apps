@@ -194,6 +194,48 @@ cog_tbl <- if (!is.null(manifest) && isTRUE(manifest$capabilities$score_cogs)) {
 } else NULL
 message("score COGs: ", if (is.null(cog_tbl)) "none (SQL fallback)" else nrow(cog_tbl))
 
+# zone outlines from the manifest ----
+#
+# The zone PMTiles used to be two unversioned filenames on the file host
+# (`ply_programareas_2026`, `ply_ecoregions_2025`) inherited from the archived v7
+# notebook -- nothing built them reproducibly, and every release drew whatever
+# those files happened to contain. They are now published per VINTAGE
+# (`zones/{zone_set_key}/zones.pmtiles`) and each release's manifest names the
+# vintage it actually used, so v3 and v8 can draw different Program Areas.
+#
+# The layer id inside the published tiles is the zone TYPE (`programarea`), not
+# the old table name, so URL and source_layer must move together -- pointing the
+# new URL at the old layer name yields a silently empty overlay.
+zone_tbl <- if (!is.null(manifest)) manifest$zones else NULL
+
+# Returns NULL when the manifest is PRESENT but names no such zone type: that is
+# a positive statement that the release does not have it, not a gap to paper
+# over. v1 predates Program Areas entirely (`capabilities.programareas = FALSE`),
+# so falling back there would draw the 2026 Program Areas over a 2025 Planning
+# Area release -- an outline that looks entirely plausible and is simply wrong.
+# The unversioned fallback is reserved for a missing manifest, where drawing the
+# historical default still beats a blank map.
+ztile <- function(zone_type, fallback_tbl) {
+  if (!is.null(zone_tbl) && "pmtiles" %in% names(zone_tbl)) {
+    i <- which(zone_tbl$fld == paste0(zone_type, "_key") & !is.na(zone_tbl$pmtiles))
+    return(if (length(i)) list(url = zone_tbl$pmtiles[i[1]], source_layer = zone_type)
+           else NULL)
+  }
+  list(url          = glue("{pmtiles_base_url}/{fallback_tbl}.pmtiles"),
+       source_layer = fallback_tbl)
+}
+message("zone tiles: ",
+        if (is.null(zone_tbl) || !"pmtiles" %in% names(zone_tbl))
+          "none (unversioned fallback)" else sum(!is.na(zone_tbl$pmtiles)))
+
+# resolved once: every later add_fill_layer / add_line_layer that reuses the
+# source add_pmline created must name the SAME layer inside those tiles, or it
+# renders nothing at all (no error -- just an empty overlay)
+# %||% keeps these character even when the release has no such zone: the layers
+# that use them sit behind the matching capability gate and are unreachable then
+pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
+er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
+
 cog_of <- function(metric_key, subregion_key = "FULL") {
   if (is.null(cog_tbl)) return(NULL)
   i <- which(cog_tbl$metric_key == metric_key & cog_tbl$subregion_key == subregion_key)
@@ -1331,13 +1373,13 @@ server <- function(input, output, session) {
       projection = ifelse(sphere, "globe", "mercator")
     ) |>
       fit_bounds(initial_bbox) |>
-      msens::add_pmline(list(
-        list(url = glue("{pmtiles_base_url}/{tbl_pra_pm}.pmtiles"),
-             source_layer = tbl_pra_pm, id = "pra_ln", source_id = "pra_src",
-             line_color = "white", line_width = 1),
-        list(url = glue("{pmtiles_base_url}/{tbl_er}.pmtiles"),
-             source_layer = tbl_er, id = "er_ln", source_id = "er_src",
-             line_color = "black", line_width = 3, before_id = "pra_ln"))) |>
+      msens::add_pmline(Filter(Negate(is.null), list(
+        if (!is.null(pa <- ztile("programarea", tbl_pra_pm)))
+          c(pa, list(id = "pra_ln", source_id = "pra_src",
+                     line_color = "white", line_width = 1)),
+        if (!is.null(er <- ztile("ecoregion", tbl_er)))
+          c(er, list(id = "er_ln", source_id = "er_src",
+                     line_color = "black", line_width = 3, before_id = "pra_ln"))))) |>
       msens::add_pmlabel(list(
         list(source     = pra_pts,
              text_field = "programarea_key",
@@ -1646,7 +1688,7 @@ server <- function(input, output, session) {
             add_fill_layer(
               id           = "pra_lyr",
               source       = "pra_src",
-              source_layer = tbl_pra_pm,
+              source_layer = pra_src_layer,
               fill_color   = match_expr(
                 column  = "programarea_key",
                 values  = d_pra$programarea_key,
@@ -2314,7 +2356,7 @@ server <- function(input, output, session) {
         proxy |> add_line_layer(
           id           = "pra_highlight_ln",
           source       = "pra_src",
-          source_layer = tbl_pra_pm,
+          source_layer = pra_src_layer,
           line_color   = "#ff00aa",
           line_width   = 4,
           filter       = list("==", "programarea_key", key))
