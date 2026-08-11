@@ -2020,35 +2020,38 @@ server_impl <- function(input, output, session) {
       lat <- click$lat
 
       # extract cell value at clicked location
-      # NO longitude shift. Both cell-id lookup images are stored in -180..180
-      # (verified: r_cellid.tif and r_cellid_global.tif both have xmin -180,
-      # xmax 180), so shifting a click to 0-360 moved every Americas point
-      # OUTSIDE the raster and extract() returned NA -- which is why clicking a
-      # cell stopped producing a popup. The 0-360 convention applies to the
-      # subregion EXTENTS, not to these rasters.
-      pt <- vect(
-        data.frame(x = lng, y = lat),
-        geom = c("x", "y"),
-        crs = "EPSG:4326"
-      ) |>
-        st_as_sf()
-      # By POSITION, not by name. These cell-id COGs are lookup images whose band
-      # is named whatever it was built from: r_cellid.tif calls it "r_cellid" and
-      # r_cellid_global.tif calls it "depth_mean" -- neither is "cell_id", so
-      # `r_cell$cell_id` was NULL and extract() failed with "[subset] invalid
-      # name(s)". That is why clicking a cell stopped showing its value.
+      # Resolve the click through titiler, not a local raster.
       #
-      # Fresh handle too: a bundle-cached SpatRaster is a stale external pointer
-      # in a later session and segfaults the process.
-      cell_id <- terra::extract(r_cell_open()[[1]], pt)[, 2]
+      # GET /cog/point/{lon},{lat} returns the pixel value, so the number in the
+      # popup comes from the SAME surface the user is looking at. Reading a
+      # raster in the app instead produced three separate bugs: the band is named
+      # `r_cellid` on usa05 and `depth_mean` on global05 (so `$cell_id` was NULL),
+      # longitude was shifted to 0-360 while both images are stored -180..180 (so
+      # every Americas click sampled outside), and a SpatRaster cached across
+      # sessions is a stale external pointer that SEGFAULTS the process.
+      #
+      # Two calls: the cell id from the grid's categorical cell-id COG (INT4U, no
+      # overviews, so ids are never averaged), and the value from whichever COG
+      # the layer is currently drawn from.
+      cell_id <- msens::cog_point_value(
+        msens::grid_cellid_url(msens::grid_for_ver(ver)), lng, lat)
+      # arithmetic fallback: the grid registry defines the mapping exactly, so a
+      # transient tile-server failure need not cost the user their click
+      if (is.na(cell_id))
+        cell_id <- msens::cell_from_lonlat(
+          lng, lat, msens::grid_spec_for(msens::grid_for_ver(ver)))
 
-      # length 0 when the click misses the raster entirely; `if (!is.na(x))` on a
-      # zero-length value is an error, which would kill the session
+      cur <- cog_of(input$sel_lyr %||% lyr_default,
+                    input$sel_subregion %||% sr_choices[[1]])
+      cell_val <- if (is.null(cur)) NA_real_ else
+        msens::cog_point_value(cur$url, lng, lat)
+
       if (length(cell_id) == 1 && !is.na(cell_id)) {
         rx$clicked_cell <- list(
           lng = lng,
           lat = lat,
-          cell_id = cell_id,
+          cell_id = as.integer(cell_id),
+          value = cell_val,
           lyr = input$sel_lyr
         )
       }
