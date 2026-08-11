@@ -105,12 +105,17 @@ cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
 # server reads the S3-backed view DB (serve.duckdb, views over marine-atlas Parquet — shared
 # with titiler-v8, no multi-GB rsync); local dev uses the full sdm.duckdb
 sdm_db <- { s <- glue("{dir_big}/serve.duckdb"); if (file.exists(s)) s else glue("{dir_big}/sdm.duckdb") }
-er_gpkg <- glue("{dir_v}/ply_ecoregions_2025.gpkg")
-lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")
-metrics_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
+# Per-version LOCAL files are gone: everything the app needs now comes from S3
+# (Parquet via serve.duckdb, COGs and PMTiles via the manifest). `er_gpkg` was
+# only ever listed as required and never read; `metrics_tif` existed to derive
+# subregion bboxes that are computed here from zone_cell + cell_lonlat; the
+# subregion<->programarea mapping is a DB query. Caches are keyed BY VERSION so
+# switching ?ver= cannot serve another release's geometry.
+dir_cache <- here(glue("scores/cache/{ver}")); dir.create(dir_cache, showWarnings = FALSE, recursive = TRUE)
+lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")            # superseded by manifest metrics (see d_lyrs)
 pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
-sr_pra_csv <- glue("{dir_v}/subregion_programareas.csv")
-sr_bb_csv <- here("scores/cache/subregion_bboxes.csv")
+sr_pra_csv <- glue("{dir_cache}/subregion_programareas.csv")
+sr_bb_csv <- glue("{dir_cache}/subregion_bboxes.csv")
 taxonomy_csv <- here(
   "scores/data/taxonomic_hierarchy_worms_2025-10-30.csv")
 tbl_er <- "ply_ecoregions_2025"
@@ -118,15 +123,13 @@ tbl_sr <- glue("ply_subregions_2026_{ver}")
 tbl_pra <- glue("ply_programareas_2026_{ver}")
 tbl_pra_pm <- "ply_programareas_2026"
 
+# Only what every published version genuinely has. A file that exists for one
+# release and not another belongs behind a capability check, not in a hard stop
+# that refuses to start the app at all.
 v_required <- c(
   mapbox_tkn_txt,
   cell_tif,
   sdm_db,
-  er_gpkg,
-  lyrs_csv,
-  metrics_tif,
-  pra_gpkg,
-  sr_pra_csv,
   taxonomy_csv
 )
 v_missing <- v_required[!file.exists(v_required)]
@@ -402,16 +405,12 @@ sr_choices <- c(
 # - `ATL` : Mainland Atlantic
 # - `ATL` : Atlantic & Gulf of America, incl. Puerto Rico
 
-# * check cached: cell_tif, pra|er_gpkg, metrics_tif, lyrs_csv ----
-# v_f <- file_exists(c(cell_tif, pa_gpkg, er_gpkg, lyrs_csv, metrics_tif))
-v_f <- file_exists(c(cell_tif, pra_gpkg, er_gpkg, lyrs_csv, metrics_tif))
-if (any(!v_f)) {
-  stop(glue(
-    "Required cached files do not exist:
-       {paste(basename(names(v_f)[v_f == F]), collapse = ', ').}
-     Run calc_scores.qmd, chunk: update_cached_downloads."
-  ))
-}
+# * check cached ----
+# Was a second hard stop over the same per-version files as v_required (and it
+# named a notebook, calc_scores.qmd, that v8 replaced). Only cell_tif is still a
+# real prerequisite; the rest are resolved from the manifest or the view DB.
+if (!file_exists(cell_tif))
+  stop(glue("cell id raster missing: {cell_tif}"))
 
 r_cell <- rast(cell_tif)
 
@@ -570,8 +569,6 @@ if (!file.exists(sr_pra_csv)) {
 }
 d_sr_pra <- read_csv(sr_pra_csv)
 
-# * r_metrics ----
-r_metrics <- rast(metrics_tif)
 # NOTE: the old `r_init` terra raster was a ~4 GiB cached default-layer
 # raster (see `scores/cache/r_init_full.tif`) used to seed the initial
 # map's image source via msens::add_cells(). With tiles it's no longer
@@ -580,16 +577,32 @@ r_metrics <- rast(metrics_tif)
 # first hit. The cache file can be deleted whenever.
 
 # * d_sr_bb (cached) ----
+# Was derived from r_metrics_{ver}.tif, a per-version raster stack that existed
+# only for v3-v8 and so made older releases unopenable. A subregion's extent is
+# just the extent of its cells, and the cells are in zone_cell -- so ask the view
+# DB and convert cell ids to lon/lat with the grid registry. No raster, and it
+# works for every published version.
+#
+# Longitude stays in the grid's own frame (usa05 is 0-360) so an Alaska bbox
+# remains contiguous instead of splitting at the antimeridian.
 get_sr_bbox <- function(sr_key) {
-  # sr_key = "GA" # sr_key = "AK"
   pra_sr <- d_sr_pra |>
     filter(subregion_key == !!sr_key) |>
     pull(programarea_key)
-  r <- init(r_cell[[1]], NA)
-  plot(r_metrics[["programarea_key"]])
-  r_sr <- r_metrics[["programarea_key"]] %in% pra_sr
-  r_sr <- mask(r_sr, r_sr, maskvalues = F) |> trim()
-  r_sr |> st_bbox() |> as.numeric()
+  cells <- tbl(con_sdm, "zone") |>
+    filter(fld == "programarea_key", value %in% !!pra_sr) |>
+    select(zone_seq) |>
+    inner_join(tbl(con_sdm, "zone_cell") |> select(zone_seq, cell_id),
+               by = join_by(zone_seq)) |>
+    pull(cell_id)
+  if (!length(cells)) return(rep(NA_real_, 4))
+  g  <- msens::grid_spec_for(msens::grid_for_ver(ver))
+  ll <- msens::cell_lonlat(cells, g, wrap = FALSE)
+  # cell_lonlat returns CENTRES; an extent must cover the cells, so grow by half
+  # a cell. Without this the bbox is inset by 0.025 deg on every side and differs
+  # from the raster-derived values the cached csv holds.
+  c(min(ll$lon) - g$resx / 2, min(ll$lat) - g$resy / 2,
+    max(ll$lon) + g$resx / 2, max(ll$lat) + g$resy / 2)
 }
 if (!file_exists(sr_bb_csv)) {
   for (sr_key in unique(d_sr_pra$subregion_key)) {
