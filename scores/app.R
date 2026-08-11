@@ -378,8 +378,30 @@ if (!file.exists(pra_pts_csv)) {
 
 # * pra_full_sf: full program-area polygons, used to render areas added
 # on the Report tab (so the user can see what they're submitting) ----
-pra_full_sf <- read_sf(pra_gpkg) |>
-  select(programarea_key, programarea_name)
+# Program-area polygons for the Report tab (the user's added areas go on to the
+# scoring API, so this needs real geometry, not just something drawable). Read
+# the vintage's GeoParquet published beside its PMTiles -- geometry depends on
+# the VINTAGE, not the release, so one file serves every version that uses it.
+# The per-version gpkg is the fallback, and existed only for v3-v8.
+pra_full_sf <- local({
+  zk <- if (!is.null(zone_tbl) && "zone_set_key" %in% names(zone_tbl)) {
+    i <- which(zone_tbl$fld == "programarea_key")
+    if (length(i)) zone_tbl$zone_set_key[i[1]] else NA_character_
+  } else NA_character_
+  if (!is.na(zk)) {
+    u <- glue("{msens::atlas_base_url()}/zones/{zk}/zones.parquet")
+    g <- tryCatch(read_sf(u), error = function(e) {
+      message("zone parquet unavailable (", conditionMessage(e), ") - falling back to gpkg"); NULL })
+    if (!is.null(g) && "programarea_key" %in% names(g))
+      return(g |> select(any_of(c("programarea_key", "programarea_name"))))
+  }
+  if (file.exists(pra_gpkg))
+    return(read_sf(pra_gpkg) |> select(programarea_key, programarea_name))
+  # no geometry available for this release: the Report tab's area picker degrades
+  # to WKT-only rather than the whole app refusing to start
+  message("no program-area geometry for ", ver, " - Report tab area picker limited")
+  NULL
+})
 pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
 
 # * sr_choices ----
@@ -415,7 +437,26 @@ if (!file_exists(cell_tif))
 r_cell <- rast(cell_tif)
 
 # * lyrs ----
-d_lyrs <- read_csv(lyrs_csv)
+# Layer picker metadata comes from the MANIFEST, so a release needs no local
+# layers_{ver}.csv (v1/v2 have none, which is one reason they could not render).
+# The csv is kept as a fallback for a release whose manifest predates the fields.
+d_lyrs <- local({
+  cols <- c("lyr_order", "category", "label")
+  if (!is.null(cog_tbl) && all(cols %in% names(cog_tbl))) {
+    d <- cog_tbl[!is.na(cog_tbl$lyr_order), c("metric_key", cols)]
+    d <- d[!duplicated(d$metric_key), ]
+    d <- d[order(d$lyr_order), ]
+    if (nrow(d))
+      return(tibble(order = d$lyr_order, category = d$category,
+                    layer = d$label, lyr = d$metric_key))
+  }
+  if (file.exists(lyrs_csv)) return(read_csv(lyrs_csv, show_col_types = FALSE))
+  # last resort: name the metrics after themselves rather than refuse to start
+  mk <- if (!is.null(cog_tbl)) unique(cog_tbl$metric_key) else character()
+  tibble(order = seq_along(mk), category = "Metrics", layer = mk, lyr = mk)
+})
+message("layer picker: ", nrow(d_lyrs), " layers (",
+        if (!is.null(cog_tbl) && "lyr_order" %in% names(cog_tbl)) "manifest" else "csv/derived", ")")
 
 # ** test lyrs (eval = F for performance) ----
 if (F) {
@@ -2278,6 +2319,9 @@ server <- function(input, output, session) {
       g <- tryCatch(
         {
           if (identical(a$kind, "pra")) {
+            # NULL when the release publishes no program-area geometry; the
+            # tryCatch below turns that into a skipped row rather than a crash
+            if (is.null(pra_full_sf)) stop("no program-area geometry for this version")
             pra_full_sf |>
               filter(programarea_key == a$value) |>
               st_geometry()
