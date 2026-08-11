@@ -1653,6 +1653,23 @@ server_impl <- function(input, output, session) {
   # add_draw_control() after calling this. The main cell-values layer is
   # an XYZ raster source backed by the msens TiTiler factory; only
   # viewport-intersecting tiles (~4-16 per initial load) are fetched.
+  # mapgl declares every optional bundle in its widget definition, so a plain
+  # maplibre() ships them whether or not the app calls them. Measured on a cold
+  # load: 3.7 MB of JavaScript across 39 files, of which html2canvas (194 KB) and
+  # the globe minimap (149 KB) are never touched -- `add_globe_minimap` and
+  # `screenshot` appear zero times in this app. Dropping them is 343 KB less to
+  # download and, more to the point, less to parse on the main thread.
+  #
+  # Conservative by construction: an unknown name is simply not matched, and
+  # anything the app does use stays. If a feature is added later that needs one
+  # of these, remove it from the list rather than working around this.
+  UNUSED_MAP_DEPS <- c("html2canvas", "mapbox-gl-globe-minimap")
+  drop_unused_deps <- function(m) {
+    if (!is.null(m$dependencies))
+      m$dependencies <- Filter(function(d) !(d$name %in% UNUSED_MAP_DEPS), m$dependencies)
+    m
+  }
+
   build_initial_map <- function(sphere = TRUE) {
     n_cols <- 11
     cols_r <- get_pal_colors("spectral_r", n_cols)
@@ -1722,7 +1739,7 @@ server_impl <- function(input, output, session) {
 
   # map ----
   output$map <- renderMaplibre({
-    build_initial_map(sphere = input$tgl_sphere)
+    drop_unused_deps(build_initial_map(sphere = input$tgl_sphere))
   })
 
   # hide the main map loading overlay once style.load fires
@@ -2557,7 +2574,7 @@ server_impl <- function(input, output, session) {
   # toggles in the sidebar apply here too; add_msens_draw_control() is
   # chained on top.
   output$map_rpt <- renderMaplibre({
-    build_initial_map(sphere = input$tgl_sphere) |>
+    drop_unused_deps(build_initial_map(sphere = input$tgl_sphere)) |>
       add_msens_draw_control()
   })
 
