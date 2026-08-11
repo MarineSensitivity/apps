@@ -681,7 +681,14 @@ build_bundle <- function(ver) {
                         ymin = numeric(), xmax = numeric(), ymax = numeric())
     write_csv(d_sr_bb, sr_bb_csv)
   }
-  d_sr_bb <- read_csv(sr_bb_csv, show_col_types = FALSE)
+  # Explicit types: a release with no subregions writes a HEADER-ONLY csv, and
+  # read_csv then guesses `character` for the empty numeric columns, so binding
+  # the FULL row on failed with "Can't combine <double> and <character>" and took
+  # v1/v2 down. The schema is known; state it rather than let it be inferred.
+  d_sr_bb <- read_csv(sr_bb_csv, show_col_types = FALSE,
+                      col_types = cols(subregion_key = col_character(),
+                                       xmin = col_double(), ymin = col_double(),
+                                       xmax = col_double(), ymax = col_double()))
 
   # append FULL bbox = union of subregion bboxes (in-memory only).
   # Previously derived from st_bbox(r_init); with tiles we no longer
