@@ -78,6 +78,35 @@ tbl_er <- "ply_ecoregions_2025"
 tbl_pra <- glue("ply_programareas_2026_{ver}")
 tbl_pra_pm <- "ply_programareas_2026"
 
+# zone outlines from the version manifest ----
+#
+# Same contract as scores/app.R: zone PMTiles are published per VINTAGE
+# (`zones/{zone_set_key}/zones.pmtiles`) and each release's manifest names the
+# one it used, replacing two unversioned filenames on the file host that no
+# committed notebook built. The layer id inside the tiles is the zone TYPE, not
+# the old table name, so URL and source_layer must move together.
+#
+# NULL means the manifest is present and names no such zone type -- the release
+# genuinely lacks it (v1 predates Program Areas), so draw nothing rather than an
+# outline from the wrong era. The unversioned fallback is for a MISSING manifest.
+zone_manifest <- tryCatch(
+  msens::atlas_manifest(ver),
+  error = function(e) { message("manifest unavailable (", conditionMessage(e),
+                                ") - zone outlines fall back to unversioned tiles"); NULL })
+zone_tbl <- if (!is.null(zone_manifest)) zone_manifest$zones else NULL
+
+ztile <- function(zone_type, fallback_tbl) {
+  if (!is.null(zone_tbl) && "pmtiles" %in% names(zone_tbl)) {
+    i <- which(zone_tbl$fld == paste0(zone_type, "_key") & !is.na(zone_tbl$pmtiles))
+    return(if (length(i)) list(url = zone_tbl$pmtiles[i[1]], source_layer = zone_type)
+           else NULL)
+  }
+  list(url          = glue("{pmtiles_base_url}/{fallback_tbl}.pmtiles"),
+       source_layer = fallback_tbl)
+}
+pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
+er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
+
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
 cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
 mask_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
@@ -1112,17 +1141,17 @@ server <- function(input, output, session) {
       projection = ifelse(input$tgl_sphere, "globe", "mercator")
     ) |>
       fit_bounds(er_bbox) |>
-      msens::add_pmline(list(
-        list(url = glue("{pmtiles_base_url}/{tbl_pra_pm}.pmtiles"),
-             source_layer = tbl_pra_pm, id = "pra_ln", source_id = "pra_src",
-             line_color = "white", line_width = 1),
-        list(url = glue("{pmtiles_base_url}/{tbl_er}.pmtiles"),
-             source_layer = tbl_er, id = "er_ln", source_id = "er_src",
-             line_color = "black", line_width = 3, before_id = "pra_ln"))) |>
+      msens::add_pmline(Filter(Negate(is.null), list(
+        if (!is.null(pa <- ztile("programarea", tbl_pra_pm)))
+          c(pa, list(id = "pra_ln", source_id = "pra_src",
+                     line_color = "white", line_width = 1)),
+        if (!is.null(er <- ztile("ecoregion", tbl_er)))
+          c(er, list(id = "er_ln", source_id = "er_src",
+                     line_color = "black", line_width = 3, before_id = "pra_ln"))))) |>
       add_fill_layer(
         id           = "pra_hover",
         source       = "pra_src",
-        source_layer = tbl_pra_pm,
+        source_layer = pra_src_layer,
         fill_opacity = 0.01,
         fill_color   = "white",
         tooltip      = get_column("programarea_name"),
@@ -1183,7 +1212,7 @@ server <- function(input, output, session) {
       add_fill_layer(
         id = "er_ply",
         source = "er_src",
-        source_layer = tbl_er,
+        source_layer = er_src_layer,
         fill_color = match_expr(
           column = "ecoregion_key",
           values = parsed$values,
