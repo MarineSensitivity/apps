@@ -203,14 +203,16 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
     error = function(e) { message("manifest unavailable (", conditionMessage(e),
                                   ") - falling back to SQL tiles"); NULL })
   cog_tbl <- if (!is.null(manifest) && isTRUE(manifest$capabilities$score_cogs)) {
-    cols <- c("metric_key", "subregion_key", "cog", "rescale_min", "rescale_max", "colormap")
+    cols <- c("metric_key", "description", "subregion_key", "cog",
+              "rescale_min", "rescale_max", "colormap")
     mt   <- manifest$metrics[, intersect(cols, names(manifest$metrics)), drop = FALSE]
     # overlays (the "cells outside Program Areas" mask) are rasters the app draws
     # but not quantities it scores, so the manifest keeps them separate; here they
     # join the same lookup, keyed like a metric and carrying no rescale
     ov <- manifest$overlays
     if (!is.null(ov) && nrow(ov)) {
-      ov <- data.frame(metric_key = ov$overlay_key, subregion_key = ov$subregion_key,
+      ov <- data.frame(metric_key = ov$overlay_key, description = NA_character_,
+                     subregion_key = ov$subregion_key,
                        cog = ov$cog, rescale_min = NA_real_, rescale_max = NA_real_,
                        colormap = ov$colormap, stringsAsFactors = FALSE)
       mt <- rbind(mt[, names(ov)], ov)
@@ -260,6 +262,19 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   # that use them sit behind the matching capability gate and are unreachable then
   pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
   er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
+
+  # Which zone outline layers this release actually draws, and therefore what a
+  # later layer may sit BEFORE.
+  #
+  # MapLibre rejects an add with a before_id naming a layer that does not exist,
+  # and the failure cascades: v1 has no Program Areas, so `pra_ln` was never
+  # added, the ecoregion layer asking for before_id="pra_ln" failed, and then the
+  # score raster asking for before_id="er_ln" failed too. The map came up with
+  # nothing but the labels on it.
+  has_pra_ln <- !is.null(ztile("programarea", tbl_pra_pm))
+  has_er_ln  <- !is.null(ztile("ecoregion",  tbl_er))
+  before_er  <- if (has_pra_ln) "pra_ln" else NULL
+  before_r   <- if (has_er_ln) "er_ln" else if (has_pra_ln) "pra_ln" else NULL
 
   cog_of <- function(metric_key, subregion_key = "FULL") {
     if (is.null(cog_tbl)) return(NULL)
@@ -383,7 +398,9 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   # data prep ----
 
   # * pra_pts: program area label points (cached) ----
-  pra_pts_csv <- here("scores/cache/pra_label_pts.csv")
+  # per VERSION: this cache is program-area geometry, and a release without
+  # Program Areas (v1) was drawing v7's labels over an empty map
+  pra_pts_csv <- glue("{dir_cache}/pra_label_pts.csv")
   if (!file.exists(pra_pts_csv)) {
     pra_pts <- read_sf(pra_gpkg) |>
       st_shift_longitude() |>
@@ -493,9 +510,29 @@ pra_geom <- function() {
                       layer = d$label, lyr = d$metric_key))
     }
     if (file.exists(lyrs_csv)) return(read_csv(lyrs_csv, show_col_types = FALSE))
-    # last resort: name the metrics after themselves rather than refuse to start
-    mk <- if (!is.null(cog_tbl)) unique(cog_tbl$metric_key) else character()
-    tibble(order = seq_along(mk), category = "Metrics", layer = mk, lyr = mk)
+
+    # No layers csv (v1/v2): derive friendly names from the manifest rather than
+    # showing raw database column names like `extrisk_all_ecoregion_rescaled`.
+    # `description` is already published per metric ("Extinction risk for all"),
+    # so use it, and put the OVERALL score first -- v2 defaulted to extrisk_all
+    # purely because it sorts first alphabetically.
+    if (is.null(cog_tbl))
+      return(tibble(order = integer(), category = character(),
+                    layer = character(), lyr = character()))
+    d  <- cog_tbl[!duplicated(cog_tbl$metric_key), ]
+    ds <- if ("description" %in% names(d)) d$description else rep(NA_character_, nrow(d))
+    is_score <- grepl("^score", d$metric_key)
+    is_resc  <- grepl("_ecoregion_rescaled$", d$metric_key)
+    lab <- ifelse(is.na(ds) | !nzchar(ds), d$metric_key, ds)
+    lab[is_score] <- "score"                  # the overall index, as older apps named it
+    tibble(lyr      = d$metric_key,
+           layer    = lab,
+           category = ifelse(is_score, "Overall",
+                      ifelse(is_resc, "Species, rescaled by Ecoregion", "Species")),
+           rank     = ifelse(is_score, 0L, ifelse(is_resc, 2L, 1L))) |>
+      arrange(rank, layer) |>
+      mutate(order = row_number()) |>
+      select(order, category, layer, lyr)
   })
   message("layer picker: ", nrow(d_lyrs), " layers (",
           if (!is.null(cog_tbl) && "lyr_order" %in% names(cog_tbl)) "manifest" else "csv/derived", ")")
@@ -1601,20 +1638,20 @@ server_impl <- function(input, output, session) {
                      line_color = "white", line_width = 1)),
         if (!is.null(er <- ztile("ecoregion", tbl_er)))
           c(er, list(id = "er_ln", source_id = "er_src",
-                     line_color = "black", line_width = 3, before_id = "pra_ln"))))) |>
+                     line_color = "black", line_width = 3, before_id = before_er))))) |>
       msens::add_pmlabel(list(
         list(source     = pra_pts,
              text_field = "programarea_key",
              id         = "pra_lbl"))) |>
       msens::add_cell_tiles(
-        initial_tile_url, raster_opacity = 0.6, before_id = "er_ln") |>
+        initial_tile_url, raster_opacity = 0.6, before_id = before_r) |>
       msens::add_cell_tiles(
         outside_pra_tile_url,
         id             = "outside_pra_lyr",
         source_id      = "outside_pra_lyr",
         raster_opacity = 0.55,
         visibility     = "none",
-        before_id      = "er_ln") |>
+        before_id      = before_r) |>
       mapgl::add_legend(
         get_lyr_name(lyr_default),
         values   = rng_r,
@@ -1715,14 +1752,14 @@ server_impl <- function(input, output, session) {
             clear_layer("r_src") |>
             clear_legend() |>
             msens::add_cell_tiles(
-              meta$tile_url, raster_opacity = 0.6, before_id = "er_ln") |>
+              meta$tile_url, raster_opacity = 0.6, before_id = before_r) |>
             msens::add_cell_tiles(
               outside_pra_tile_url,
               id             = "outside_pra_lyr",
               source_id      = "outside_pra_lyr",
               raster_opacity = 0.55,
               visibility     = "none",
-              before_id      = "er_ln") |>
+              before_id      = before_r) |>
             mapgl::add_legend(
               get_lyr_name(input$sel_lyr),
               values   = rng_r,
@@ -1927,7 +1964,7 @@ server_impl <- function(input, output, session) {
               source_id      = "outside_pra_lyr",
               raster_opacity = 0.55,
               visibility     = "none",
-              before_id      = "er_ln") |>
+              before_id      = before_r) |>
             mapgl::add_legend(
               get_lyr_name(input$sel_lyr),
               values   = round(rng_pra, 1),
