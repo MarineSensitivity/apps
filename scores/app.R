@@ -134,7 +134,10 @@ build_bundle <- function(ver) {
   lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")            # superseded by manifest metrics (see d_lyrs)
   pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
   sr_pra_csv <- glue("{dir_cache}/subregion_programareas.csv")
-  sr_bb_csv <- glue("{dir_cache}/subregion_bboxes.csv")
+  # filename carries a schema tag: the cache gained clon/clat (the median cell,
+# used to centre the map), so a cache written before that would be read with
+# missing columns. Bump the tag whenever the columns change.
+sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   taxonomy_csv <- here(
     "scores/data/taxonomic_hierarchy_worms_2025-10-30.csv")
   tbl_er <- "ply_ecoregions_2025"
@@ -402,7 +405,24 @@ build_bundle <- function(ver) {
   # the vintage's GeoParquet published beside its PMTiles -- geometry depends on
   # the VINTAGE, not the release, so one file serves every version that uses it.
   # The per-version gpkg is the fallback, and existed only for v3-v8.
-  pra_full_sf <- local({
+  # Program-area polygons for the Report tab (the user's added areas go on to the
+# scoring API, so this needs real geometry, not just something drawable).
+#
+# LAZY on purpose: the published FlatGeobuf is ~7 MB and only the Report tab ever
+# needs it, so loading it at startup would put a 7 MB download in front of every
+# visitor who just wants the map. Memoised after the first call.
+#
+# Read from the VINTAGE's published geometry, not a per-version gpkg -- geometry
+# depends on the vintage, so one file serves every release that uses it. Local
+# gpkg stays as the fallback (and is faster when present).
+.pra_geom <- NULL
+pra_geom <- function() {
+  if (!is.null(.pra_geom)) return(.pra_geom)
+  g <- NULL
+  if (file.exists(pra_gpkg))
+    g <- tryCatch(read_sf(pra_gpkg) |> select(programarea_key, programarea_name),
+                  error = function(e) NULL)
+  if (is.null(g)) {
     zk <- if (!is.null(zone_tbl) && "zone_set_key" %in% names(zone_tbl)) {
       i <- which(zone_tbl$fld == "programarea_key")
       if (length(i)) zone_tbl$zone_set_key[i[1]] else NA_character_
@@ -410,17 +430,16 @@ build_bundle <- function(ver) {
     if (!is.na(zk)) {
       u <- glue("/vsicurl/{msens::atlas_base_url()}/zones/{zk}/zones.fgb")
       g <- tryCatch(read_sf(u), error = function(e) {
-        message("zone fgb unavailable (", conditionMessage(e), ") - falling back to gpkg"); NULL })
+        message("zone fgb unavailable (", conditionMessage(e), ")"); NULL })
       if (!is.null(g) && "programarea_key" %in% names(g))
-        return(g |> select(any_of(c("programarea_key", "programarea_name"))))
+        g <- g |> select(any_of(c("programarea_key", "programarea_name")))
     }
-    if (file.exists(pra_gpkg))
-      return(read_sf(pra_gpkg) |> select(programarea_key, programarea_name))
-    # no geometry available for this release: the Report tab's area picker degrades
-    # to WKT-only rather than the whole app refusing to start
-    message("no program-area geometry for ", ver, " - Report tab area picker limited")
-    NULL
-  })
+  }
+  if (is.null(g)) message("no program-area geometry for ", ver, " - Report tab area picker limited")
+  .pra_geom <<- g
+  g
+}
+
   pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
 
   # * sr_choices ----
@@ -654,8 +673,14 @@ build_bundle <- function(ver) {
     # cell_lonlat returns CENTRES; an extent must cover the cells, so grow by half
     # a cell. Without this the bbox is inset by 0.025 deg on every side and differs
     # from the raster-derived values the cached csv holds.
+    #
+    # Also carry the MEDIAN cell position. A bbox centre is a poor place to point
+    # a globe: "all US waters" spans 24-82 N, so its bbox centre is 53 N -- up in
+    # the Chukchi, with the Gulf and Caribbean below the horizon. The median cell
+    # sits where the data actually is.
     c(min(ll$lon) - g$resx / 2, min(ll$lat) - g$resy / 2,
-      max(ll$lon) + g$resx / 2, max(ll$lat) + g$resy / 2)
+      max(ll$lon) + g$resx / 2, max(ll$lat) + g$resy / 2,
+      stats::median(ll$lon), stats::median(ll$lat))
   }
   if (!file_exists(sr_bb_csv)) {
     d_sr_bb <- NULL
@@ -664,10 +689,8 @@ build_bundle <- function(ver) {
       bbox <- get_sr_bbox(sr_key)
       d_bb_sr <- tibble(
         subregion_key = sr_key,
-        xmin = bbox[1],
-        ymin = bbox[2],
-        xmax = bbox[3],
-        ymax = bbox[4]
+        xmin = bbox[1], ymin = bbox[2], xmax = bbox[3], ymax = bbox[4],
+        clon = bbox[5], clat = bbox[6]
       )
       d_sr_bb <- if (is.null(d_sr_bb)) d_bb_sr else bind_rows(d_sr_bb, d_bb_sr)
     }
@@ -678,7 +701,8 @@ build_bundle <- function(ver) {
     # frame instead, so the extent falls back to the full map rather than failing.
     if (is.null(d_sr_bb))
       d_sr_bb <- tibble(subregion_key = character(), xmin = numeric(),
-                        ymin = numeric(), xmax = numeric(), ymax = numeric())
+                        ymin = numeric(), xmax = numeric(), ymax = numeric(),
+                        clon = numeric(), clat = numeric())
     write_csv(d_sr_bb, sr_bb_csv)
   }
   # Explicit types: a release with no subregions writes a HEADER-ONLY csv, and
@@ -688,7 +712,8 @@ build_bundle <- function(ver) {
   d_sr_bb <- read_csv(sr_bb_csv, show_col_types = FALSE,
                       col_types = cols(subregion_key = col_character(),
                                        xmin = col_double(), ymin = col_double(),
-                                       xmax = col_double(), ymax = col_double()))
+                                       xmax = col_double(), ymax = col_double(),
+                                       clon = col_double(), clat = col_double()))
 
   # append FULL bbox = union of subregion bboxes (in-memory only).
   # Previously derived from st_bbox(r_init); with tiles we no longer
@@ -707,7 +732,9 @@ build_bundle <- function(ver) {
     }
     d_sr_bb <- bind_rows(
       tibble(subregion_key = "FULL",
-             xmin = full[1], ymin = full[2], xmax = full[3], ymax = full[4]),
+             xmin = full[1], ymin = full[2], xmax = full[3], ymax = full[4],
+             clon = if (nrow(d_sr_bb)) stats::median(d_sr_bb$clon) else mean(full[c(1,3)]),
+             clat = if (nrow(d_sr_bb)) stats::median(d_sr_bb$clat) else mean(full[c(2,4)])),
       d_sr_bb)
   }
 
@@ -727,6 +754,32 @@ build_bundle <- function(ver) {
       as.numeric()
     if (length(b) == 4 && !anyNA(b) && b[3] > 180) { b[1] <- b[1] - 360; b[3] <- b[3] - 360 }
     b
+  }
+
+  # CENTER + ZOOM rather than fitBounds.
+  #
+  # Fitting a bbox that crosses the antimeridian is fragile: the extent is stored
+  # in the grid's 0-360 frame, MapLibre normalises past 180, and the fit silently
+  # inverts (west ends up east of east) so the camera swings to the North Pole.
+  # A centre and a zoom cannot invert. The centre is computed in the CONTINUOUS
+  # frame and wrapped once at the end, so an Alaska spanning the dateline centres
+  # in the Bering Sea rather than halfway around the world.
+  #
+  # Zoom from the span: the globe shows ~360 deg at z0 and halves each level, so
+  # z = log2(360 / span). Latitude counts double because the viewport is wider
+  # than it is tall. Clamped to a sane range and pulled in slightly (-0.35) so the
+  # area sits inside the view rather than flush against the edges.
+  sr_view <- function(sr_key) {
+    b <- sr_bbox(sr_key)
+    if (length(b) != 4 || anyNA(b)) return(list(center = c(-100, 40), zoom = 1.6))
+    ctr <- d_sr_bb |> filter(subregion_key == !!sr_key)
+    lon <- if (nrow(ctr) && !is.na(ctr$clon[1])) ctr$clon[1] else (b[1] + b[3]) / 2
+    lat <- if (nrow(ctr) && !is.na(ctr$clat[1])) ctr$clat[1] else (b[2] + b[4]) / 2
+    if (lon >  180) lon <- lon - 360
+    if (lon < -180) lon <- lon + 360
+    span <- max(b[3] - b[1], (b[4] - b[2]) * 2, 1)
+    z    <- max(0.6, min(6, log2(360 / span) - 0.35))
+    list(center = c(lon, lat), zoom = z)
   }
 
   # Study areas are DERIVED from what the release actually published, not
@@ -764,6 +817,7 @@ build_bundle <- function(ver) {
   initial_rescale  <- initial_lyr$rescale
   initial_tile_url <- initial_lyr$url
   initial_bbox     <- sr_bbox(sr_choices[[1]])
+  initial_view     <- sr_view(sr_choices[[1]])
 
   # "Cells outside Program Areas" overlay: a binary mask served by the same
   # msens TiTiler factory but with the `color=` param (single-color mask
@@ -1036,6 +1090,12 @@ ui_impl <- function(req) page_sidebar(
       input_dark_mode(id = "tgl_dark", mode = "dark")
     )
   ),
+  # Without this, bslib derives the browser/bookmark title by flattening the
+  # `title` argument -- and since ours is a div containing the dark-mode toggle,
+  # the tab read "BOEM Marine Sensitivity (v8) About bslib-component-js 0.12.0
+  # components/dist components.min.js web-components.min.js module bslib".
+  # Carries the version, so a bookmark says which release it points at.
+  window_title = glue("BOEM Marine Sensitivity ({ver})"),
   sidebar = sidebar(
     tags$div(
       id = "tour_subregion",
@@ -1499,7 +1559,8 @@ server_impl <- function(input, output, session) {
       sql      = cell_sql(m_key, sr_key),
       rescale  = lt$rescale,
       tile_url = lt$url,
-      bbox     = sr_bbox(sr_key))
+      bbox     = sr_bbox(sr_key),
+      view     = sr_view(sr_key))
   })
 
   # build_initial_map ----
@@ -1517,7 +1578,9 @@ server_impl <- function(input, output, session) {
       style      = carto_style("dark-matter"),
       projection = ifelse(sphere, "globe", "mercator")
     ) |>
-      fit_bounds(initial_bbox) |>
+      # see sr_view(): a centre+zoom cannot invert across the antimeridian the
+      # way fit_bounds(bbox) did
+      set_view(center = initial_view$center, zoom = initial_view$zoom) |>
       msens::add_pmline(Filter(Negate(is.null), list(
         if (!is.null(pa <- ztile("programarea", tbl_pra_pm)))
           c(pa, list(id = "pra_ln", source_id = "pra_src",
@@ -1651,9 +1714,7 @@ server_impl <- function(input, output, session) {
               values   = rng_r,
               colors   = cols_r,
               position = "bottom-right") |>
-            mapgl::fit_bounds(
-              bbox    = meta$bbox,
-              animate = TRUE) |>
+            mapgl::fly_to(center = meta$view$center, zoom = meta$view$zoom) |>
             clear_controls("layers") |>
             add_layers_control(
               layers = list(
@@ -1765,10 +1826,10 @@ server_impl <- function(input, output, session) {
         rx$clicked_cell <- NULL
         # rx$clicked_pa <- NULL
 
-        sr_bb <- d_sr_bb |>
-          filter(subregion_key == !!sr_key) |>
-          select(xmin, ymin, xmax, ymax) |>
-          as.numeric()
+        # sr_bbox()/sr_view() rather than reading d_sr_bb raw: the stored frame is
+        # 0-360 and must be shifted before it reaches MapLibre (see sr_view)
+        sr_bb <- sr_bbox(sr_key)
+        sr_v  <- sr_view(sr_key)
         if (verbose) {
           message(glue("sr_bb: {paste(round(sr_bb,2), collapse = ', ')}"))
         }
@@ -1858,7 +1919,7 @@ server_impl <- function(input, output, session) {
               values   = round(rng_pra, 1),
               colors   = cols_pra,
               position = "bottom-right") |>
-            mapgl::fit_bounds(sr_bb, animate = TRUE) |>
+            mapgl::fly_to(center = sr_v$center, zoom = sr_v$zoom) |>
             clear_controls("layers") |>
             add_layers_control(
               layers = list(
@@ -2412,8 +2473,9 @@ server_impl <- function(input, output, session) {
           if (identical(a$kind, "pra")) {
             # NULL when the release publishes no program-area geometry; the
             # tryCatch below turns that into a skipped row rather than a crash
-            if (is.null(pra_full_sf)) stop("no program-area geometry for this version")
-            pra_full_sf |>
+            pg <- pra_geom()
+            if (is.null(pg)) stop("no program-area geometry for this version")
+            pg |>
               filter(programarea_key == a$value) |>
               st_geometry()
           } else {
