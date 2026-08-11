@@ -430,13 +430,6 @@ build_bundle <- function(ver) {
   #   "Alaska" = "AK",
   #   "Mainland USA & Alaska" = "AKL48")
   # TODO: version subregions
-  sr_choices <- c(
-    "Full study area" = "FULL",
-    "All USA"         = "USA",
-    "Alaska"          = "AK",
-    "Gulf of America" = "GA",
-    "Pacific"         = "PA"
-  )
   # TODO: add other subregions:
   # - `HI`  : Hawaii
   # - `HIPI`: Hawaii & Pacific Island Territories
@@ -712,12 +705,48 @@ build_bundle <- function(ver) {
   }
 
   # helper: numeric length-4 bbox c(xmin, ymin, xmax, ymax) for a subregion key
+  #
+  # The stored bboxes are in the GRID's frame, which for usa05 is 0-360 so that
+  # Alaska stays contiguous across the antimeridian. MapLibre expects -180..180
+  # and normalises anything above it, so xmax = 275.4 became -84.6, west ended up
+  # EAST of east, and fitBounds fitted the COMPLEMENT -- the camera swung to the
+  # North Pole with Europe and Africa in view while the actual study area sat on
+  # the horizon. Shifting the whole span below 180 keeps west < east and keeps
+  # the antimeridian crossing continuous, which fitBounds handles correctly.
   sr_bbox <- function(sr_key) {
-    d_sr_bb |>
+    b <- d_sr_bb |>
       filter(subregion_key == !!sr_key) |>
       select(xmin, ymin, xmax, ymax) |>
       as.numeric()
+    if (length(b) == 4 && !anyNA(b) && b[3] > 180) { b[1] <- b[1] - 360; b[3] <- b[3] - 360 }
+    b
   }
+
+  # Study areas are DERIVED from what the release actually published, not
+  # hardcoded. The set genuinely differs: v1 has AK/AKL48/L48/USA, v2-v3 add
+  # GA/PA, v8 adds AT (Atlantic) -- which a fixed list silently hid, even though
+  # the whole point of the canonical subregions is to span all US waters.
+  #
+  # "Full study area" (FULL) and "All USA" (USA) were also two labels for one
+  # extent (FULL is the union of the subregion bboxes, i.e. the USA extent), so
+  # the picker offered the same view twice. USA wins where both exist; FULL is
+  # kept only as the fallback when a release has no USA surface.
+  sr_labels <- c(USA = "All US waters", FULL = "Full study area",
+                 AK = "Alaska", AT = "Atlantic", GA = "Gulf of America",
+                 PA = "Pacific", L48 = "Mainland USA",
+                 AKL48 = "Mainland USA & Alaska")
+  sr_choices <- local({
+    have_cog <- if (!is.null(cog_tbl)) unique(cog_tbl$subregion_key) else character()
+    # a study area needs BOTH a surface to draw and an extent to zoom to
+    have_bb  <- d_sr_bb$subregion_key
+    k <- intersect(have_cog, have_bb)
+    if ("USA" %in% k) k <- setdiff(k, "FULL")
+    if (!length(k)) k <- "FULL"
+    ord <- c("USA", "FULL", "AKL48", "L48", "AK", "AT", "GA", "PA")
+    k <- c(intersect(ord, k), sort(setdiff(k, ord)))
+    setNames(k, ifelse(is.na(sr_labels[k]), k, sr_labels[k]))
+  })
+  message("study areas: ", paste(names(sr_choices), collapse = ", "))
 
   # pre-compute initial tile state for build_initial_map() so startup doesn't
   # block on a network round-trip to /msens/statistics every time the map
