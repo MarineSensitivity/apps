@@ -356,7 +356,7 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
         collect()
     }
 
-    r <- init(r_cell[[1]], NA) # plot(r)
+    r <- init(r_cell_open()[[1]], NA) # plot(r)
     r[d$cell_id] <- d$value
 
     r <- trim(r) # plot(r)
@@ -465,7 +465,18 @@ pra_geom <- function() {
   if (!file_exists(cell_tif))
     stop(glue("cell id raster missing: {cell_tif}"))
 
-  r_cell <- rast(cell_tif)
+  # NOT a cached SpatRaster.
+  #
+  # A terra SpatRaster is an EXTERNAL POINTER into C++ memory. The per-version
+  # bundle is memoised across Shiny sessions, so a cached raster gets reused by a
+  # later session whose pointer is stale -- and terra::extract() on a stale
+  # pointer SEGFAULTS the R process. That is what "clicking the map disconnects
+  # the app" was: no R error in the log, no traceback, just a dead process,
+  # because a segfault is not an exception.
+  #
+  # Opening it costs ~10 ms (measured), so open per use and cache only the path.
+  # deliberately NOT stored: every caller opens its own handle
+  r_cell_open <- function() rast(cell_tif)
 
   # * lyrs ----
   # Layer picker metadata comes from the MANIFEST, so a release needs no local
@@ -778,7 +789,10 @@ pra_geom <- function() {
     if (lon >  180) lon <- lon - 360
     if (lon < -180) lon <- lon + 360
     span <- max(b[3] - b[1], (b[4] - b[2]) * 2, 1)
-    z    <- max(0.6, min(6, log2(360 / span) - 0.35))
+    # +0.55 rather than -0.35: at the theoretical fit the globe sat small in the
+    # middle of the viewport with empty space around it, because a sphere shows
+    # only its facing hemisphere. Nudged in so the study area fills the frame.
+    z    <- max(1.2, min(5, log2(360 / span) + 0.55))
     list(center = c(lon, lat), zoom = z)
   }
 
@@ -1961,7 +1975,9 @@ server_impl <- function(input, output, session) {
       ) |>
         st_as_sf() |>
         st_shift_longitude() # [-180,180] -> [0,360]
-      cell_id <- terra::extract(r_cell$cell_id, pt) |> pull(cell_id)
+      # fresh handle: see r_cell_open() -- a bundle-cached SpatRaster is a stale
+      # external pointer in a later session and segfaults the process
+      cell_id <- terra::extract(r_cell_open()$cell_id, pt) |> pull(cell_id)
 
       if (!is.na(cell_id)) {
         rx$clicked_cell <- list(
