@@ -58,7 +58,11 @@ future::plan(future::multisession, workers = 2)
 verbose <- interactive()
 
 # version ----
-ver <- "v8"
+# Default only: the version actually rendered is resolved per request from
+# ?ver= (see ver_of / bundle at the bottom). Kept as the last-resort fallback
+# for when the published registry cannot be reached at all.
+ver_fallback <- "v8"
+ver <- ver_fallback
 
 # APP_VERSION — the deployed commit, stamped on every logged event so a Sheet
 # row ties back to the exact code that produced it (falls back to `ver`).
@@ -88,692 +92,731 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
-dir_v <- glue("{dir_data}/derived/{ver}")
-dir_big <- ifelse(
-  is_server,
-  glue("/share/data/big/{ver}"),
-  glue("~/_big/msens/derived/{ver}")
-)
-is_prod <- Sys.getenv("MSENS_ENV") == "prod"
-pmtiles_base_url <- ifelse(
-  is_prod,
-  "/pmtiles",
-  "https://file.marinesensitivity.org/pmtiles")
-
-mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
-cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
-# server reads the S3-backed view DB (serve.duckdb, views over marine-atlas Parquet — shared
-# with titiler-v8, no multi-GB rsync); local dev uses the full sdm.duckdb
-sdm_db <- { s <- glue("{dir_big}/serve.duckdb"); if (file.exists(s)) s else glue("{dir_big}/sdm.duckdb") }
-# Per-version LOCAL files are gone: everything the app needs now comes from S3
-# (Parquet via serve.duckdb, COGs and PMTiles via the manifest). `er_gpkg` was
-# only ever listed as required and never read; `metrics_tif` existed to derive
-# subregion bboxes that are computed here from zone_cell + cell_lonlat; the
-# subregion<->programarea mapping is a DB query. Caches are keyed BY VERSION so
-# switching ?ver= cannot serve another release's geometry.
-dir_cache <- here(glue("scores/cache/{ver}")); dir.create(dir_cache, showWarnings = FALSE, recursive = TRUE)
-lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")            # superseded by manifest metrics (see d_lyrs)
-pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
-sr_pra_csv <- glue("{dir_cache}/subregion_programareas.csv")
-sr_bb_csv <- glue("{dir_cache}/subregion_bboxes.csv")
-taxonomy_csv <- here(
-  "scores/data/taxonomic_hierarchy_worms_2025-10-30.csv")
-tbl_er <- "ply_ecoregions_2025"
-tbl_sr <- glue("ply_subregions_2026_{ver}")
-tbl_pra <- glue("ply_programareas_2026_{ver}")
-tbl_pra_pm <- "ply_programareas_2026"
-
-# Only what every published version genuinely has. A file that exists for one
-# release and not another belongs behind a capability check, not in a hard stop
-# that refuses to start the app at all.
-v_required <- c(
-  mapbox_tkn_txt,
-  cell_tif,
-  sdm_db,
-  taxonomy_csv
-)
-v_missing <- v_required[!file.exists(v_required)]
-if (length(v_missing) > 0) {
-  stop(glue(
-    "Required files missing:\n  {paste(v_missing, collapse = '\n  ')}"
-  ))
-}
-
-# spp_global_csv <- glue("{dir_data}/derived/spp_global_cache.csv")
-
-if (verbose) {
-  message(glue("Verbose: TRUE"))
-}
-
-# mapbox token ----
-Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
-librarian::shelf(
-  mapgl
-)
-
-# database ----
-con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
-# dbListTables(con_sdm)
-# duckdb_shutdown(duckdb()); rm(con_sdm)
-
-# tile server ----
-# browser-facing titilecache (Varnish) URL; used verbatim in the tile URL
-# template sent to mapbox-gl, and for cell_stats() calls from R.
-tile_base_url <- "https://titiler-v8.marinesensitivity.org"
-# cache-bust tag tied to the sdm.duckdb mtime: if the DB is rebuilt, every
-# cell_tile_url() and cell_stats() URL changes, invalidating the Varnish +
-# browser cache automatically. distinct from the dataset version (`v6`).
-db_mtime <- format(file.info(sdm_db)$mtime, "%Y%m%dT%H%M%SZ", tz = "UTC")
-
-# score COGs from the version manifest ----
-# Every layer this app draws is PRECOMPUTED, so asking titiler to run a SQL
-# SELECT per tile bought nothing while costing a bespoke factory, a SQL
-# validator guarding an injection surface, and a 1M-row cap the US grid already
-# sits just under. The manifest carries a COG href and a build-time rescale per
-# (metric, subregion) — the latter is what removes the /statistics round-trip on
-# every layer switch.
+# ---- per-version bundle -----------------------------------------------------
 #
-# Falls back to the SQL path whenever the manifest, the capability, or a
-# particular surface is missing, so an app pointed at a release that predates the
-# COGs still draws rather than blanking.
-manifest <- tryCatch(
-  msens::atlas_manifest(ver),
-  error = function(e) { message("manifest unavailable (", conditionMessage(e),
-                                ") - falling back to SQL tiles"); NULL })
-cog_tbl <- if (!is.null(manifest) && isTRUE(manifest$capabilities$score_cogs)) {
-  cols <- c("metric_key", "subregion_key", "cog", "rescale_min", "rescale_max", "colormap")
-  mt   <- manifest$metrics[, intersect(cols, names(manifest$metrics)), drop = FALSE]
-  # overlays (the "cells outside Program Areas" mask) are rasters the app draws
-  # but not quantities it scores, so the manifest keeps them separate; here they
-  # join the same lookup, keyed like a metric and carrying no rescale
-  ov <- manifest$overlays
-  if (!is.null(ov) && nrow(ov)) {
-    ov <- data.frame(metric_key = ov$overlay_key, subregion_key = ov$subregion_key,
-                     cog = ov$cog, rescale_min = NA_real_, rescale_max = NA_real_,
-                     colormap = ov$colormap, stringsAsFactors = FALSE)
-    mt <- rbind(mt[, names(ov)], ov)
-  }
-  mt
-} else NULL
-message("score COGs: ", if (is.null(cog_tbl)) "none (SQL fallback)" else nrow(cog_tbl))
-
-# zone outlines from the manifest ----
+# Everything below depends on WHICH release is being rendered. It used to run
+# once at startup against a hardcoded `ver`, which is exactly why the app had to
+# be forked per release. It is now a function of `ver`, memoised per version, so
+# one process can serve v1 and v8 side by side.
 #
-# The zone PMTiles used to be two unversioned filenames on the file host
-# (`ply_programareas_2026`, `ply_ecoregions_2025`) inherited from the archived v7
-# notebook -- nothing built them reproducibly, and every release drew whatever
-# those files happened to contain. They are now published per VINTAGE
-# (`zones/{zone_set_key}/zones.pmtiles`) and each release's manifest names the
-# vintage it actually used, so v3 and v8 can draw different Program Areas.
-#
-# The layer id inside the published tiles is the zone TYPE (`programarea`), not
-# the old table name, so URL and source_layer must move together -- pointing the
-# new URL at the old layer name yields a silently empty overlay.
-zone_tbl <- if (!is.null(manifest)) manifest$zones else NULL
+# The UI and server are re-enclosed in the bundle environment (see the bottom of
+# this file) rather than having every reference rewritten: `con_sdm`, `d_lyrs`,
+# `layer_tiles`, `pra_full_sf` and the rest keep their names and resolve to the
+# requested version, falling through to the globals above for anything shared.
+.bundles <- new.env(parent = emptyenv())
 
-# Returns NULL when the manifest is PRESENT but names no such zone type: that is
-# a positive statement that the release does not have it, not a gap to paper
-# over. v1 predates Program Areas entirely (`capabilities.programareas = FALSE`),
-# so falling back there would draw the 2026 Program Areas over a 2025 Planning
-# Area release -- an outline that looks entirely plausible and is simply wrong.
-# The unversioned fallback is reserved for a missing manifest, where drawing the
-# historical default still beats a blank map.
-ztile <- function(zone_type, fallback_tbl) {
-  if (!is.null(zone_tbl) && "pmtiles" %in% names(zone_tbl)) {
-    i <- which(zone_tbl$fld == paste0(zone_type, "_key") & !is.na(zone_tbl$pmtiles))
-    return(if (length(i)) list(url = zone_tbl$pmtiles[i[1]], source_layer = zone_type)
-           else NULL)
-  }
-  list(url          = glue("{pmtiles_base_url}/{fallback_tbl}.pmtiles"),
-       source_layer = fallback_tbl)
-}
-message("zone tiles: ",
-        if (is.null(zone_tbl) || !"pmtiles" %in% names(zone_tbl))
-          "none (unversioned fallback)" else sum(!is.na(zone_tbl$pmtiles)))
+build_bundle <- function(ver) {
 
-# resolved once: every later add_fill_layer / add_line_layer that reuses the
-# source add_pmline created must name the SAME layer inside those tiles, or it
-# renders nothing at all (no error -- just an empty overlay)
-# %||% keeps these character even when the release has no such zone: the layers
-# that use them sit behind the matching capability gate and are unreachable then
-pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
-er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
-
-cog_of <- function(metric_key, subregion_key = "FULL") {
-  if (is.null(cog_tbl)) return(NULL)
-  i <- which(cog_tbl$metric_key == metric_key & cog_tbl$subregion_key == subregion_key)
-  if (!length(i) || is.na(cog_tbl$cog[i[1]])) return(NULL)
-  list(url      = cog_tbl$cog[i[1]],
-       rescale  = c(cog_tbl$rescale_min[i[1]], cog_tbl$rescale_max[i[1]]),
-       colormap = cog_tbl$colormap[i[1]])
-}
-
-# one place that answers "how do I draw this layer?", COG-first
-layer_tiles <- function(metric_key, subregion_key = "FULL", palette = "spectral_r") {
-  cg <- cog_of(metric_key, subregion_key)
-  if (!is.null(cg))
-    return(list(rescale = cg$rescale,
-                url = msens::cog_tile_url(cg$url, colormap = palette,
-                                          rescale = cg$rescale, base = tile_base_url)))
-  sql <- cell_sql(metric_key, subregion_key)
-  st  <- msens::cell_stats(sql, mtime = db_mtime, base = tile_base_url)
-  rs  <- c(st$min, st$max)
-  list(rescale = rs,
-       url = msens::cell_tile_url(sql, colormap = palette, rescale = rs,
-                                  mtime = db_mtime, base = tile_base_url))
-}
-
-# build the (cell_id, value) SELECT for a given metric + subregion; passed to
-# msens::cell_tile_url() / cell_stats(). strict allowlist on the identifiers
-# to keep the string string-interpolation-safe before it ever hits DuckDB.
-cell_sql <- function(metric_key, subregion_key = "FULL") {
-  stopifnot(
-    is.character(metric_key),   length(metric_key) == 1,
-    grepl("^[A-Za-z0-9_.-]+$", metric_key))
-  stopifnot(
-    is.character(subregion_key), length(subregion_key) == 1,
-    grepl("^[A-Za-z0-9_]+$",   subregion_key))
-  if (subregion_key == "FULL") {
-    glue(
-      "SELECT cm.cell_id, cm.val AS value ",
-      "FROM cell_metric cm ",
-      "JOIN metric m ON cm.metric_seq = m.metric_seq ",
-      "WHERE m.metric_key = '{metric_key}'")
-  } else {
-    glue(
-      "SELECT cm.cell_id, cm.val AS value ",
-      "FROM cell_metric cm ",
-      "JOIN metric     m  ON cm.metric_seq = m.metric_seq ",
-      "JOIN zone_cell  zc ON cm.cell_id    = zc.cell_id ",
-      "JOIN zone       z  ON zc.zone_seq   = z.zone_seq ",
-      "WHERE m.metric_key = '{metric_key}' ",
-      "AND   z.tbl       = '{tbl_sr}' ",
-      "AND   z.fld       = 'subregion_key' ",
-      "AND   z.val       = '{subregion_key}'")
-  }
-}
-
-# helper functions ----
-get_rast <- function(m_key, subregion_key = "FULL") {
-  # m_key         = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"
-  # m_key = "extrisk_mammal"; subregion_key = "FULL" (full study area)
-
-  d_metric <- tbl(con_sdm, "metric") |> # get metric.metric_seq
-    filter(metric_key == !!m_key) |> #   by input$sel_lyr
-    select(metric_seq) |>
-    inner_join(
-      # get cell_metric.value
-      tbl(con_sdm, "cell_metric") |>
-        select(metric_seq, cell_id, value),
-      by = join_by(metric_seq)
-    ) |>
-    select(cell_id, value)
-
-  d <- if (subregion_key == "FULL") {
-    # full study area: all cells with this metric
-    d_metric |> collect()
-  } else {
-    # limit to subregion zone
-    d_metric |>
-      inner_join(
-        tbl(con_sdm, "zone") |>
-          filter(
-            tbl == !!tbl_sr,
-            fld == "subregion_key",
-            value == !!subregion_key
-          ) |>
-          select(zone_seq) |>
-          inner_join(
-            tbl(con_sdm, "zone_cell") |>
-              select(zone_seq, cell_id),
-            by = join_by(zone_seq)
-          ) |>
-          select(cell_id),
-        by = join_by(cell_id)
-      ) |>
-      collect()
-  }
-
-  r <- init(r_cell[[1]], NA) # plot(r)
-  r[d$cell_id] <- d$value
-
-  r <- trim(r) # plot(r)
-
-  r
-}
-
-get_lyr_name <- function(lyr) {
-  # get layer name from d_lyrs
-  lyr_name <- d_lyrs |>
-    filter(lyr == !!lyr) |>
-    pull(layer)
-  if (length(lyr_name) == 0) {
-    stop(glue("Layer '{lyr}' not found in d_lyrs."))
-  }
-  lyr_name
-}
-
-# plot_flower, cells_in_polygon, scores_for_cells, species_for_cells:
-# now provided by the msens package (loaded via librarian::shelf above).
-# Polygon drawing moved from the Map tab to the Report tab; the old
-# paint_drawn_polygon helper was removed along with it.
-
-# data prep ----
-
-# * pra_pts: program area label points (cached) ----
-pra_pts_csv <- here("scores/cache/pra_label_pts.csv")
-if (!file.exists(pra_pts_csv)) {
-  pra_pts <- read_sf(pra_gpkg) |>
-    st_shift_longitude() |>
-    st_point_on_surface() |>
-    select(programarea_key, programarea_name) |>
-    mutate(
-      lng = st_coordinates(geom)[, 1],
-      lat = st_coordinates(geom)[, 2]) |>
-    st_drop_geometry()
-  write_csv(pra_pts, pra_pts_csv)
-} else {
-  pra_pts <- read_csv(pra_pts_csv)
-}
-
-# * pra_full_sf: full program-area polygons, used to render areas added
-# on the Report tab (so the user can see what they're submitting) ----
-# Program-area polygons for the Report tab (the user's added areas go on to the
-# scoring API, so this needs real geometry, not just something drawable). Read
-# the vintage's GeoParquet published beside its PMTiles -- geometry depends on
-# the VINTAGE, not the release, so one file serves every version that uses it.
-# The per-version gpkg is the fallback, and existed only for v3-v8.
-pra_full_sf <- local({
-  zk <- if (!is.null(zone_tbl) && "zone_set_key" %in% names(zone_tbl)) {
-    i <- which(zone_tbl$fld == "programarea_key")
-    if (length(i)) zone_tbl$zone_set_key[i[1]] else NA_character_
-  } else NA_character_
-  if (!is.na(zk)) {
-    u <- glue("{msens::atlas_base_url()}/zones/{zk}/zones.parquet")
-    g <- tryCatch(read_sf(u), error = function(e) {
-      message("zone parquet unavailable (", conditionMessage(e), ") - falling back to gpkg"); NULL })
-    if (!is.null(g) && "programarea_key" %in% names(g))
-      return(g |> select(any_of(c("programarea_key", "programarea_name"))))
-  }
-  if (file.exists(pra_gpkg))
-    return(read_sf(pra_gpkg) |> select(programarea_key, programarea_name))
-  # no geometry available for this release: the Report tab's area picker degrades
-  # to WKT-only rather than the whole app refusing to start
-  message("no program-area geometry for ", ver, " - Report tab area picker limited")
-  NULL
-})
-pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
-
-# * sr_choices ----
-# sr_choices <- c(
-#   "All USA" = "USA",
-#   "Mainland USA" = "L48",
-#   "Alaska" = "AK",
-#   "Mainland USA & Alaska" = "AKL48")
-# TODO: version subregions
-sr_choices <- c(
-  "Full study area" = "FULL",
-  "All USA"         = "USA",
-  "Alaska"          = "AK",
-  "Gulf of America" = "GA",
-  "Pacific"         = "PA"
-)
-# TODO: add other subregions:
-# - `HI`  : Hawaii
-# - `HIPI`: Hawaii & Pacific Island Territories
-# - `HIPI`: Pacific Island Territories
-# - `PAC` : Pacific Islands & Mainland USA
-# - `GOA` : Gulf of America
-# - `ATL` : Mainland Atlantic
-# - `ATL` : Atlantic & Gulf of America, incl. Puerto Rico
-
-# * check cached ----
-# Was a second hard stop over the same per-version files as v_required (and it
-# named a notebook, calc_scores.qmd, that v8 replaced). Only cell_tif is still a
-# real prerequisite; the rest are resolved from the manifest or the view DB.
-if (!file_exists(cell_tif))
-  stop(glue("cell id raster missing: {cell_tif}"))
-
-r_cell <- rast(cell_tif)
-
-# * lyrs ----
-# Layer picker metadata comes from the MANIFEST, so a release needs no local
-# layers_{ver}.csv (v1/v2 have none, which is one reason they could not render).
-# The csv is kept as a fallback for a release whose manifest predates the fields.
-d_lyrs <- local({
-  cols <- c("lyr_order", "category", "label")
-  if (!is.null(cog_tbl) && all(cols %in% names(cog_tbl))) {
-    d <- cog_tbl[!is.na(cog_tbl$lyr_order), c("metric_key", cols)]
-    d <- d[!duplicated(d$metric_key), ]
-    d <- d[order(d$lyr_order), ]
-    if (nrow(d))
-      return(tibble(order = d$lyr_order, category = d$category,
-                    layer = d$label, lyr = d$metric_key))
-  }
-  if (file.exists(lyrs_csv)) return(read_csv(lyrs_csv, show_col_types = FALSE))
-  # last resort: name the metrics after themselves rather than refuse to start
-  mk <- if (!is.null(cog_tbl)) unique(cog_tbl$metric_key) else character()
-  tibble(order = seq_along(mk), category = "Metrics", layer = mk, lyr = mk)
-})
-message("layer picker: ", nrow(d_lyrs), " layers (",
-        if (!is.null(cog_tbl) && "lyr_order" %in% names(cog_tbl)) "manifest" else "csv/derived", ")")
-
-# ** test lyrs (eval = F for performance) ----
-if (F) {
-  source(here("../workflows/libs/db.R")) # con
-  # dbDisconnect(con, shutdown = T)
-
-  # confirm all layers available for both planareas and cell metrics
-  # lyrs_pa <- dbListFields(con, "ply_planareas_2025")
-  lyrs_pra <- dbListFields(con, tbl_pra)
-  lyrs_cell <- tbl(con_sdm, "metric") |>
-    semi_join(
-      tbl(con_sdm, "cell_metric") |>
-        distinct(metric_seq),
-      by = "metric_seq"
-    ) |>
-    pull(metric_key)
-  # stopifnot(all(d_lyrs$lyr %in% lyrs_pa))
-  stopifnot(all(d_lyrs$lyr %in% lyrs_pra))
-  stopifnot(all(d_lyrs$lyr %in% lyrs_cell))
-}
-
-lyr_choices <- d_lyrs |>
-  group_by(order, category) |>
-  summarise(
-    layer = list(setNames(lyr, layer)),
-    .groups = "drop"
-  ) |>
-  arrange(order, layer) |>
-  select(-order) |>
-  deframe()
-
-lyr_default <- d_lyrs$lyr[1]
-
-# palette choices: default + color-blind friendly alternatives (via cblindplot CVD mappings)
-# deuteranopia -> viridis, protanopia -> cividis, tritanopia -> magma
-palette_choices <- c(
-  "Spectral (default)"        = "spectral_r",
-  "Viridis (deuteranopia)"    = "viridis",
-  "Cividis (protanopia)"      = "cividis",
-  "Magma (tritanopia)"        = "magma"
-)
-
-get_pal_colors <- function(pal_key, n = 11) {
-  switch(pal_key,
-    spectral_r = rev(RColorBrewer::brewer.pal(n, "Spectral")),
-    viridis    = viridisLite::viridis(n),
-    cividis    = viridisLite::cividis(n),
-    magma      = viridisLite::magma(n),
-    rev(RColorBrewer::brewer.pal(n, "Spectral"))
+  dir_v <- glue("{dir_data}/derived/{ver}")
+  dir_big <- ifelse(
+    is_server,
+    glue("/share/data/big/{ver}"),
+    glue("~/_big/msens/derived/{ver}")
   )
-}
+  is_prod <- Sys.getenv("MSENS_ENV") == "prod"
+  pmtiles_base_url <- ifelse(
+    is_prod,
+    "/pmtiles",
+    "https://file.marinesensitivity.org/pmtiles")
 
-# * planareas by subregion ---
+  mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
+  cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
+  # server reads the S3-backed view DB (serve.duckdb, views over marine-atlas Parquet — shared
+  # with titiler-v8, no multi-GB rsync); local dev uses the full sdm.duckdb
+  sdm_db <- { s <- glue("{dir_big}/serve.duckdb"); if (file.exists(s)) s else glue("{dir_big}/sdm.duckdb") }
+  # Per-version LOCAL files are gone: everything the app needs now comes from S3
+  # (Parquet via serve.duckdb, COGs and PMTiles via the manifest). `er_gpkg` was
+  # only ever listed as required and never read; `metrics_tif` existed to derive
+  # subregion bboxes that are computed here from zone_cell + cell_lonlat; the
+  # subregion<->programarea mapping is a DB query. Caches are keyed BY VERSION so
+  # switching ?ver= cannot serve another release's geometry.
+  dir_cache <- here(glue("scores/cache/{ver}")); dir.create(dir_cache, showWarnings = FALSE, recursive = TRUE)
+  lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")            # superseded by manifest metrics (see d_lyrs)
+  pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
+  sr_pra_csv <- glue("{dir_cache}/subregion_programareas.csv")
+  sr_bb_csv <- glue("{dir_cache}/subregion_bboxes.csv")
+  taxonomy_csv <- here(
+    "scores/data/taxonomic_hierarchy_worms_2025-10-30.csv")
+  tbl_er <- "ply_ecoregions_2025"
+  tbl_sr <- glue("ply_subregions_2026_{ver}")
+  tbl_pra <- glue("ply_programareas_2026_{ver}")
+  tbl_pra_pm <- "ply_programareas_2026"
 
-# if (!file.exists(sr_pa_csv)) {
-#   # calculate subregion - planarea cells
-#   message(glue("Calculating subregion - planarea cells..."))
-#
-#   # subregion cells
-#   tbl_sr_cell <- tbl(con_sdm, "zone") |>
-#     filter(fld == "subregion_key") |>
-#     select(sr_key = value, zone_seq) |>
-#     inner_join(
-#       tbl(con_sdm, "zone_cell") |>
-#         select(zone_seq, cell_id),
-#       by = join_by(zone_seq)
-#     ) |>
-#     select(sr_key, cell_id)
-#
-#   # planarea cells
-#   tbl_pa_cell <- tbl(con_sdm, "zone") |>
-#     filter(fld == "planarea_key") |>
-#     select(pa_key = value, zone_seq) |>
-#     inner_join(
-#       tbl(con_sdm, "zone_cell") |>
-#         select(zone_seq, cell_id),
-#       by = join_by(zone_seq)
-#     ) |>
-#     select(pa_key, cell_id)
-#
-#   # planareas per subregion
-#   d_sr_pa <- tbl_sr_cell |>
-#     inner_join(
-#       tbl_pa_cell,
-#       by = join_by(cell_id)
-#     ) |>
-#     group_by(sr_key, pa_key) |>
-#     summarise(n_cells = n(), .groups = "drop") |>
-#     arrange(sr_key, pa_key) |>
-#     select(
-#       subregion_key = sr_key,
-#       planarea_key = pa_key
-#     ) |>
-#     collect()
-#
-#   # write to csv
-#   write_csv(d_sr_pa, sr_pa_csv)
-# } else {
-#   d_sr_pa <- read_csv(sr_pa_csv)
-# }
-# sr <- read_sf(sr_gpkg)
+  # Only what every published version genuinely has. A file that exists for one
+  # release and not another belongs behind a capability check, not in a hard stop
+  # that refuses to start the app at all.
+  v_required <- c(
+    mapbox_tkn_txt,
+    cell_tif,
+    sdm_db,
+    taxonomy_csv
+  )
+  v_missing <- v_required[!file.exists(v_required)]
+  if (length(v_missing) > 0) {
+    stop(glue(
+      "Required files missing:\n  {paste(v_missing, collapse = '\n  ')}"
+    ))
+  }
 
-# * programareas by subregion ----
+  # spp_global_csv <- glue("{dir_data}/derived/spp_global_cache.csv")
 
-if (!file.exists(sr_pra_csv)) {
-  # calculate subregion - programarea cells
-  message(glue("Calculating subregion - programarea cells..."))
+  if (verbose) {
+    message(glue("Verbose: TRUE"))
+  }
 
-  # subregion cells
-  tbl_sr_cell <- tbl(con_sdm, "zone") |>
-    filter(
-      tbl == !!tbl_sr,
-      fld == "subregion_key"
-    ) |>
-    select(sr_key = value, zone_seq) |>
-    inner_join(
-      tbl(con_sdm, "zone_cell") |>
-        select(zone_seq, cell_id),
-      by = join_by(zone_seq)
-    ) |>
-    select(sr_key, cell_id)
+  # mapbox token ----
+  Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
+  librarian::shelf(
+    mapgl
+  )
 
-  # programarea cells
-  tbl_pra_cell <- tbl(con_sdm, "zone") |>
-    filter(fld == "programarea_key") |>
-    select(pra_key = value, zone_seq) |>
-    inner_join(
-      tbl(con_sdm, "zone_cell") |>
-        select(zone_seq, cell_id),
-      by = join_by(zone_seq)
-    ) |>
-    select(pra_key, cell_id)
+  # database ----
+  con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
+  # dbListTables(con_sdm)
+  # duckdb_shutdown(duckdb()); rm(con_sdm)
 
-  # programareas per subregion
-  d_sr_pra <- tbl_sr_cell |>
-    inner_join(
-      tbl_pra_cell,
-      by = join_by(cell_id)
-    ) |>
-    group_by(sr_key, pra_key) |>
-    summarise(n_cells = n(), .groups = "drop") |>
-    arrange(sr_key, pra_key) |>
-    select(
-      subregion_key = sr_key,
-      programarea_key = pra_key
-    ) |>
-    collect()
+  # tile server ----
+  # browser-facing titilecache (Varnish) URL; used verbatim in the tile URL
+  # template sent to mapbox-gl, and for cell_stats() calls from R.
+  tile_base_url <- "https://titiler-v8.marinesensitivity.org"
+  # cache-bust tag tied to the sdm.duckdb mtime: if the DB is rebuilt, every
+  # cell_tile_url() and cell_stats() URL changes, invalidating the Varnish +
+  # browser cache automatically. distinct from the dataset version (`v6`).
+  db_mtime <- format(file.info(sdm_db)$mtime, "%Y%m%dT%H%M%SZ", tz = "UTC")
 
-  # write to csv
-  write_csv(d_sr_pra, sr_pra_csv)
-}
-d_sr_pra <- read_csv(sr_pra_csv)
+  # score COGs from the version manifest ----
+  # Every layer this app draws is PRECOMPUTED, so asking titiler to run a SQL
+  # SELECT per tile bought nothing while costing a bespoke factory, a SQL
+  # validator guarding an injection surface, and a 1M-row cap the US grid already
+  # sits just under. The manifest carries a COG href and a build-time rescale per
+  # (metric, subregion) — the latter is what removes the /statistics round-trip on
+  # every layer switch.
+  #
+  # Falls back to the SQL path whenever the manifest, the capability, or a
+  # particular surface is missing, so an app pointed at a release that predates the
+  # COGs still draws rather than blanking.
+  manifest <- tryCatch(
+    msens::atlas_manifest(ver),
+    error = function(e) { message("manifest unavailable (", conditionMessage(e),
+                                  ") - falling back to SQL tiles"); NULL })
+  cog_tbl <- if (!is.null(manifest) && isTRUE(manifest$capabilities$score_cogs)) {
+    cols <- c("metric_key", "subregion_key", "cog", "rescale_min", "rescale_max", "colormap")
+    mt   <- manifest$metrics[, intersect(cols, names(manifest$metrics)), drop = FALSE]
+    # overlays (the "cells outside Program Areas" mask) are rasters the app draws
+    # but not quantities it scores, so the manifest keeps them separate; here they
+    # join the same lookup, keyed like a metric and carrying no rescale
+    ov <- manifest$overlays
+    if (!is.null(ov) && nrow(ov)) {
+      ov <- data.frame(metric_key = ov$overlay_key, subregion_key = ov$subregion_key,
+                       cog = ov$cog, rescale_min = NA_real_, rescale_max = NA_real_,
+                       colormap = ov$colormap, stringsAsFactors = FALSE)
+      mt <- rbind(mt[, names(ov)], ov)
+    }
+    mt
+  } else NULL
+  message("score COGs: ", if (is.null(cog_tbl)) "none (SQL fallback)" else nrow(cog_tbl))
 
-# NOTE: the old `r_init` terra raster was a ~4 GiB cached default-layer
-# raster (see `scores/cache/r_init_full.tif`) used to seed the initial
-# map's image source via msens::add_cells(). With tiles it's no longer
-# needed — the browser fetches only the viewport's tiles on startup
-# (~4-16 PNGs @ ~5-20 KB each), served cached from Varnish after the
-# first hit. The cache file can be deleted whenever.
+  # zone outlines from the manifest ----
+  #
+  # The zone PMTiles used to be two unversioned filenames on the file host
+  # (`ply_programareas_2026`, `ply_ecoregions_2025`) inherited from the archived v7
+  # notebook -- nothing built them reproducibly, and every release drew whatever
+  # those files happened to contain. They are now published per VINTAGE
+  # (`zones/{zone_set_key}/zones.pmtiles`) and each release's manifest names the
+  # vintage it actually used, so v3 and v8 can draw different Program Areas.
+  #
+  # The layer id inside the published tiles is the zone TYPE (`programarea`), not
+  # the old table name, so URL and source_layer must move together -- pointing the
+  # new URL at the old layer name yields a silently empty overlay.
+  zone_tbl <- if (!is.null(manifest)) manifest$zones else NULL
 
-# * d_sr_bb (cached) ----
-# Was derived from r_metrics_{ver}.tif, a per-version raster stack that existed
-# only for v3-v8 and so made older releases unopenable. A subregion's extent is
-# just the extent of its cells, and the cells are in zone_cell -- so ask the view
-# DB and convert cell ids to lon/lat with the grid registry. No raster, and it
-# works for every published version.
-#
-# Longitude stays in the grid's own frame (usa05 is 0-360) so an Alaska bbox
-# remains contiguous instead of splitting at the antimeridian.
-get_sr_bbox <- function(sr_key) {
-  pra_sr <- d_sr_pra |>
-    filter(subregion_key == !!sr_key) |>
-    pull(programarea_key)
-  cells <- tbl(con_sdm, "zone") |>
-    filter(fld == "programarea_key", value %in% !!pra_sr) |>
-    select(zone_seq) |>
-    inner_join(tbl(con_sdm, "zone_cell") |> select(zone_seq, cell_id),
-               by = join_by(zone_seq)) |>
-    pull(cell_id)
-  if (!length(cells)) return(rep(NA_real_, 4))
-  g  <- msens::grid_spec_for(msens::grid_for_ver(ver))
-  ll <- msens::cell_lonlat(cells, g, wrap = FALSE)
-  # cell_lonlat returns CENTRES; an extent must cover the cells, so grow by half
-  # a cell. Without this the bbox is inset by 0.025 deg on every side and differs
-  # from the raster-derived values the cached csv holds.
-  c(min(ll$lon) - g$resx / 2, min(ll$lat) - g$resy / 2,
-    max(ll$lon) + g$resx / 2, max(ll$lat) + g$resy / 2)
-}
-if (!file_exists(sr_bb_csv)) {
-  for (sr_key in unique(d_sr_pra$subregion_key)) {
-    # sr_key = "GA"
-    bbox <- get_sr_bbox(sr_key)
-    d_bb_sr <- tibble(
-      subregion_key = sr_key,
-      xmin = bbox[1],
-      ymin = bbox[2],
-      xmax = bbox[3],
-      ymax = bbox[4]
-    )
-    if (!exists("d_sr_bb")) {
-      d_sr_bb <- d_bb_sr
+  # Returns NULL when the manifest is PRESENT but names no such zone type: that is
+  # a positive statement that the release does not have it, not a gap to paper
+  # over. v1 predates Program Areas entirely (`capabilities.programareas = FALSE`),
+  # so falling back there would draw the 2026 Program Areas over a 2025 Planning
+  # Area release -- an outline that looks entirely plausible and is simply wrong.
+  # The unversioned fallback is reserved for a missing manifest, where drawing the
+  # historical default still beats a blank map.
+  ztile <- function(zone_type, fallback_tbl) {
+    if (!is.null(zone_tbl) && "pmtiles" %in% names(zone_tbl)) {
+      i <- which(zone_tbl$fld == paste0(zone_type, "_key") & !is.na(zone_tbl$pmtiles))
+      return(if (length(i)) list(url = zone_tbl$pmtiles[i[1]], source_layer = zone_type)
+             else NULL)
+    }
+    list(url          = glue("{pmtiles_base_url}/{fallback_tbl}.pmtiles"),
+         source_layer = fallback_tbl)
+  }
+  message("zone tiles: ",
+          if (is.null(zone_tbl) || !"pmtiles" %in% names(zone_tbl))
+            "none (unversioned fallback)" else sum(!is.na(zone_tbl$pmtiles)))
+
+  # resolved once: every later add_fill_layer / add_line_layer that reuses the
+  # source add_pmline created must name the SAME layer inside those tiles, or it
+  # renders nothing at all (no error -- just an empty overlay)
+  # %||% keeps these character even when the release has no such zone: the layers
+  # that use them sit behind the matching capability gate and are unreachable then
+  pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
+  er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
+
+  cog_of <- function(metric_key, subregion_key = "FULL") {
+    if (is.null(cog_tbl)) return(NULL)
+    i <- which(cog_tbl$metric_key == metric_key & cog_tbl$subregion_key == subregion_key)
+    if (!length(i) || is.na(cog_tbl$cog[i[1]])) return(NULL)
+    list(url      = cog_tbl$cog[i[1]],
+         rescale  = c(cog_tbl$rescale_min[i[1]], cog_tbl$rescale_max[i[1]]),
+         colormap = cog_tbl$colormap[i[1]])
+  }
+
+  # one place that answers "how do I draw this layer?", COG-first
+  layer_tiles <- function(metric_key, subregion_key = "FULL", palette = "spectral_r") {
+    cg <- cog_of(metric_key, subregion_key)
+    if (!is.null(cg))
+      return(list(rescale = cg$rescale,
+                  url = msens::cog_tile_url(cg$url, colormap = palette,
+                                            rescale = cg$rescale, base = tile_base_url)))
+    sql <- cell_sql(metric_key, subregion_key)
+    st  <- msens::cell_stats(sql, mtime = db_mtime, base = tile_base_url)
+    rs  <- c(st$min, st$max)
+    list(rescale = rs,
+         url = msens::cell_tile_url(sql, colormap = palette, rescale = rs,
+                                    mtime = db_mtime, base = tile_base_url))
+  }
+
+  # build the (cell_id, value) SELECT for a given metric + subregion; passed to
+  # msens::cell_tile_url() / cell_stats(). strict allowlist on the identifiers
+  # to keep the string string-interpolation-safe before it ever hits DuckDB.
+  cell_sql <- function(metric_key, subregion_key = "FULL") {
+    stopifnot(
+      is.character(metric_key),   length(metric_key) == 1,
+      grepl("^[A-Za-z0-9_.-]+$", metric_key))
+    stopifnot(
+      is.character(subregion_key), length(subregion_key) == 1,
+      grepl("^[A-Za-z0-9_]+$",   subregion_key))
+    if (subregion_key == "FULL") {
+      glue(
+        "SELECT cm.cell_id, cm.val AS value ",
+        "FROM cell_metric cm ",
+        "JOIN metric m ON cm.metric_seq = m.metric_seq ",
+        "WHERE m.metric_key = '{metric_key}'")
     } else {
-      d_sr_bb <- bind_rows(d_sr_bb, d_bb_sr)
+      glue(
+        "SELECT cm.cell_id, cm.val AS value ",
+        "FROM cell_metric cm ",
+        "JOIN metric     m  ON cm.metric_seq = m.metric_seq ",
+        "JOIN zone_cell  zc ON cm.cell_id    = zc.cell_id ",
+        "JOIN zone       z  ON zc.zone_seq   = z.zone_seq ",
+        "WHERE m.metric_key = '{metric_key}' ",
+        "AND   z.tbl       = '{tbl_sr}' ",
+        "AND   z.fld       = 'subregion_key' ",
+        "AND   z.val       = '{subregion_key}'")
     }
   }
-  write_csv(d_sr_bb, sr_bb_csv)
-}
-d_sr_bb <- read_csv(sr_bb_csv)
 
-# append FULL bbox = union of subregion bboxes (in-memory only).
-# Previously derived from st_bbox(r_init); with tiles we no longer
-# materialize a full-extent raster, so take the min/max of the cached
-# subregion bboxes instead — same extent in the 0-360° longitude
-# convention the bboxes share with r_cell / r_metrics.
-if (!"FULL" %in% d_sr_bb$subregion_key) {
-  d_sr_bb <- bind_rows(
-    tibble(
-      subregion_key = "FULL",
-      xmin = min(d_sr_bb$xmin), ymin = min(d_sr_bb$ymin),
-      xmax = max(d_sr_bb$xmax), ymax = max(d_sr_bb$ymax)),
-    d_sr_bb)
-}
+  # helper functions ----
+  get_rast <- function(m_key, subregion_key = "FULL") {
+    # m_key         = "score_extriskspcat_primprod_ecoregionrescaled_equalweights"
+    # m_key = "extrisk_mammal"; subregion_key = "FULL" (full study area)
 
-# helper: numeric length-4 bbox c(xmin, ymin, xmax, ymax) for a subregion key
-sr_bbox <- function(sr_key) {
-  d_sr_bb |>
-    filter(subregion_key == !!sr_key) |>
-    select(xmin, ymin, xmax, ymax) |>
-    as.numeric()
-}
+    d_metric <- tbl(con_sdm, "metric") |> # get metric.metric_seq
+      filter(metric_key == !!m_key) |> #   by input$sel_lyr
+      select(metric_seq) |>
+      inner_join(
+        # get cell_metric.value
+        tbl(con_sdm, "cell_metric") |>
+          select(metric_seq, cell_id, value),
+        by = join_by(metric_seq)
+      ) |>
+      select(cell_id, value)
 
-# pre-compute initial tile state for build_initial_map() so startup doesn't
-# block on a network round-trip to /msens/statistics every time the map
-# re-renders (sphere toggle, etc.). Varnish caches this anyway; warming
-# it once at boot keeps the critical path synchronous-but-fast.
-initial_sql      <- cell_sql(lyr_default, sr_choices[[1]])
-initial_lyr      <- layer_tiles(lyr_default, sr_choices[[1]])
-initial_rescale  <- initial_lyr$rescale
-initial_tile_url <- initial_lyr$url
-initial_bbox     <- sr_bbox(sr_choices[[1]])
+    d <- if (subregion_key == "FULL") {
+      # full study area: all cells with this metric
+      d_metric |> collect()
+    } else {
+      # limit to subregion zone
+      d_metric |>
+        inner_join(
+          tbl(con_sdm, "zone") |>
+            filter(
+              tbl == !!tbl_sr,
+              fld == "subregion_key",
+              value == !!subregion_key
+            ) |>
+            select(zone_seq) |>
+            inner_join(
+              tbl(con_sdm, "zone_cell") |>
+                select(zone_seq, cell_id),
+              by = join_by(zone_seq)
+            ) |>
+            select(cell_id),
+          by = join_by(cell_id)
+        ) |>
+        collect()
+    }
 
-# "Cells outside Program Areas" overlay: a binary mask served by the same
-# msens TiTiler factory but with the `color=` param (single-color mask
-# render, bypassing colormap/rescale). Replaces the old r_outside_pra
-# terra raster + msens::add_cells(..., colors = c("#222222","#222222")).
-outside_pra_sql <- paste0(
-  "SELECT c.cell_id, 1.0 AS value ",
-  "FROM (SELECT DISTINCT cell_id FROM cell_metric) c ",
-  "WHERE c.cell_id NOT IN (",
-  "SELECT zc.cell_id FROM zone_cell zc ",
-  "JOIN zone z ON zc.zone_seq = z.zone_seq ",
-  "WHERE z.fld = 'programarea_key'",
-  ")")
-outside_pra_tile_url <- local({
-  cg <- cog_of("_outside_pra", "FULL")
-  if (!is.null(cg))
-    msens::cog_tile_url(cg$url, color = "#222222", base = tile_base_url)
-  else
-    msens::cell_tile_url(outside_pra_sql, color = "#222222",
-                         mtime = db_mtime, base = tile_base_url)
-})
+    r <- init(r_cell[[1]], NA) # plot(r)
+    r[d$cell_id] <- d$value
 
-# NOTE: the previous r_outside_pra terra raster (cached to
-# scores/cache/r_cells_outside_pra.tif) is gone — the same "cells with
-# metric values but outside any Program Area" mask is now rendered by
-# the msens TiTiler factory via `outside_pra_tile_url` (defined above,
-# SQL: cell_metric cell_ids NOT IN any zone where fld='programarea_key').
+    r <- trim(r) # plot(r)
 
-# * default subregion flower-plot data (cached) ----
-# Pre-compute the flower-plot tibble for each subregion zone (USA, AK, GA,
-# PA) once at startup so the default Plot of Scores tab loads instantly.
-# zone_metric for subregions was added by the cell_metrics_to_zone_metrics
-# chunk in calc_scores.qmd; if it's missing for some reason this still
-# falls back to on-the-fly aggregation across cell_metric x zone_cell.
-flower_default_csv <- here("scores/cache/flower_default_subregions.csv")
-if (!file_exists(flower_default_csv)) {
-  if (verbose) message("Building flower_default_subregions cache...")
-  d_flower_default <- tbl(con_sdm, "zone") |>
-    filter(tbl == !!tbl_sr, fld == "subregion_key") |>
-    select(zone_seq, subregion_key = value) |>
-    inner_join(tbl(con_sdm, "zone_metric"), by = "zone_seq") |>
-    inner_join(
-      tbl(con_sdm, "metric") |>
-        filter(str_detect(metric_key, ".*_ecoregion_rescaled$")) |>
-        select(metric_seq, metric_key),
-      by = "metric_seq") |>
-    select(subregion_key, metric_key, score = value) |>
-    collect() |>
-    mutate(
-      component = metric_key |>
-        str_replace("extrisk_", "") |>
-        str_replace("_ecoregion_rescaled", "") |>
-        str_replace("_", " "),
-      even = 1) |>
-    filter(component != "all")
-  if (nrow(d_flower_default) == 0) {
-    warning("No subregion zone_metric rows; default flower plot will be empty. ",
-            "Re-run the cell_metrics_to_zone_metrics chunk in calc_scores.qmd.")
+    r
   }
-  write_csv(d_flower_default, flower_default_csv)
+
+  get_lyr_name <- function(lyr) {
+    # get layer name from d_lyrs
+    lyr_name <- d_lyrs |>
+      filter(lyr == !!lyr) |>
+      pull(layer)
+    if (length(lyr_name) == 0) {
+      stop(glue("Layer '{lyr}' not found in d_lyrs."))
+    }
+    lyr_name
+  }
+
+  # plot_flower, cells_in_polygon, scores_for_cells, species_for_cells:
+  # now provided by the msens package (loaded via librarian::shelf above).
+  # Polygon drawing moved from the Map tab to the Report tab; the old
+  # paint_drawn_polygon helper was removed along with it.
+
+  # data prep ----
+
+  # * pra_pts: program area label points (cached) ----
+  pra_pts_csv <- here("scores/cache/pra_label_pts.csv")
+  if (!file.exists(pra_pts_csv)) {
+    pra_pts <- read_sf(pra_gpkg) |>
+      st_shift_longitude() |>
+      st_point_on_surface() |>
+      select(programarea_key, programarea_name) |>
+      mutate(
+        lng = st_coordinates(geom)[, 1],
+        lat = st_coordinates(geom)[, 2]) |>
+      st_drop_geometry()
+    write_csv(pra_pts, pra_pts_csv)
+  } else {
+    pra_pts <- read_csv(pra_pts_csv)
+  }
+
+  # * pra_full_sf: full program-area polygons, used to render areas added
+  # on the Report tab (so the user can see what they're submitting) ----
+  # Program-area polygons for the Report tab (the user's added areas go on to the
+  # scoring API, so this needs real geometry, not just something drawable). Read
+  # the vintage's GeoParquet published beside its PMTiles -- geometry depends on
+  # the VINTAGE, not the release, so one file serves every version that uses it.
+  # The per-version gpkg is the fallback, and existed only for v3-v8.
+  pra_full_sf <- local({
+    zk <- if (!is.null(zone_tbl) && "zone_set_key" %in% names(zone_tbl)) {
+      i <- which(zone_tbl$fld == "programarea_key")
+      if (length(i)) zone_tbl$zone_set_key[i[1]] else NA_character_
+    } else NA_character_
+    if (!is.na(zk)) {
+      u <- glue("{msens::atlas_base_url()}/zones/{zk}/zones.parquet")
+      g <- tryCatch(read_sf(u), error = function(e) {
+        message("zone parquet unavailable (", conditionMessage(e), ") - falling back to gpkg"); NULL })
+      if (!is.null(g) && "programarea_key" %in% names(g))
+        return(g |> select(any_of(c("programarea_key", "programarea_name"))))
+    }
+    if (file.exists(pra_gpkg))
+      return(read_sf(pra_gpkg) |> select(programarea_key, programarea_name))
+    # no geometry available for this release: the Report tab's area picker degrades
+    # to WKT-only rather than the whole app refusing to start
+    message("no program-area geometry for ", ver, " - Report tab area picker limited")
+    NULL
+  })
+  pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
+
+  # * sr_choices ----
+  # sr_choices <- c(
+  #   "All USA" = "USA",
+  #   "Mainland USA" = "L48",
+  #   "Alaska" = "AK",
+  #   "Mainland USA & Alaska" = "AKL48")
+  # TODO: version subregions
+  sr_choices <- c(
+    "Full study area" = "FULL",
+    "All USA"         = "USA",
+    "Alaska"          = "AK",
+    "Gulf of America" = "GA",
+    "Pacific"         = "PA"
+  )
+  # TODO: add other subregions:
+  # - `HI`  : Hawaii
+  # - `HIPI`: Hawaii & Pacific Island Territories
+  # - `HIPI`: Pacific Island Territories
+  # - `PAC` : Pacific Islands & Mainland USA
+  # - `GOA` : Gulf of America
+  # - `ATL` : Mainland Atlantic
+  # - `ATL` : Atlantic & Gulf of America, incl. Puerto Rico
+
+  # * check cached ----
+  # Was a second hard stop over the same per-version files as v_required (and it
+  # named a notebook, calc_scores.qmd, that v8 replaced). Only cell_tif is still a
+  # real prerequisite; the rest are resolved from the manifest or the view DB.
+  if (!file_exists(cell_tif))
+    stop(glue("cell id raster missing: {cell_tif}"))
+
+  r_cell <- rast(cell_tif)
+
+  # * lyrs ----
+  # Layer picker metadata comes from the MANIFEST, so a release needs no local
+  # layers_{ver}.csv (v1/v2 have none, which is one reason they could not render).
+  # The csv is kept as a fallback for a release whose manifest predates the fields.
+  d_lyrs <- local({
+    cols <- c("lyr_order", "category", "label")
+    if (!is.null(cog_tbl) && all(cols %in% names(cog_tbl))) {
+      d <- cog_tbl[!is.na(cog_tbl$lyr_order), c("metric_key", cols)]
+      d <- d[!duplicated(d$metric_key), ]
+      d <- d[order(d$lyr_order), ]
+      if (nrow(d))
+        return(tibble(order = d$lyr_order, category = d$category,
+                      layer = d$label, lyr = d$metric_key))
+    }
+    if (file.exists(lyrs_csv)) return(read_csv(lyrs_csv, show_col_types = FALSE))
+    # last resort: name the metrics after themselves rather than refuse to start
+    mk <- if (!is.null(cog_tbl)) unique(cog_tbl$metric_key) else character()
+    tibble(order = seq_along(mk), category = "Metrics", layer = mk, lyr = mk)
+  })
+  message("layer picker: ", nrow(d_lyrs), " layers (",
+          if (!is.null(cog_tbl) && "lyr_order" %in% names(cog_tbl)) "manifest" else "csv/derived", ")")
+
+  # ** test lyrs (eval = F for performance) ----
+  if (F) {
+    source(here("../workflows/libs/db.R")) # con
+    # dbDisconnect(con, shutdown = T)
+
+    # confirm all layers available for both planareas and cell metrics
+    # lyrs_pa <- dbListFields(con, "ply_planareas_2025")
+    lyrs_pra <- dbListFields(con, tbl_pra)
+    lyrs_cell <- tbl(con_sdm, "metric") |>
+      semi_join(
+        tbl(con_sdm, "cell_metric") |>
+          distinct(metric_seq),
+        by = "metric_seq"
+      ) |>
+      pull(metric_key)
+    # stopifnot(all(d_lyrs$lyr %in% lyrs_pa))
+    stopifnot(all(d_lyrs$lyr %in% lyrs_pra))
+    stopifnot(all(d_lyrs$lyr %in% lyrs_cell))
+  }
+
+  lyr_choices <- d_lyrs |>
+    group_by(order, category) |>
+    summarise(
+      layer = list(setNames(lyr, layer)),
+      .groups = "drop"
+    ) |>
+    arrange(order, layer) |>
+    select(-order) |>
+    deframe()
+
+  lyr_default <- d_lyrs$lyr[1]
+
+  # palette choices: default + color-blind friendly alternatives (via cblindplot CVD mappings)
+  # deuteranopia -> viridis, protanopia -> cividis, tritanopia -> magma
+  palette_choices <- c(
+    "Spectral (default)"        = "spectral_r",
+    "Viridis (deuteranopia)"    = "viridis",
+    "Cividis (protanopia)"      = "cividis",
+    "Magma (tritanopia)"        = "magma"
+  )
+
+  get_pal_colors <- function(pal_key, n = 11) {
+    switch(pal_key,
+      spectral_r = rev(RColorBrewer::brewer.pal(n, "Spectral")),
+      viridis    = viridisLite::viridis(n),
+      cividis    = viridisLite::cividis(n),
+      magma      = viridisLite::magma(n),
+      rev(RColorBrewer::brewer.pal(n, "Spectral"))
+    )
+  }
+
+  # * planareas by subregion ---
+
+  # if (!file.exists(sr_pa_csv)) {
+  #   # calculate subregion - planarea cells
+  #   message(glue("Calculating subregion - planarea cells..."))
+  #
+  #   # subregion cells
+  #   tbl_sr_cell <- tbl(con_sdm, "zone") |>
+  #     filter(fld == "subregion_key") |>
+  #     select(sr_key = value, zone_seq) |>
+  #     inner_join(
+  #       tbl(con_sdm, "zone_cell") |>
+  #         select(zone_seq, cell_id),
+  #       by = join_by(zone_seq)
+  #     ) |>
+  #     select(sr_key, cell_id)
+  #
+  #   # planarea cells
+  #   tbl_pa_cell <- tbl(con_sdm, "zone") |>
+  #     filter(fld == "planarea_key") |>
+  #     select(pa_key = value, zone_seq) |>
+  #     inner_join(
+  #       tbl(con_sdm, "zone_cell") |>
+  #         select(zone_seq, cell_id),
+  #       by = join_by(zone_seq)
+  #     ) |>
+  #     select(pa_key, cell_id)
+  #
+  #   # planareas per subregion
+  #   d_sr_pa <- tbl_sr_cell |>
+  #     inner_join(
+  #       tbl_pa_cell,
+  #       by = join_by(cell_id)
+  #     ) |>
+  #     group_by(sr_key, pa_key) |>
+  #     summarise(n_cells = n(), .groups = "drop") |>
+  #     arrange(sr_key, pa_key) |>
+  #     select(
+  #       subregion_key = sr_key,
+  #       planarea_key = pa_key
+  #     ) |>
+  #     collect()
+  #
+  #   # write to csv
+  #   write_csv(d_sr_pa, sr_pa_csv)
+  # } else {
+  #   d_sr_pa <- read_csv(sr_pa_csv)
+  # }
+  # sr <- read_sf(sr_gpkg)
+
+  # * programareas by subregion ----
+
+  if (!file.exists(sr_pra_csv)) {
+    # calculate subregion - programarea cells
+    message(glue("Calculating subregion - programarea cells..."))
+
+    # subregion cells
+    tbl_sr_cell <- tbl(con_sdm, "zone") |>
+      filter(
+        tbl == !!tbl_sr,
+        fld == "subregion_key"
+      ) |>
+      select(sr_key = value, zone_seq) |>
+      inner_join(
+        tbl(con_sdm, "zone_cell") |>
+          select(zone_seq, cell_id),
+        by = join_by(zone_seq)
+      ) |>
+      select(sr_key, cell_id)
+
+    # programarea cells
+    tbl_pra_cell <- tbl(con_sdm, "zone") |>
+      filter(fld == "programarea_key") |>
+      select(pra_key = value, zone_seq) |>
+      inner_join(
+        tbl(con_sdm, "zone_cell") |>
+          select(zone_seq, cell_id),
+        by = join_by(zone_seq)
+      ) |>
+      select(pra_key, cell_id)
+
+    # programareas per subregion
+    d_sr_pra <- tbl_sr_cell |>
+      inner_join(
+        tbl_pra_cell,
+        by = join_by(cell_id)
+      ) |>
+      group_by(sr_key, pra_key) |>
+      summarise(n_cells = n(), .groups = "drop") |>
+      arrange(sr_key, pra_key) |>
+      select(
+        subregion_key = sr_key,
+        programarea_key = pra_key
+      ) |>
+      collect()
+
+    # write to csv
+    write_csv(d_sr_pra, sr_pra_csv)
+  }
+  d_sr_pra <- read_csv(sr_pra_csv)
+
+  # NOTE: the old `r_init` terra raster was a ~4 GiB cached default-layer
+  # raster (see `scores/cache/r_init_full.tif`) used to seed the initial
+  # map's image source via msens::add_cells(). With tiles it's no longer
+  # needed — the browser fetches only the viewport's tiles on startup
+  # (~4-16 PNGs @ ~5-20 KB each), served cached from Varnish after the
+  # first hit. The cache file can be deleted whenever.
+
+  # * d_sr_bb (cached) ----
+  # Was derived from r_metrics_{ver}.tif, a per-version raster stack that existed
+  # only for v3-v8 and so made older releases unopenable. A subregion's extent is
+  # just the extent of its cells, and the cells are in zone_cell -- so ask the view
+  # DB and convert cell ids to lon/lat with the grid registry. No raster, and it
+  # works for every published version.
+  #
+  # Longitude stays in the grid's own frame (usa05 is 0-360) so an Alaska bbox
+  # remains contiguous instead of splitting at the antimeridian.
+  get_sr_bbox <- function(sr_key) {
+    pra_sr <- d_sr_pra |>
+      filter(subregion_key == !!sr_key) |>
+      pull(programarea_key)
+    cells <- tbl(con_sdm, "zone") |>
+      filter(fld == "programarea_key", value %in% !!pra_sr) |>
+      select(zone_seq) |>
+      inner_join(tbl(con_sdm, "zone_cell") |> select(zone_seq, cell_id),
+                 by = join_by(zone_seq)) |>
+      pull(cell_id)
+    if (!length(cells)) return(rep(NA_real_, 4))
+    g  <- msens::grid_spec_for(msens::grid_for_ver(ver))
+    ll <- msens::cell_lonlat(cells, g, wrap = FALSE)
+    # cell_lonlat returns CENTRES; an extent must cover the cells, so grow by half
+    # a cell. Without this the bbox is inset by 0.025 deg on every side and differs
+    # from the raster-derived values the cached csv holds.
+    c(min(ll$lon) - g$resx / 2, min(ll$lat) - g$resy / 2,
+      max(ll$lon) + g$resx / 2, max(ll$lat) + g$resy / 2)
+  }
+  if (!file_exists(sr_bb_csv)) {
+    for (sr_key in unique(d_sr_pra$subregion_key)) {
+      # sr_key = "GA"
+      bbox <- get_sr_bbox(sr_key)
+      d_bb_sr <- tibble(
+        subregion_key = sr_key,
+        xmin = bbox[1],
+        ymin = bbox[2],
+        xmax = bbox[3],
+        ymax = bbox[4]
+      )
+      if (!exists("d_sr_bb")) {
+        d_sr_bb <- d_bb_sr
+      } else {
+        d_sr_bb <- bind_rows(d_sr_bb, d_bb_sr)
+      }
+    }
+    write_csv(d_sr_bb, sr_bb_csv)
+  }
+  d_sr_bb <- read_csv(sr_bb_csv)
+
+  # append FULL bbox = union of subregion bboxes (in-memory only).
+  # Previously derived from st_bbox(r_init); with tiles we no longer
+  # materialize a full-extent raster, so take the min/max of the cached
+  # subregion bboxes instead — same extent in the 0-360° longitude
+  # convention the bboxes share with r_cell / r_metrics.
+  if (!"FULL" %in% d_sr_bb$subregion_key) {
+    d_sr_bb <- bind_rows(
+      tibble(
+        subregion_key = "FULL",
+        xmin = min(d_sr_bb$xmin), ymin = min(d_sr_bb$ymin),
+        xmax = max(d_sr_bb$xmax), ymax = max(d_sr_bb$ymax)),
+      d_sr_bb)
+  }
+
+  # helper: numeric length-4 bbox c(xmin, ymin, xmax, ymax) for a subregion key
+  sr_bbox <- function(sr_key) {
+    d_sr_bb |>
+      filter(subregion_key == !!sr_key) |>
+      select(xmin, ymin, xmax, ymax) |>
+      as.numeric()
+  }
+
+  # pre-compute initial tile state for build_initial_map() so startup doesn't
+  # block on a network round-trip to /msens/statistics every time the map
+  # re-renders (sphere toggle, etc.). Varnish caches this anyway; warming
+  # it once at boot keeps the critical path synchronous-but-fast.
+  initial_sql      <- cell_sql(lyr_default, sr_choices[[1]])
+  initial_lyr      <- layer_tiles(lyr_default, sr_choices[[1]])
+  initial_rescale  <- initial_lyr$rescale
+  initial_tile_url <- initial_lyr$url
+  initial_bbox     <- sr_bbox(sr_choices[[1]])
+
+  # "Cells outside Program Areas" overlay: a binary mask served by the same
+  # msens TiTiler factory but with the `color=` param (single-color mask
+  # render, bypassing colormap/rescale). Replaces the old r_outside_pra
+  # terra raster + msens::add_cells(..., colors = c("#222222","#222222")).
+  outside_pra_sql <- paste0(
+    "SELECT c.cell_id, 1.0 AS value ",
+    "FROM (SELECT DISTINCT cell_id FROM cell_metric) c ",
+    "WHERE c.cell_id NOT IN (",
+    "SELECT zc.cell_id FROM zone_cell zc ",
+    "JOIN zone z ON zc.zone_seq = z.zone_seq ",
+    "WHERE z.fld = 'programarea_key'",
+    ")")
+  outside_pra_tile_url <- local({
+    cg <- cog_of("_outside_pra", "FULL")
+    if (!is.null(cg))
+      msens::cog_tile_url(cg$url, color = "#222222", base = tile_base_url)
+    else
+      msens::cell_tile_url(outside_pra_sql, color = "#222222",
+                           mtime = db_mtime, base = tile_base_url)
+  })
+
+  # NOTE: the previous r_outside_pra terra raster (cached to
+  # scores/cache/r_cells_outside_pra.tif) is gone — the same "cells with
+  # metric values but outside any Program Area" mask is now rendered by
+  # the msens TiTiler factory via `outside_pra_tile_url` (defined above,
+  # SQL: cell_metric cell_ids NOT IN any zone where fld='programarea_key').
+
+  # * default subregion flower-plot data (cached) ----
+  # Pre-compute the flower-plot tibble for each subregion zone (USA, AK, GA,
+  # PA) once at startup so the default Plot of Scores tab loads instantly.
+  # zone_metric for subregions was added by the cell_metrics_to_zone_metrics
+  # chunk in calc_scores.qmd; if it's missing for some reason this still
+  # falls back to on-the-fly aggregation across cell_metric x zone_cell.
+  flower_default_csv <- here("scores/cache/flower_default_subregions.csv")
+  if (!file_exists(flower_default_csv)) {
+    if (verbose) message("Building flower_default_subregions cache...")
+    d_flower_default <- tbl(con_sdm, "zone") |>
+      filter(tbl == !!tbl_sr, fld == "subregion_key") |>
+      select(zone_seq, subregion_key = value) |>
+      inner_join(tbl(con_sdm, "zone_metric"), by = "zone_seq") |>
+      inner_join(
+        tbl(con_sdm, "metric") |>
+          filter(str_detect(metric_key, ".*_ecoregion_rescaled$")) |>
+          select(metric_seq, metric_key),
+        by = "metric_seq") |>
+      select(subregion_key, metric_key, score = value) |>
+      collect() |>
+      mutate(
+        component = metric_key |>
+          str_replace("extrisk_", "") |>
+          str_replace("_ecoregion_rescaled", "") |>
+          str_replace("_", " "),
+        even = 1) |>
+      filter(component != "all")
+    if (nrow(d_flower_default) == 0) {
+      warning("No subregion zone_metric rows; default flower plot will be empty. ",
+              "Re-run the cell_metrics_to_zone_metrics chunk in calc_scores.qmd.")
+    }
+    write_csv(d_flower_default, flower_default_csv)
+  }
+  d_flower_default <- read_csv(flower_default_csv)
+
+  # * d_taxonomy ----
+  d_taxonomy <- read_csv(taxonomy_csv, guess_max = Inf)
+
+  # ui ----
+  light <- bs_theme()
+  # dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
+  dark <- bs_theme()
+  # ui is a FUNCTION of the request, not a static object, for one reason: the
+  # client IP. shiny-server does not proxy the websocket upgrade — it opens a
+  # fresh localhost connection to the R worker — so the server session sees
+  # REMOTE_ADDR 127.0.0.1 and no X-Forwarded-For (Caddy sets it correctly; it is
+  # lost at the shiny-server hop). This page request is the only one that still
+  # carries the real address, so it is captured here and baked into the snippet.
+
+  environment()
 }
-d_flower_default <- read_csv(flower_default_csv)
 
-# * d_taxonomy ----
-d_taxonomy <- read_csv(taxonomy_csv, guess_max = Inf)
+# memoised: building a bundle opens a DuckDB connection, reads the manifest and
+# derives the subregion extents (~1 s), so a second visitor asking for the same
+# version must not pay it again
+bundle <- function(v) {
+  v <- as.character(v)[1]
+  if (is.null(.bundles[[v]])) .bundles[[v]] <- build_bundle(v)
+  .bundles[[v]]
+}
 
-# ui ----
-light <- bs_theme()
-# dark <- bs_theme(bg = "black", fg = "white", primary = "purple")
-dark <- bs_theme()
-# ui is a FUNCTION of the request, not a static object, for one reason: the
-# client IP. shiny-server does not proxy the websocket upgrade — it opens a
-# fresh localhost connection to the R worker — so the server session sees
-# REMOTE_ADDR 127.0.0.1 and no X-Forwarded-For (Caddy sets it correctly; it is
-# lost at the shiny-server hop). This page request is the only one that still
-# carries the real address, so it is captured here and baked into the snippet.
-ui <- function(req) page_sidebar(
+# ?ver= from a request/session, resolved against the published registry. An
+# unknown or absent value falls back to the promoted release rather than
+# erroring, and the UI reports which it settled on.
+ver_of <- function(qs) {
+  v <- tryCatch({
+    q <- shiny::parseQueryString(qs %||% "")
+    msens::atlas_resolve_ver(q$ver)
+  }, error = function(e) NULL)
+  if (is.null(v)) tryCatch(msens::atlas_resolve_ver(NULL), error = function(e) ver_fallback) else v
+}
+
+ui_impl <- function(req) page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     # usage tracking: GA4 (aggregate) + a batched beacon to the usage-log Sheet
@@ -1105,7 +1148,7 @@ ui <- function(req) page_sidebar(
 )
 
 # server ----
-server <- function(input, output, session) {
+server_impl <- function(input, output, session) {
 
   # version picker ----
   # One app renders any published release, so the header says which one is on
@@ -2644,4 +2687,25 @@ server <- function(input, output, session) {
     invisible(NULL)
   })
 }
+# ---- version-aware entry points ---------------------------------------------
+#
+# `ver` is a URL parameter, not a fork of this app. Both the UI and the server
+# are evaluated with their enclosing environment set to the requested version's
+# bundle, so every name inside them (con_sdm, d_lyrs, layer_tiles, pra_full_sf,
+# cog_of, ...) resolves to THAT release, and anything not version-specific falls
+# through to the globals.
+
+ui <- function(req) {
+  b <- bundle(ver_of(req$QUERY_STRING))
+  f <- ui_impl; environment(f) <- b
+  f(req)
+}
+
+server <- function(input, output, session) {
+  v <- ver_of(isolate(session$clientData$url_search))
+  b <- bundle(v)
+  f <- server_impl; environment(f) <- b
+  f(input, output, session)
+}
+
 shinyApp(ui, server)
