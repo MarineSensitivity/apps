@@ -458,12 +458,17 @@ pra_geom <- function() {
       tibble(programarea_key = character(), programarea_name = character(),
              lng = numeric(), lat = numeric())
     } else {
-      suppressWarnings(
-        g |> st_shift_longitude() |> st_point_on_surface() |>
-          select(programarea_key, programarea_name) |>
-          mutate(lng = st_coordinates(geometry)[, 1],
-                 lat = st_coordinates(geometry)[, 2]) |>
-          st_drop_geometry())
+      # st_coordinates() on the SF OBJECT, not on a named geometry column: the
+      # column is `geom` from a GeoPackage and `geometry` from FlatGeobuf, so
+      # naming it broke bundle construction outright the moment the source
+      # changed -- and that took the whole app down, not just the labels.
+      suppressWarnings({
+        pts <- g |> st_shift_longitude() |> st_point_on_surface()
+        crd <- st_coordinates(pts)
+        pts |> st_drop_geometry() |>
+          transmute(programarea_key, programarea_name,
+                    lng = crd[, 1], lat = crd[, 2])
+      })
     }
     tryCatch(write_csv(pra_pts, pra_pts_csv), error = function(e)
       message("could not cache program-area labels: ", conditionMessage(e)))
