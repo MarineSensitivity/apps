@@ -665,6 +665,7 @@ build_bundle <- function(ver) {
       max(ll$lon) + g$resx / 2, max(ll$lat) + g$resy / 2)
   }
   if (!file_exists(sr_bb_csv)) {
+    d_sr_bb <- NULL
     for (sr_key in unique(d_sr_pra$subregion_key)) {
       # sr_key = "GA"
       bbox <- get_sr_bbox(sr_key)
@@ -675,15 +676,19 @@ build_bundle <- function(ver) {
         xmax = bbox[3],
         ymax = bbox[4]
       )
-      if (!exists("d_sr_bb")) {
-        d_sr_bb <- d_bb_sr
-      } else {
-        d_sr_bb <- bind_rows(d_sr_bb, d_bb_sr)
-      }
+      d_sr_bb <- if (is.null(d_sr_bb)) d_bb_sr else bind_rows(d_sr_bb, d_bb_sr)
     }
+    # A release with no Program Areas (v1) has no subregion->programarea rows, so
+    # the loop above never runs. `exists("d_sr_bb")` used to paper over that by
+    # finding some other frame's copy; inside a per-version bundle it simply
+    # errored and took the whole app down for that version. Write the empty
+    # frame instead, so the extent falls back to the full map rather than failing.
+    if (is.null(d_sr_bb))
+      d_sr_bb <- tibble(subregion_key = character(), xmin = numeric(),
+                        ymin = numeric(), xmax = numeric(), ymax = numeric())
     write_csv(d_sr_bb, sr_bb_csv)
   }
-  d_sr_bb <- read_csv(sr_bb_csv)
+  d_sr_bb <- read_csv(sr_bb_csv, show_col_types = FALSE)
 
   # append FULL bbox = union of subregion bboxes (in-memory only).
   # Previously derived from st_bbox(r_init); with tiles we no longer
@@ -691,11 +696,18 @@ build_bundle <- function(ver) {
   # subregion bboxes instead — same extent in the 0-360° longitude
   # convention the bboxes share with r_cell / r_metrics.
   if (!"FULL" %in% d_sr_bb$subregion_key) {
+    # With no subregion rows (a release without Program Areas, e.g. v1) min() of
+    # an empty vector is +Inf, which yields an inverted bbox and a map that
+    # cannot fit_bounds. Fall back to the release's own grid extent.
+    full <- if (nrow(d_sr_bb)) {
+      c(min(d_sr_bb$xmin), min(d_sr_bb$ymin), max(d_sr_bb$xmax), max(d_sr_bb$ymax))
+    } else {
+      g <- msens::grid_spec_for(msens::grid_for_ver(ver))
+      c(g$xmin, g$ymax - g$nr * g$resy, g$xmin + g$nc * g$resx, g$ymax)
+    }
     d_sr_bb <- bind_rows(
-      tibble(
-        subregion_key = "FULL",
-        xmin = min(d_sr_bb$xmin), ymin = min(d_sr_bb$ymin),
-        xmax = max(d_sr_bb$xmax), ymax = max(d_sr_bb$ymax)),
+      tibble(subregion_key = "FULL",
+             xmin = full[1], ymin = full[2], xmax = full[3], ymax = full[4]),
       d_sr_bb)
   }
 
