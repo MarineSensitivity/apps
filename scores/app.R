@@ -92,24 +92,13 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
-# mapgl declares every optional bundle in its widget definition, so the PAGE
-# carries them whether or not the app calls them -- and it is the UI's
-# maplibreOutput() that emits them, not the server-side widget, so filtering the
-# rendered object achieves nothing (tried that first: the page still listed all
-# 39 files). Measured cold: 3.7 MB of JavaScript, of which html2canvas (194 KB)
-# and the globe minimap (149 KB) are never touched -- `add_globe_minimap` and
-# `screenshot` appear zero times here.
-#
-# Conservative by construction: an unknown name simply does not match, and every
-# bundle the app uses stays. If a feature is added that needs one of these, drop
-# it from this list rather than working around it.
-UNUSED_MAP_DEPS <- c("html2canvas", "mapbox-gl-globe-minimap")
-map_output <- function(...) {
-  x <- maplibreOutput(...)
-  d <- htmltools::findDependencies(x)
-  htmltools::attachDependencies(
-    x, Filter(function(dep) !(dep$name %in% UNUSED_MAP_DEPS), d))
-}
+# NOTE: an attempt to strip mapgl's unused JS bundles (html2canvas 194 KB,
+# globe-minimap 149 KB) by filtering the dependencies on maplibreOutput() was
+# REVERTED. It did remove them from the page, but the map then never
+# initialised: the widget bound, maplibregl loaded, and not a single tile was
+# requested. 343 KB is not worth a blank map. If retried, verify the map
+# actually DRAWS -- an HTTP 200 and the bundles being absent from the HTML are
+# not evidence of that, which is exactly how this slipped through.
 
 # ---- per-version bundle -----------------------------------------------------
 #
@@ -1249,7 +1238,7 @@ ui_impl <- function(req) page_sidebar(
         div(id = "map-overlay", class = "map-loading-overlay",
           div(class = "map-loading-spinner"),
           span("Loading map\u2026")),
-        map_output("map"))
+        maplibreOutput("map"))
     ),
     nav_panel(
       title = "Plot of Scores",
@@ -1352,7 +1341,7 @@ ui_impl <- function(req) page_sidebar(
           div(id = "map-rpt-overlay", class = "map-loading-overlay",
             div(class = "map-loading-spinner"),
             span("Loading map\u2026")),
-          map_output("map_rpt", height = "700px"))
+          maplibreOutput("map_rpt", height = "700px"))
       )
     )
   )
