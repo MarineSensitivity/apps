@@ -34,7 +34,10 @@ options(
 verbose <- T
 
 # version ----
-ver <- "v8"
+# The app renders ANY published release; this is only the last-resort fallback for when
+# the version registry itself is unreachable (atlas_resolve_ver errors).
+VER_FALLBACK <- "v8"
+
 
 # APP_VERSION — the deployed commit, stamped on every logged event so a Sheet
 # row ties back to the exact code that produced it (falls back to `ver`).
@@ -50,7 +53,7 @@ APP_VERSION <- local({
                "rev-parse", "--short", "HEAD"),
       stdout = TRUE, stderr = FALSE))[1],
     error = function(e) NA_character_)
-  if (!is.null(sha) && !is.na(sha) && nzchar(sha)) sha else ver
+  if (!is.null(sha) && !is.na(sha) && nzchar(sha)) sha else VER_FALLBACK
 })
 
 is_server <- Sys.info()[["sysname"]] == "Linux"
@@ -64,58 +67,7 @@ dir_data <- ifelse(
   "/share/data",
   "~/My Drive/projects/msens/data"
 )
-dir_v   <- glue("{dir_data}/derived/{ver}")
-dir_big <- ifelse(
-  is_server,
-  glue("/share/data/big/{ver}"),
-  glue("~/_big/msens/derived/{ver}"))
-is_prod <- Sys.getenv("MSENS_ENV") == "prod"
-pmtiles_base_url <- ifelse(
-  is_prod,
-  "/pmtiles",
-  "https://file.marinesensitivity.org/pmtiles")
-tbl_er <- "ply_ecoregions_2025"
-tbl_pra <- glue("ply_programareas_2026_{ver}")
-tbl_pra_pm <- "ply_programareas_2026"
-
-# zone outlines from the version manifest ----
-#
-# Same contract as scores/app.R: zone PMTiles are published per VINTAGE
-# (`zones/{zone_set_key}/zones.pmtiles`) and each release's manifest names the
-# one it used, replacing two unversioned filenames on the file host that no
-# committed notebook built. The layer id inside the tiles is the zone TYPE, not
-# the old table name, so URL and source_layer must move together.
-#
-# NULL means the manifest is present and names no such zone type -- the release
-# genuinely lacks it (v1 predates Program Areas), so draw nothing rather than an
-# outline from the wrong era. The unversioned fallback is for a MISSING manifest.
-zone_manifest <- tryCatch(
-  msens::atlas_manifest(ver),
-  error = function(e) { message("manifest unavailable (", conditionMessage(e),
-                                ") - zone outlines fall back to unversioned tiles"); NULL })
-zone_tbl <- if (!is.null(zone_manifest)) zone_manifest$zones else NULL
-
-ztile <- function(zone_type, fallback_tbl) {
-  if (!is.null(zone_tbl) && "pmtiles" %in% names(zone_tbl)) {
-    i <- which(zone_tbl$fld == paste0(zone_type, "_key") & !is.na(zone_tbl$pmtiles))
-    return(if (length(i)) list(url = zone_tbl$pmtiles[i[1]], source_layer = zone_type)
-           else NULL)
-  }
-  list(url          = glue("{pmtiles_base_url}/{fallback_tbl}.pmtiles"),
-       source_layer = fallback_tbl)
-}
-pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
-er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
-
 mapbox_tkn_txt <- glue("{dir_private}/mapbox_token_bdbest.txt")
-cell_tif <- glue("{dir_data}/derived/r_cellid_global.tif")
-mask_tif <- glue("{dir_v}/r_metrics_{ver}.tif")
-pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
-sdm_db   <- { s <- glue("{dir_big}/serve.duckdb"); if (file.exists(s)) s else glue("{dir_big}/sdm.duckdb") }
-# titiler-v8 serves the merged surfaces from the S3 view-DB; mtime cache-busts the tile URLs
-tile_base_url <- "https://titiler-v8.marinesensitivity.org"
-db_mtime <- format(file.info(sdm_db)$mtime, "%Y%m%dT%H%M%SZ", tz = "UTC")
-
 Sys.setenv(MAPBOX_PUBLIC_TOKEN = readLines(mapbox_tkn_txt))
 librarian::shelf(
   mapgl,
@@ -200,194 +152,409 @@ h3t_stats <- function(sql, res_h3 = 4) {
   }, error = function(e) list(error = conditionMessage(e)))
 }
 
-# database ----
-# source(here("../workflows/libs/db.R")) # con
-con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
+# per-version bundle ----
+#
+# The version is a URL PARAMETER, not a fork of this app (`ver <- "v8"` used to sit here,
+# which is why /species/?ver=v7 answered "not served here yet" while every other surface of
+# the toolkit had already been made version-independent). Everything below that depends on
+# WHICH release is being drawn is built per version and memoised; the UI and server are then
+# re-enclosed in that bundle (see the bottom of this file), so names like `con_sdm`, `d_spp`,
+# `native_asset` and `tile_base_url` keep their spelling and resolve to the requested release,
+# while anything version-independent falls through to the globals above.
+.bundles <- new.env(parent = emptyenv())
 
-# data prep ----
+build_bundle <- function(ver) {
 
-# * pra_pts: program area label points (cached) ----
-pra_pts_csv <- here("species/cache/pra_label_pts.csv")
-if (!file.exists(pra_pts_csv)) {
-  pra_pts <- read_sf(pra_gpkg) |>
-    st_point_on_surface() |>   # v8 is [-180,180]; no st_shift_longitude
-    select(programarea_key, programarea_name) |>
+  dir_v   <- glue("{dir_data}/derived/{ver}")
+  dir_big <- ifelse(
+    is_server,
+    glue("/share/data/big/{ver}"),
+    glue("~/_big/msens/derived/{ver}"))
+  is_prod <- Sys.getenv("MSENS_ENV") == "prod"
+  pmtiles_base_url <- ifelse(
+    is_prod,
+    "/pmtiles",
+    "https://file.marinesensitivity.org/pmtiles")
+  tbl_er <- "ply_ecoregions_2025"
+  tbl_pra <- glue("ply_programareas_2026_{ver}")
+  tbl_pra_pm <- "ply_programareas_2026"
+
+  # zone outlines from the version manifest ----
+  #
+  # Same contract as scores/app.R: zone PMTiles are published per VINTAGE
+  # (`zones/{zone_set_key}/zones.pmtiles`) and each release's manifest names the
+  # one it used, replacing two unversioned filenames on the file host that no
+  # committed notebook built. The layer id inside the tiles is the zone TYPE, not
+  # the old table name, so URL and source_layer must move together.
+  #
+  # NULL means the manifest is present and names no such zone type -- the release
+  # genuinely lacks it (v1 predates Program Areas), so draw nothing rather than an
+  # outline from the wrong era. The unversioned fallback is for a MISSING manifest.
+  zone_manifest <- tryCatch(
+    msens::atlas_manifest(ver),
+    error = function(e) { message("manifest unavailable (", conditionMessage(e),
+                                  ") - zone outlines fall back to unversioned tiles"); NULL })
+  zone_tbl <- if (!is.null(zone_manifest)) zone_manifest$zones else NULL
+
+  ztile <- function(zone_type, fallback_tbl) {
+    if (!is.null(zone_tbl) && "pmtiles" %in% names(zone_tbl)) {
+      i <- which(zone_tbl$fld == paste0(zone_type, "_key") & !is.na(zone_tbl$pmtiles))
+      return(if (length(i)) list(url = zone_tbl$pmtiles[i[1]], source_layer = zone_type)
+             else NULL)
+    }
+    list(url          = glue("{pmtiles_base_url}/{fallback_tbl}.pmtiles"),
+         source_layer = fallback_tbl)
+  }
+  pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
+  er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
+
+  # PER GRID, not a constant: usa05 (v1-v7) is 3103x2006 in 0-360 longitude and global05 (v8)
+  # is 7200x3600 in -180..180, so the same cell_id names a different place on each. The grid
+  # registry says which lookup raster belongs to this release.
+  grid_id  <- msens::grid_for_ver(ver)
+  grid     <- msens::grid_spec_for(grid_id)
+  cell_tif <- glue("{dir_data}/derived/{msens::grid_registry()$cellid_tif[msens::grid_registry()$grid_id == grid_id][1]}")
+  pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
+  sdm_db   <- { s <- glue("{dir_big}/serve.duckdb"); if (file.exists(s)) s else glue("{dir_big}/sdm.duckdb") }
+  # titiler-v8 is the stock-COG tiler for EVERY release (it serves /cog from any public URL);
+  # only the v8-specific `model_cell` SQL path is version-bound. mtime cache-busts tile URLs.
+  tile_base_url <- "https://titiler-v8.marinesensitivity.org"
+  db_mtime <- format(file.info(sdm_db)$mtime, "%Y%m%dT%H%M%SZ", tz = "UTC")
+
+  # database ----
+  # source(here("../workflows/libs/db.R")) # con
+  con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
+  db_tables <- dbListTables(con_sdm)
+  # v8 alone publishes the per-model serving surface titiler queries by SQL; every other
+  # release draws exclusively from per-model COGs (model_asset). Derived from PRESENCE, so a
+  # release that has never had it cannot be asked for it.
+  has_model_cell <- "model_cell" %in% db_tables
+
+  # data prep ----
+
+  # * pra_pts: program area label points (cached PER VERSION) ----
+  #
+  # Two changes from the single-version app, both load-bearing. The cache is keyed by
+  # version -- one shared csv would have labelled every release with v8's program areas.
+  # And the per-version gpkg is a FALLBACK, not a requirement: v1 ships no program-area
+  # file at all, and reading the path directly is what made the scores app die at startup
+  # for a whole release rather than draw a map without labels. The published per-VINTAGE
+  # FlatGeobuf is the general source; no geometry -> no labels, which is the honest answer
+  # for a release that has no such unit.
+  pra_pts_csv <- here(glue("species/cache/pra_label_pts_{ver}.csv"))
+  if (!file.exists(pra_pts_csv)) {
+    g <- NULL
+    if (file.exists(pra_gpkg))
+      g <- tryCatch(read_sf(pra_gpkg), error = function(e) NULL)
+    if (is.null(g) && !is.null(zone_tbl) && "zone_set_key" %in% names(zone_tbl)) {
+      i <- which(zone_tbl$fld == "programarea_key")
+      if (length(i)) g <- tryCatch(
+        read_sf(glue("/vsicurl/{msens::atlas_base_url()}/zones/{zone_tbl$zone_set_key[i[1]]}/zones.fgb")),
+        error = function(e) { message("programarea fgb unavailable for ", ver, " (",
+                                      conditionMessage(e), ") - no labels"); NULL })
+    }
+    pra_pts <- if (is.null(g) || !nrow(g)) {
+      tibble(programarea_key = character(), programarea_name = character(),
+             lng = double(), lat = double())
+    } else {
+      if (!"programarea_name" %in% names(g)) g$programarea_name <- g$programarea_key
+      p <- suppressWarnings(st_point_on_surface(g))
+      tibble(programarea_key  = p$programarea_key,
+             programarea_name = p$programarea_name,
+             lng = st_coordinates(p)[, 1], lat = st_coordinates(p)[, 2])
+    }
+    write_csv(pra_pts, pra_pts_csv)
+  } else {
+    pra_pts <- read_csv(pra_pts_csv, show_col_types = FALSE)
+  }
+  # an sf with zero features still needs its geometry column, but st_as_sf() on an empty
+  # frame warns four times about min/max of nothing — noise that would appear in the app log
+  # for every release with no program areas (v1), where the empty result is CORRECT.
+  pra_pts <- if (nrow(pra_pts))
+    st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326, na.fail = FALSE) else
+    st_sf(programarea_key = character(), programarea_name = character(),
+          geometry = st_sfc(crs = 4326))
+
+  # * er_bbox: default map extent, from THIS release's own scored cells ----
+  #
+  # Was derived from a per-version `r_metrics_{ver}.tif` that only v8 ships, and cached to a
+  # single shared csv. Now computed from `zone_cell` + the release's grid, so it needs no
+  # local raster and cannot hand one release another's extent. Longitude stays in the grid's
+  # own frame (usa05 is 0-360) so an Alaska-spanning extent stays contiguous rather than
+  # splitting at the antimeridian.
+  er_bbox_csv <- here(glue("species/cache/ecoregions_bbox_{ver}.csv"))
+  if (!file.exists(er_bbox_csv)) {
+    cells <- tryCatch(
+      tbl(con_sdm, "zone") |> filter(fld == "ecoregion_key") |> select(zone_seq) |>
+        inner_join(tbl(con_sdm, "zone_cell") |> select(zone_seq, cell_id), by = join_by(zone_seq)) |>
+        pull(cell_id),
+      error = function(e) integer(0))
+    er_bbox <- if (!length(cells)) c(-180, -90, 180, 90) else {
+      ll <- msens::cell_lonlat(cells, grid, wrap = FALSE)
+      # cell_lonlat returns CENTRES; an extent must cover the cells, so grow by half a cell
+      c(min(ll$lon) - grid$resx / 2, min(ll$lat) - grid$resy / 2,
+        max(ll$lon) + grid$resx / 2, max(ll$lat) + grid$resy / 2)
+    }
+    tibble(xmin = er_bbox[1], ymin = er_bbox[2], xmax = er_bbox[3], ymax = er_bbox[4]) |>
+      write_csv(er_bbox_csv)
+  } else {
+    er_bbox <- read_csv(er_bbox_csv, show_col_types = FALSE) |> as.numeric()
+  }
+
+  # query dataset metadata once at startup.
+  #
+  # The display fields (`name_display`, `value_info`, `is_mask`, `sort_order`) arrived in v3;
+  # v1 and v2 publish only the long-form `name_short`. Selecting them unconditionally made the
+  # whole of v1/v2 fail at startup, so they are filled in from what the release DOES publish
+  # rather than required: the short name is name_short's first comma-clause, capped at a word
+  # boundary, and the key itself is the last resort — never a hardcoded per-key table, which
+  # would silently mislabel the next dataset added.
+  d_datasets <- tbl(con_sdm, "dataset") |> collect()
+  .short <- function(x, ds) {
+    s <- sub(",.*$", "", x)
+    s <- ifelse(is.na(s) | !nzchar(s), ds, s)
+    ifelse(nchar(s) > 30, paste0(sub("\\s+\\S*$", "", substr(s, 1, 30)), "…"), s)
+  }
+  if (!"name_short" %in% names(d_datasets)) d_datasets$name_short <- NA_character_
+  if (!"name_display" %in% names(d_datasets)) d_datasets$name_display <- NA_character_
+  d_datasets$name_display <- ifelse(
+    is.na(d_datasets$name_display) | !nzchar(d_datasets$name_display),
+    .short(d_datasets$name_short, d_datasets$ds_key), d_datasets$name_display)
+  if (!"value_info" %in% names(d_datasets)) d_datasets$value_info <- NA_character_
+  if (!"is_mask"    %in% names(d_datasets)) d_datasets$is_mask    <- FALSE
+  if (!"sort_order" %in% names(d_datasets)) d_datasets$sort_order <- seq_len(nrow(d_datasets))
+  d_datasets <- d_datasets |>
+    select(ds_key, name_display, value_info, is_mask, sort_order) |>
+    arrange(sort_order)
+
+  # derive what was previously hardcoded
+  ds_keys      <- d_datasets |> filter(!ds_key %in% c("ms_merge")) |> pull(ds_key)
+  layer_names  <- c(
+    "mdl_key" = "Merged Model",
+    deframe(d_datasets |> filter(ds_key != "ms_merge", !is.na(name_display)) |> select(ds_key, name_display)))
+  mdl_names    <- deframe(d_datasets |> filter(ds_key != "ms_merge", !is.na(name_display)) |> select(ds_key, name_display))
+  mdl_info     <- deframe(d_datasets |> filter(!is.na(value_info)) |> select(ds_key, value_info))
+  ds_keys_mask <- d_datasets |> filter(is_mask) |> pull(ds_key)
+
+  # * the schema adapter: v1-v7 speak mdl_seq, v8 speaks mdl_key ----
+  #
+  # `id_field` in the manifest is the whole story. v1-v7 identify a model by an INTEGER
+  # `mdl_seq` that renumbers between releases; v8 by the stable string `mdl_key`. The rest of
+  # this app speaks the v8 shape, so each release is normalised HERE, once, into:
+  #
+  #   d_spp        one row per listed taxon, `mdl_key` = its MERGED model id (as character)
+  #   d_edges      (ms_merge_key, mdl_key, ds_key) -- one row per INPUT model, merged excluded
+  #   native_asset (ms_merge_key, mdl_key, ds_key, asset_type, representation, asset_url, ...)
+  #
+  # For v1-v7 that means reading `model_asset` (per-model COGs on the usa05 grid, published by
+  # backfill_versions) as the asset registry, and joining `taxon_model(taxon_id, ds_key,
+  # mdl_seq)` through `taxon` to recover which taxon each model feeds. Two traps, both real:
+  #   - v1-v7 `taxon_model` INCLUDES an `ms_merge` edge and `n_ds` counts it; v8's does not.
+  #     So the input count is taken from the normalised edges, never from `n_ds`.
+  #   - v1-v7 validity is `is_ok`, v8 splits it into is_valid_global / is_valid_usa.
+  id_field   <- if (!is.null(zone_manifest)) zone_manifest$id_field %||% "mdl_key" else "mdl_key"
+  is_mdl_seq <- identical(id_field, "mdl_seq")
+  taxon_cols <- colnames(tbl(con_sdm, "taxon"))
+
+  if (is_mdl_seq) {
+    # ---- v1-v7 ----------------------------------------------------------------
+    d_spp <- tbl(con_sdm, "taxon") |>
+      filter(if ("is_ok" %in% taxon_cols) is_ok else TRUE, !is.na(mdl_seq)) |>
+      filter(!sp_cat %in% c("reptile", "amphibian")) |>
+      collect() |>
+      transmute(
+        taxon_id, taxon_authority,
+        scientific_name, common_name, sp_cat,
+        mdl_key      = as.character(mdl_seq),
+        redlist_code = if ("redlist_code" %in% taxon_cols) redlist_code else NA_character_,
+        esa_code     = if ("extrisk_code" %in% taxon_cols) extrisk_code else NA_character_,
+        esa_source   = if ("esa_source"   %in% taxon_cols) esa_source   else NA_character_,
+        er_score     = if ("er_score"     %in% taxon_cols) er_score     else NA_real_,
+        rarity       = NA_character_,
+        is_mmpa      = if ("is_mmpa" %in% taxon_cols) is_mmpa else NA,
+        is_mbta      = if ("is_mbta" %in% taxon_cols) is_mbta else NA,
+        # every listed taxon of a v1-v7 release is a US-study-area taxon by construction
+        is_valid_usa = TRUE)
+    # taxon_model keys on taxon_id; recover the merged id from the taxon it belongs to, and
+    # drop the ms_merge self-edge so `d_edges` means INPUTS on every version
+    d_edges <- tryCatch(
+      tbl(con_sdm, "taxon_model") |> collect() |>
+        transmute(taxon_id = as.character(taxon_id), ds_key, mdl_key = as.character(mdl_seq)),
+      error = function(e) tibble(taxon_id = character(), ds_key = character(), mdl_key = character()))
+    d_edges <- d_edges |>
+      inner_join(d_spp |> transmute(taxon_id = as.character(taxon_id), ms_merge_key = mdl_key),
+                 by = "taxon_id") |>
+      filter(ds_key != "ms_merge", mdl_key != ms_merge_key) |>
+      select(ms_merge_key, mdl_key, ds_key)
+    # model_asset IS the v1-v7 native_asset: one COG per model, already public on S3
+    native_asset <- tryCatch(
+      tbl(con_sdm, "model_asset") |> collect() |>
+        transmute(mdl_key = as.character(mdl_seq), ds_key, asset_url = cog_url),
+      error = function(e) tibble(mdl_key = character(), ds_key = character(), asset_url = character()))
+    native_asset <- native_asset |>
+      # an input model maps to the taxa it feeds; a merged model maps to itself
+      left_join(d_edges |> distinct(mdl_key, ms_merge_key), by = "mdl_key",
+                relationship = "many-to-many") |>
+      mutate(ms_merge_key = coalesce(ms_merge_key, mdl_key)) |>
+      filter(ms_merge_key %in% d_spp$mdl_key | mdl_key %in% d_spp$mdl_key) |>
+      transmute(
+        ms_merge_key, mdl_key, ds_key,
+        asset_type = "cog", representation = "native", asset_url,
+        rescale_min = 1L, rescale_max = 100L, colormap = "spectral_r",
+        source_layer = NA_character_,
+        xmin = NA_real_, ymin = NA_real_, xmax = NA_real_, ymax = NA_real_)
+  } else {
+    # ---- v8 -------------------------------------------------------------------
+    # base picker set = all valid marine taxa (is_valid_global if present, else is_valid_usa); each row
+    # carries is_valid_usa so the "Only species in US waters" checkbox can filter to US presence. A taxon
+    # is is_valid_usa iff it has >=1 merged cell in US waters (merge_taxon: n_usa>0) — so the ~750 AquaMaps
+    # over-predictions whose IUCN range is wholly outside the US (Sotalia etc.) are is_valid_usa=FALSE.
+    d_spp_tbl <- tbl(con_sdm, "taxon") |>
+      filter(is_marine, !is.na(ms_merge_key), !sp_cat %in% c("reptile", "amphibian"))
+    d_spp_tbl <- if ("is_valid_global" %in% taxon_cols)
+      filter(d_spp_tbl, is_valid_global) else filter(d_spp_tbl, is_valid_usa)
+    d_spp <- d_spp_tbl |>
+      select(
+        taxon_id, taxon_authority, scientific_name, common_name, sp_cat,
+        mdl_key = ms_merge_key,
+        redlist_code = iucn_code, esa_code = extrisk_code, er_score,
+        rarity, is_mmpa, is_mbta, is_valid_usa) |>
+      collect() |>
+      mutate(esa_source = NA_character_)
+    d_edges <- tryCatch(
+      tbl(con_sdm, "taxon_model") |> collect() |>
+        transmute(ms_merge_key, mdl_key, ds_key = str_extract(mdl_key, "^[^|]+")),
+      error = function(e) {
+        message("taxon_model unavailable (", conditionMessage(e), ") — inputs from native_asset")
+        tibble(ms_merge_key = character(), mdl_key = character(), ds_key = character()) })
+    native_asset <- tryCatch(
+      tbl(con_sdm, "native_asset") |> collect(),
+      error = function(e) tibble(
+        ms_merge_key = character(), mdl_key = character(), ds_key = character(),
+        asset_type = character(), representation = character(), asset_url = character(),
+        rescale_min = integer(), rescale_max = integer(), colormap = character(),
+        source_layer = character(), xmin = double(), ymin = double(), xmax = double(), ymax = double()))
+    if (!nrow(d_edges))
+      d_edges <- native_asset |> filter(ds_key != "ms_merge") |> distinct(ms_merge_key, mdl_key, ds_key)
+  }
+
+  d_spp <- d_spp |>
     mutate(
-      lng = st_coordinates(geom)[, 1],
-      lat = st_coordinates(geom)[, 2]) |>
-    st_drop_geometry()
-  write_csv(pra_pts, pra_pts_csv)
-} else {
-  pra_pts <- read_csv(pra_pts_csv)
-}
-pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
+      lbl_cmn = ifelse(!is.na(common_name) & common_name != "",
+                       glue(" ({common_name})", .trim = F), ""),
+      label = glue("{sp_cat}: {scientific_name}{lbl_cmn}"),
+      worms_url = ifelse(
+        taxon_authority == "worms" & !is.na(taxon_id),
+        glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}" target="_blank">{taxon_id}</a>'),
+        NA_character_))
 
-r_cell <- rast(cell_tif)
-r_masks <- list(
-  programarea_key = rast(mask_tif, lyrs = "programarea_key"),
-  ecoregion_key   = rast(mask_tif, lyrs = "ecoregion_key"))
+  # grouped-by-category choice lists; the checkbox swaps between US-waters-only and all valid marine
+  .make_choices <- function(df) df |>
+    arrange(sp_cat, label) |>
+    group_by(sp_cat) |>
+    summarise(layer = list(setNames(mdl_key, label)), .groups = "drop") |>
+    deframe()
+  spp_choices_all <- .make_choices(d_spp)
+  spp_choices_us  <- .make_choices(d_spp |> filter(is_valid_usa))
+  spp_choices     <- spp_choices_us   # default view = "Only species in US waters" (checkbox TRUE)
 
-# * er_bbox: default extent = all ecoregions ----
-# cached bbox (numeric xmin,ymin,xmax,ymax in the 0-360 longitude convention
-# of r_cell / r_masks) used by the initial map render. trim() strips outer
-# all-NA rows/cols so the bbox hugs actual ecoregion cells.
-er_bbox_csv <- here("species/cache/ecoregions_bbox.csv")
-if (!file.exists(er_bbox_csv)) {
-  er_bbox <- r_masks[["ecoregion_key"]] |>
-    trim() |>
-    st_bbox() |>
-    as.numeric()
-  tibble(
-    xmin = er_bbox[1], ymin = er_bbox[2],
-    xmax = er_bbox[3], ymax = er_bbox[4]
-  ) |>
-    write_csv(er_bbox_csv)
-} else {
-  er_bbox <- read_csv(er_bbox_csv) |>
-    as.numeric()
-}
+  sel_sp_default <- d_spp |> filter(scientific_name == "Dermochelys coriacea", is_valid_usa) |> pull(mdl_key)
+  if (length(sel_sp_default) == 0) sel_sp_default <- (d_spp |> filter(is_valid_usa) |> pull(mdl_key))[1]
 
-# query dataset metadata once at startup
-d_datasets <- tbl(con_sdm, "dataset") |>
-  select(ds_key, name_display, value_info, is_mask, sort_order) |>
-  collect() |>
-  arrange(sort_order)
+  # * inputs = what a taxon is ACTUALLY built from, availability tracked separately ----
+  #
+  # The input list used to be derived from `native_asset` — the registry of published
+  # ASSETS — which silently conflated two different questions: "what fed this taxon" and
+  # "what can we draw". When the v8 registry lost its vector-range PMTiles rows, every
+  # range input simply vanished from the bar, which went on reporting a count taken from
+  # `taxon.n_datasets`: the leatherback advertised 5 inputs (really 6) and offered 1.
+  #
+  # `d_edges` (normalised above from each release's taxon_model) IS the taxon->model relation
+  # the merge consumed, so inputs are listed from it and availability becomes a separate,
+  # VISIBLE property: an input with no published surface renders as a disabled pill, not as
+  # an absence.
+  # older releases had no `representation` column (all rows were the single per-model asset)
+  if (!"representation" %in% names(native_asset)) native_asset$representation <- "native"
+  # the picker lists only the valid taxa; edges to anything else are not drawable here
+  d_edges <- d_edges |> filter(ms_merge_key %in% d_spp$mdl_key)
 
-# derive what was previously hardcoded
-ds_keys      <- d_datasets |> filter(!ds_key %in% c("ms_merge")) |> pull(ds_key)
-layer_names  <- c(
-  "mdl_key" = "Merged Model",
-  deframe(d_datasets |> filter(ds_key != "ms_merge", !is.na(name_display)) |> select(ds_key, name_display)))
-mdl_names    <- deframe(d_datasets |> filter(ds_key != "ms_merge", !is.na(name_display)) |> select(ds_key, name_display))
-mdl_info     <- deframe(d_datasets |> filter(!is.na(value_info)) |> select(ds_key, value_info))
-ds_keys_mask <- d_datasets |> filter(is_mask) |> pull(ds_key)
+  # published-asset lookup: does this raw input have a surface we can actually render?
+  asset_keys <- unique(native_asset$mdl_key)
+  has_asset  <- function(mk) !is.na(mk) & mk %in% asset_keys
 
-# query taxon base data (v8 schema). Only the MERGED surface (`ms_merge_key`) is served via
-# titiler-v8; per-dataset "original" layers await Phase 4b native publishing. Alias v8 columns
-# to the names the UI/popup downstream expect.
-# base picker set = all valid marine taxa (is_valid_global if present, else is_valid_usa); each row
-# carries is_valid_usa so the "Only species in US waters" checkbox can filter to US presence. A taxon
-# is is_valid_usa iff it has >=1 merged cell in US waters (merge_taxon: n_usa>0) — so the ~750 AquaMaps
-# over-predictions whose IUCN range is wholly outside the US (Sotalia etc.) are is_valid_usa=FALSE.
-taxon_cols <- colnames(tbl(con_sdm, "taxon"))
-d_spp_tbl <- tbl(con_sdm, "taxon") |>
-  filter(is_marine, !is.na(ms_merge_key), !sp_cat %in% c("reptile", "amphibian"))
-# base picker set = all valid marine taxa (is_valid_global if present, else is_valid_usa)
-d_spp_tbl <- if ("is_valid_global" %in% taxon_cols)
-  filter(d_spp_tbl, is_valid_global) else filter(d_spp_tbl, is_valid_usa)
-d_spp <- d_spp_tbl |>
-  select(
-    taxon_id, taxon_authority, scientific_name, common_name, sp_cat,
-    n_ds = n_datasets, mdl_key = ms_merge_key,
-    redlist_code = iucn_code, esa_code = extrisk_code, er_score,
-    rarity, is_mmpa, is_mbta, is_valid_usa) |>
-  collect() |>
-  mutate(
-    esa_source  = NA_character_,
-    lbl_cmn = ifelse(!is.na(common_name) & common_name != "",
-                     glue(" ({common_name})", .trim = F), ""),
-    label = glue("{sp_cat}: {scientific_name}{lbl_cmn}"),
-    worms_url = ifelse(
-      taxon_authority == "worms" & !is.na(taxon_id),
-      glue('<a href="https://www.marinespecies.org/aphia.php?p=taxdetails&id={taxon_id}" target="_blank">{taxon_id}</a>'),
-      NA_character_))
+  # INPUT COUNT per taxon, counted from the normalised edges rather than taken from a stored
+  # column. `n_ds`/`n_datasets` cannot be trusted across releases: v1-v7 count the ms_merge
+  # edge (so the app subtracted one) and v8 does not (so subtracting one under-reported every
+  # taxon by one — the leatherback's 6 inputs read as 5). Counting what we list cannot drift.
+  n_inputs_of <- local({
+    tb <- table(d_edges$ms_merge_key)
+    function(mk) { n <- tb[[as.character(mk)]]; if (is.null(n)) 0L else as.integer(n) }
+  })
 
-# grouped-by-category choice lists; the checkbox swaps between US-waters-only and all valid marine
-.make_choices <- function(df) df |>
-  arrange(sp_cat, label) |>
-  group_by(sp_cat) |>
-  summarise(layer = list(setNames(mdl_key, label)), .groups = "drop") |>
-  deframe()
-spp_choices_all <- .make_choices(d_spp)
-spp_choices_us  <- .make_choices(d_spp |> filter(is_valid_usa))
-spp_choices     <- spp_choices_us   # default view = "Only species in US waters" (checkbox TRUE)
+  # wide per-taxon input columns: one column per ds_key holding that input's raw mdl_key (or NA),
+  # so `sp_row[[ds_key]]` gives the input to render for the selected taxon (v7 mapsp pattern).
+  d_inputs <- d_edges |>
+    distinct(ms_merge_key, ds_key, mdl_key) |>
+    pivot_wider(names_from = ds_key, values_from = mdl_key, values_fn = dplyr::first)
+  d_spp <- d_spp |> left_join(d_inputs, by = c("mdl_key" = "ms_merge_key"))
+  input_ds_keys <- intersect(ds_keys, names(d_inputs))   # ds_keys offered as input layers
 
-sel_sp_default <- d_spp |> filter(scientific_name == "Dermochelys coriacea", is_valid_usa) |> pull(mdl_key)
-if (length(sel_sp_default) == 0) sel_sp_default <- (d_spp |> filter(is_valid_usa) |> pull(mdl_key))[1]
+  # how much of the true input list this release can draw — logged at startup so a registry
+  # that loses an asset class is visible in the app log instead of only in the UI
+  local({
+    n_edge <- nrow(d_edges); n_ok <- sum(has_asset(d_edges$mdl_key))
+    if (n_edge && n_ok < n_edge)
+      message(glue("native_asset covers {n_ok}/{n_edge} taxon-model inputs ",
+                   "({n_edge - n_ok} shown as unavailable): ",
+                   paste(sort(unique(d_edges$ds_key[!has_asset(d_edges$mdl_key)])), collapse = ", ")))
+  })
 
-# * native_asset: per-taxon input surfaces (Phase 4b) ----
-# each raw input model a taxon is built from, published in a pyramided native format the
-# species app overlays as its whole (often global) range: AquaMaps -> COG (titiler /cog),
-# vector ranges -> PMTiles (client-side filter by mdl_key). Present once publish_native +
-# release have run; absent -> graceful merged-only.
-native_asset <- tryCatch(
-  tbl(con_sdm, "native_asset") |> collect(),
-  error = function(e) tibble(
-    ms_merge_key = character(), mdl_key = character(), ds_key = character(),
-    asset_type = character(), representation = character(), asset_url = character(),
-    rescale_min = integer(), rescale_max = integer(), colormap = character(),
-    source_layer = character(), xmin = double(), ymin = double(), xmax = double(), ymax = double()))
-# older releases had no `representation` column (all rows were the single per-model asset)
-if (!"representation" %in% names(native_asset)) native_asset$representation <- "native"
+  # render lookup: raw input mdl_key -> how to draw it (asset_type/url/rescale/colormap/bbox).
+  # native_asset carries BOTH representations per mdl_key: the ORIGINAL source surface
+  # (representation=="native": AquaMaps 0.5° COG, vector-range PMTiles) and the INTERPOLATED
+  # 0.05°-grid surface used in scoring (representation=="model": a gridded COG). Keep every
+  # representation; the layer bar offers an Original/Interpolated toggle per input and the
+  # render picks the row. pick_asset falls back to native when a rep is absent (e.g. vector
+  # inputs have no model COG).
+  native_by_key <- split(native_asset, native_asset$mdl_key)
+  reps_for   <- function(mk) if (is.null(native_by_key[[mk]])) character(0) else unique(native_by_key[[mk]]$representation)
+  pick_asset <- function(mk, rep = "native") {
+    a <- native_by_key[[mk]]
+    if (is.null(a) || !nrow(a)) return(NULL)
+    r <- a[a$representation == rep, , drop = FALSE]
+    if (!nrow(r)) r <- a[order(a$representation != "native"), , drop = FALSE]   # fallback: native first
+    r[1, ]
+  }
 
-# * taxon_model: what a taxon is ACTUALLY built from ----
-#
-# The input list used to be derived from `native_asset` — the registry of published
-# ASSETS — which silently conflated two different questions: "what fed this taxon" and
-# "what can we draw". When the v8 registry lost its vector-range PMTiles rows, every
-# range input simply vanished from the bar, which went on reporting a count taken from
-# `taxon.n_datasets`: the leatherback advertised 5 inputs (really 6) and offered 1.
-#
-# `taxon_model` IS the taxon->model relation the merge consumed, so inputs are listed from
-# it and availability becomes a separate, VISIBLE property (an input with no published
-# surface renders as a disabled pill, not as an absence). Releases predating the published
-# taxon_model fall back to the old native_asset-derived list.
-d_edges <- tryCatch(
-  tbl(con_sdm, "taxon_model") |> collect() |>
-    transmute(ms_merge_key, mdl_key, ds_key = str_extract(mdl_key, "^[^|]+")),
-  error = function(e) {
-    message("taxon_model unavailable (", conditionMessage(e), ") — inputs from native_asset")
-    tibble(ms_merge_key = character(), mdl_key = character(), ds_key = character()) })
-if (!nrow(d_edges))
-  d_edges <- native_asset |> filter(ds_key != "ms_merge") |> distinct(ms_merge_key, mdl_key, ds_key)
-# taxon_model spans every merged taxon; the picker lists only the valid marine ones
-d_edges <- d_edges |> filter(ms_merge_key %in% d_spp$mdl_key)
+  # URL routing: a ?mdl_key=<key> may name the merged model OR any raw input -> resolve to
+  # (merged model, ds_layer) so the picker opens on that layer.
+  mdl_key_lookup <- bind_rows(
+    d_spp   |> transmute(merged_mdl_key = mdl_key, ds_layer = "mdl_key", input_mdl_key = mdl_key),
+    d_edges |> distinct(ms_merge_key, ds_key, mdl_key) |>
+      transmute(merged_mdl_key = ms_merge_key, ds_layer = ds_key, input_mdl_key = mdl_key))
 
-# published-asset lookup: does this raw input have a surface we can actually render?
-asset_keys <- unique(native_asset$mdl_key)
-has_asset  <- function(mk) !is.na(mk) & mk %in% asset_keys
 
-# wide per-taxon input columns: one column per ds_key holding that input's raw mdl_key (or NA),
-# so `sp_row[[ds_key]]` gives the input to render for the selected taxon (v7 mapsp pattern).
-d_inputs <- d_edges |>
-  distinct(ms_merge_key, ds_key, mdl_key) |>
-  pivot_wider(names_from = ds_key, values_from = mdl_key, values_fn = dplyr::first)
-d_spp <- d_spp |> left_join(d_inputs, by = c("mdl_key" = "ms_merge_key"))
-input_ds_keys <- intersect(ds_keys, names(d_inputs))   # ds_keys offered as input layers
-
-# how much of the true input list this release can draw — logged at startup so a registry
-# that loses an asset class is visible in the app log instead of only in the UI
-local({
-  n_edge <- nrow(d_edges); n_ok <- sum(has_asset(d_edges$mdl_key))
-  if (n_edge && n_ok < n_edge)
-    message(glue("native_asset covers {n_ok}/{n_edge} taxon-model inputs ",
-                 "({n_edge - n_ok} shown as unavailable): ",
-                 paste(sort(unique(d_edges$ds_key[!has_asset(d_edges$mdl_key)])), collapse = ", ")))
-})
-
-# render lookup: raw input mdl_key -> how to draw it (asset_type/url/rescale/colormap/bbox).
-# native_asset carries BOTH representations per mdl_key: the ORIGINAL source surface
-# (representation=="native": AquaMaps 0.5° COG, vector-range PMTiles) and the INTERPOLATED
-# 0.05°-grid surface used in scoring (representation=="model": a gridded COG). Keep every
-# representation; the layer bar offers an Original/Interpolated toggle per input and the
-# render picks the row. pick_asset falls back to native when a rep is absent (e.g. vector
-# inputs have no model COG).
-native_by_key <- split(native_asset, native_asset$mdl_key)
-reps_for   <- function(mk) if (is.null(native_by_key[[mk]])) character(0) else unique(native_by_key[[mk]]$representation)
-pick_asset <- function(mk, rep = "native") {
-  a <- native_by_key[[mk]]
-  if (is.null(a) || !nrow(a)) return(NULL)
-  r <- a[a$representation == rep, , drop = FALSE]
-  if (!nrow(r)) r <- a[order(a$representation != "native"), , drop = FALSE]   # fallback: native first
-  r[1, ]
+  environment()
 }
 
-# URL routing: a ?mdl_key=<key> may name the merged model OR any raw input -> resolve to
-# (merged model, ds_layer) so the picker opens on that layer.
-mdl_key_lookup <- bind_rows(
-  d_spp   |> transmute(merged_mdl_key = mdl_key, ds_layer = "mdl_key", input_mdl_key = mdl_key),
-  d_edges |> distinct(ms_merge_key, ds_key, mdl_key) |>
-    transmute(merged_mdl_key = ms_merge_key, ds_layer = ds_key, input_mdl_key = mdl_key))
+# memoised: a bundle opens a DuckDB connection, reads the manifest and normalises the
+# release's tables, so a second visitor asking for the same version must not pay it again
+bundle <- function(v) {
+  v <- as.character(v)[1]
+  if (is.null(.bundles[[v]])) .bundles[[v]] <- build_bundle(v)
+  .bundles[[v]]
+}
+
+# ?ver= from a request/session, resolved against the published registry. An unknown or absent
+# value falls back to the PROMOTED release (latest.txt) rather than erroring -- this app used
+# to default to a hardcoded v8, so /species/ served the pre-release while /scores/ served v7.
+ver_of <- function(qs) {
+  v <- tryCatch({
+    q <- shiny::parseQueryString(qs %||% "")
+    msens::atlas_resolve_ver(q$ver)
+  }, error = function(e) NULL)
+  if (is.null(v)) tryCatch(msens::atlas_resolve_ver(NULL), error = function(e) VER_FALLBACK) else v
+}
 
 # ui ----
 # ui is a FUNCTION of the request, not a static object, for one reason: the
@@ -396,7 +563,7 @@ mdl_key_lookup <- bind_rows(
 # REMOTE_ADDR 127.0.0.1 and no X-Forwarded-For (Caddy sets it correctly; it is
 # lost at the shiny-server hop). This page request is the only one that still
 # carries the real address, so it is captured here and baked into the snippet.
-ui <- function(req) page_sidebar(
+ui_impl <- function(req) page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     # usage tracking: GA4 (aggregate) + a batched beacon to the usage-log Sheet
@@ -624,7 +791,7 @@ ui <- function(req) page_sidebar(
 )
 
 # server ----
-server <- function(input, output, session) {
+server_impl <- function(input, output, session) {
 
   # version picker ----
   # One app renders any published release, so the header says which one is on
@@ -633,25 +800,30 @@ server <- function(input, output, session) {
   # disagree about what exists.
 
   # ?ver= — the version is a URL parameter, not a fork of this app ----
-  # Same contract as the scores app: accept and validate, but say plainly when a
-  # published version cannot yet be RENDERED here, rather than silently drawing
-  # a different one under the requested label. (Kept separate from the
-  # ?mdl_key= deep-link observer below, which owns species selection.)
+  # This app now RENDERS the requested release (the session was enclosed in its bundle before
+  # this observer ran), so the only thing left to report is a version that does not exist.
+  # It used to answer "Version v7 is not served here yet" for every release but v8 — while
+  # also defaulting to v8, the PRE-release, when no ?ver= was given at all.
   observeEvent(session$clientData$url_search, once = TRUE, {
     q   <- parseQueryString(session$clientData$url_search)
     req <- q$ver
     if (is.null(req) || !nzchar(req)) return(invisible())
     resolved <- tryCatch(msens::atlas_resolve_ver(req), error = function(e) NULL)
-    if (is.null(resolved)) {
+    if (is.null(resolved))
       showModal(modalDialog(
         title = "Unknown data version", easyClose = TRUE,
         p(HTML(glue("<code>?ver={htmltools::htmlEscape(req)}</code> is not a published ",
-                    "version. Showing <b>{ver}</b>.")))))
-    } else if (!identical(resolved, ver)) {
-      showModal(modalDialog(
-        title = glue("Version {resolved} is not served here yet"), easyClose = TRUE,
-        p(HTML(glue("This app currently renders <b>{ver}</b>. Showing it instead.")))))
-    }
+                    "version. Showing <b>{ver}</b>."))),
+        p("Published versions are listed at ",
+          a(href = paste0(msens::atlas_base_url(), "/versions.json"),
+            target = "_blank", "versions.json"), ".")))
+  })
+
+  # echo the version into the URL so a shared link is explicit about what it shows
+  observe({
+    q <- parseQueryString(isolate(session$clientData$url_search))
+    if (is.null(q$mdl_key))                       # the ?mdl_key= observer owns the URL otherwise
+      updateQueryString(glue("?ver={ver}"), mode = "replace", session = session)
   })
 
   observeEvent(input$show_versions, {
@@ -704,7 +876,7 @@ server <- function(input, output, session) {
         common_name     = sp$common_name,
         sp_cat          = sp$sp_cat,
         taxon_id        = sp$taxon_id,
-        n_datasets      = sp$n_ds,
+        n_datasets      = n_inputs_of(sp$mdl_key),
         redlist_code    = sp$redlist_code,
         us_only         = isTRUE(input$us_only))
   }, ignoreInit = TRUE)
@@ -972,7 +1144,7 @@ server <- function(input, output, session) {
     sp_row        <- d_spp |> filter(mdl_key == input$sel_sp)
     current_layer <- input$ds_layer
     layer_name    <- layer_names[current_layer]
-    n_ds          <- sp_row$n_ds
+    n_inputs      <- n_inputs_of(sp_row$mdl_key)
 
     # determine available layers (mirrors observeEvent input$sel_sp logic)
     available <- c()
@@ -1013,13 +1185,12 @@ server <- function(input, output, session) {
       left_content <- tagList(
         span(class = "layer-icon", "\u2713"),
         span(class = "layer-label", "Merged Model"),
-        # `n_ds` is taxon.n_datasets = n_distinct(ds_key) over taxon_model
-        # (merge_models_prep.qmd), which counts the SOURCE datasets only — the merged model is
-        # never an edge in that table. Subtracting one for it under-reported every taxon by one
-        # (the leatherback's 6 inputs read as 5). Same quantity as the input pills beside it.
-        if (n_ds > 1) span(
+        # counted from the normalised edges (n_inputs_of), NOT a stored n_ds column: v1-v7
+        # count the ms_merge edge in n_ds and v8 does not, so any fixed offset is wrong on one
+        # of them. This is the same quantity as the input pills beside it, by construction.
+        if (n_inputs > 1) span(
           style = "opacity: 0.85;",
-          glue(" (maximum of {n_ds} inputs)")))
+          glue(" (maximum of {n_inputs} inputs)")))
     } else {
       bar_class <- "layer-bar is-input"
       in_key  <- sp_row[[current_layer]]                 # this input's raw mdl_key
@@ -1067,7 +1238,7 @@ server <- function(input, output, session) {
 
     # determine which models are present
     has_iucn <- "rng_iucn" %in% names(d_sp) && !is.na(d_sp$rng_iucn)
-    n_ds     <- d_sp$n_ds
+    n_ds     <- n_inputs_of(d_sp$mdl_key)
 
     # current layer being displayed
     current_layer <- input$ds_layer
@@ -1360,7 +1531,7 @@ server <- function(input, output, session) {
     browser_title <- glue(
       "{sp_name} distribution ({sp_cat_cmn}; mdl_key: {layer_mdl_key}) from {layer_name} | BOEM Marine Sensitivity")
     session$sendCustomMessage("updateTitle", browser_title)
-    updateQueryString(glue("?mdl_key={layer_mdl_key}"), mode = "replace", session = session)
+    updateQueryString(glue("?ver={ver}&mdl_key={layer_mdl_key}"), mode = "replace", session = session)
 
     # v8 Phase 4b: the merged model + AquaMaps inputs are raster surfaces (titiler XYZ tiles on
     # "r_lyr"); vector-range inputs are PMTiles polygons (client-filtered by mdl_key on "r_pm").
@@ -1393,27 +1564,40 @@ server <- function(input, output, session) {
     # non-US species that has no model_cell); am-only taxa lack a merged COG -> model_cell fallback.
     merged_cog_url <- NA_character_
     if (is_merged) {
+      # the merged model's OWN asset row, selected by key rather than by ds_key == "ms_merge".
+      # On v8 those are the same row; on v1-v7 a taxon whose only model is AquaMaps has its
+      # merged surface registered under ds_key "am", so keying on the label found nothing and
+      # dropped through to the model_cell branch below -- which would have asked titiler for a
+      # v8 partition while claiming to draw v1.
       mc <- native_by_key[[layer_mdl_key]]
-      if (!is.null(mc)) { mc <- mc[mc$ds_key == "ms_merge", , drop = FALSE]
-        if (nrow(mc)) merged_cog_url <- mc$asset_url[1] }
+      if (!is.null(mc) && nrow(mc)) merged_cog_url <- mc$asset_url[1]
     }
     if (is_merged || (!is.null(asset) && asset$asset_type == "cog")) {
       tile_url <- if (is_merged && !is.na(merged_cog_url)) {
         msens::cog_tile_url(merged_cog_url, colormap = "spectral_r", rescale = c(1, 100), base = tile_base_url)
-      } else if (is_merged) {
-        # model_cell fallback (am-only taxa): titiler resolves the stable mdl_key -> serve partition.
+      } else if (is_merged && has_model_cell) {
+        # model_cell fallback (am-only taxa): titiler resolves the stable mdl_key -> serve
+        # partition. ONLY for a release that publishes model_cell (v8) -- the tile endpoint is
+        # bound to one release's serving DB, so using it elsewhere draws the wrong data.
         msens::cell_tile_url(mdl_key = layer_mdl_key, colormap = "spectral_r", rescale = c(1, 100),
                              mtime = db_mtime, base = tile_base_url)
+      } else if (is_merged) {
+        NULL                                    # nothing published for this taxon in this release
       } else {
         msens::cog_tile_url(asset$asset_url,
                             colormap = coalesce(asset$colormap, "spectral_r"),
                             rescale  = c(coalesce(asset$rescale_min, 1L), coalesce(asset$rescale_max, 100L)),
                             base = tile_base_url)
       }
-      map_proxy  <- map_proxy |>
-        msens::add_cell_tiles(tile_url, id = "r_lyr", raster_opacity = 0.8, before_id = "er_ln") |>
-        add_legend(title_str, values = rng_r, colors = cols_r, position = "bottom-right")
-      active_lyr <- c("Raster cell values" = "r_lyr")
+      if (is.null(tile_url)) {
+        showNotification(glue("No surface published for this taxon in {ver}"), type = "warning")
+        active_lyr <- character(0)
+      } else {
+        map_proxy  <- map_proxy |>
+          msens::add_cell_tiles(tile_url, id = "r_lyr", raster_opacity = 0.8, before_id = "er_ln") |>
+          add_legend(title_str, values = rng_r, colors = cols_r, position = "bottom-right")
+        active_lyr <- c("Raster cell values" = "r_lyr")
+      }
     } else if (!is.null(asset) && asset$asset_type == "pmtiles") {
       pm_col     <- "#3388ff"
       map_proxy  <- map_proxy |>
@@ -1612,4 +1796,21 @@ server <- function(input, output, session) {
   })
 }
 
+
+# `ver` is a URL parameter, not a fork of this app. Both the UI and the server are evaluated
+# with their enclosing environment set to the requested version's bundle.
+
+ui <- function(req) {
+  b <- bundle(ver_of(req$QUERY_STRING))
+  f <- ui_impl; environment(f) <- b
+  f(req)
+}
+
+server <- function(input, output, session) {
+  b <- bundle(ver_of(isolate(session$clientData$url_search)))
+  f <- server_impl; environment(f) <- b
+  f(input, output, session)
+}
+
 shinyApp(ui, server)
+
