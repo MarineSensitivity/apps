@@ -230,16 +230,43 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   message(glue("zone tables resolved: ecoregion={tbl_er} subregion={tbl_sr} ",
                "programarea={tbl_pra} planarea={tbl_pa}"))
 
-  # NOTE (deliberately NOT fixed here): this app reads `zone.value`,
-  # `zone_metric.value` and friends by their v1-v7 names. v8's SOURCE sdm.duckdb
-  # renamed them to `val` (away from DuckDB's reserved word), and the RELEASE adds
-  # `value` aliases back -- verified identical across all 37 v8 zones -- so
-  # production, which reads serve.duckdb, is unaffected. Pointing the app at a
-  # source sdm.duckdb instead (local dev) fails during bundle construction with
-  # `cannot coerce type 'closure'`: a bare `value` with no such column resolves to
-  # a FUNCTION in scope. Adapting per connection is the right fix, but it spans
-  # every table this app touches and wants its own change -- a partial one reads
-  # as source-schema-safe without being it.
+  # ...and the MEASUREMENT column with them. v1-v7 call it `value` everywhere
+  # (`zone`, `zone_metric`, `cell_metric`, `model_cell`); v8 renamed it `val`, away
+  # from DuckDB's reserved word. Crucially the two FORMS of a v8 release disagree
+  # too: the served `serve.duckdb` carries `val` AND a `value` alias, while the
+  # source `sdm.duckdb` it was built from carries only `val`.
+  #
+  # So neither spelling is safe to hardcode, and this file had hardcoded BOTH --
+  # `cell_sql()` said `cm.val`, `get_rast()` said `value` -- meaning one of them was
+  # always wrong for the release in hand. It stayed hidden because production reads
+  # served DBs, where the alias covers `value`, and the `val` path is a fallback the
+  # score COGs normally displace. Against a v8 source DB the app died during bundle
+  # construction with `cannot coerce type 'closure'`: a bare `value` with no such
+  # column resolves to a FUNCTION in scope, so the error names neither the table nor
+  # the column.
+  #
+  # msens::sdm_val_col() resolves it per (connection, table) and is unit-tested on
+  # both schemas. Below, the `*_tbl()` adapters rename the resolved column back to
+  # `value` at the point of read, so every query downstream keeps one spelling; raw
+  # SQL interpolates the resolved name instead.
+  val_zone <- msens::sdm_val_col(con_sdm, "zone")
+  val_zm   <- msens::sdm_val_col(con_sdm, "zone_metric")
+  val_cm   <- msens::sdm_val_col(con_sdm, "cell_metric")
+  message(glue("value columns resolved: zone={val_zone} zone_metric={val_zm} ",
+               "cell_metric={val_cm}"))
+  # Three shapes to survive, not two: `value` only (v1-v7), `val` only (v8 source), and
+  # BOTH (v8 served, where the release writes a `value` alias beside `val`). A bare
+  # rename() handles the first two and dies on the third with `Names must be unique` --
+  # and the third is production. So drop the redundant alias before renaming, and skip
+  # the rename entirely where the column is already canonically named.
+  vals_tbl <- function(tbl_name, vcol) {
+    t <- tbl(con_sdm, tbl_name)
+    if (identical(vcol, "value")) return(t)
+    t |> select(-any_of("value")) |> rename(value = !!sym(vcol))
+  }
+  zone_vals            <- function() vals_tbl("zone",        val_zone)
+  zone_metric_vals     <- function() vals_tbl("zone_metric", val_zm)
+  cell_metric_vals     <- function() vals_tbl("cell_metric", val_cm)
   # dbListTables(con_sdm)
   # duckdb_shutdown(duckdb()); rm(con_sdm)
 
@@ -364,15 +391,18 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
     stopifnot(
       is.character(subregion_key), length(subregion_key) == 1,
       grepl("^[A-Za-z0-9_]+$",   subregion_key))
+    # `cm.{val_cm}` / `z.{val_zone}`, not a hardcoded `val`: this SELECT is handed to
+    # titiler, so on v1-v7 (where the column is `value`) it produced a tile request that
+    # could only fail server-side, where the error is a blank layer rather than a message.
     if (subregion_key == "FULL") {
       glue(
-        "SELECT cm.cell_id, cm.val AS value ",
+        "SELECT cm.cell_id, cm.{val_cm} AS value ",
         "FROM cell_metric cm ",
         "JOIN metric m ON cm.metric_seq = m.metric_seq ",
         "WHERE m.metric_key = '{metric_key}'")
     } else {
       glue(
-        "SELECT cm.cell_id, cm.val AS value ",
+        "SELECT cm.cell_id, cm.{val_cm} AS value ",
         "FROM cell_metric cm ",
         "JOIN metric     m  ON cm.metric_seq = m.metric_seq ",
         "JOIN zone_cell  zc ON cm.cell_id    = zc.cell_id ",
@@ -380,7 +410,7 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
         "WHERE m.metric_key = '{metric_key}' ",
         "AND   z.tbl       = '{tbl_sr}' ",
         "AND   z.fld       = 'subregion_key' ",
-        "AND   z.val       = '{subregion_key}'")
+        "AND   z.{val_zone} = '{subregion_key}'")
     }
   }
 
@@ -394,7 +424,7 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
       select(metric_seq) |>
       inner_join(
         # get cell_metric.value
-        tbl(con_sdm, "cell_metric") |>
+        cell_metric_vals() |>
           select(metric_seq, cell_id, value),
         by = join_by(metric_seq)
       ) |>
@@ -407,7 +437,7 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
       # limit to subregion zone
       d_metric |>
         inner_join(
-          tbl(con_sdm, "zone") |>
+          zone_vals() |>
             filter(
               tbl == !!tbl_sr,
               fld == "subregion_key",
@@ -540,14 +570,15 @@ pra_geom <- function() zone_geom("programarea")
     # manifest declares. v7 defines 5 subregions and scores exactly one of them
     # (the study-area rollup), so declaring it a choropleth unit would paint 1 of
     # 5 and leave the rest grey. A unit needs >= 2 scored zones to be a map.
-    # `value` exists on every release's serve view: v1-v7 store it, v8 stores
-    # `val` and the view aliases `val AS value` for exactly this reason.
+    # The `value` alias exists on every SERVED release, but not on a v8 source DB --
+    # and the tryCatch below would have turned that into "no scored units at all",
+    # i.e. a silently unusable app rather than an error. Resolve the name instead.
     scored <- tryCatch(
-      dbGetQuery(con_sdm, "
-        SELECT DISTINCT z.fld, z.value AS zkey
+      dbGetQuery(con_sdm, glue("
+        SELECT DISTINCT z.{val_zone} AS zkey, z.fld
           FROM zone z JOIN zone_metric zm USING (zone_seq)
           JOIN metric m USING (metric_seq)
-         WHERE m.metric_key LIKE 'score!_%' ESCAPE '!'"),
+         WHERE m.metric_key LIKE 'score!_%' ESCAPE '!'")),
       error = function(e) data.frame(fld = character(), zkey = character()))
     scored <- split(as.character(scored$zkey), scored$fld)   # fld -> scored keys
     lab <- c(programarea = "Program areas", planarea  = "Planning areas",
@@ -761,7 +792,7 @@ pra_geom <- function() zone_geom("programarea")
     lyrs_pra <- dbListFields(con, tbl_pra)
     lyrs_cell <- tbl(con_sdm, "metric") |>
       semi_join(
-        tbl(con_sdm, "cell_metric") |>
+        cell_metric_vals() |>
           distinct(metric_seq),
         by = "metric_seq"
       ) |>
@@ -859,7 +890,7 @@ pra_geom <- function() zone_geom("programarea")
     message(glue("Calculating subregion - programarea cells..."))
 
     # subregion cells
-    tbl_sr_cell <- tbl(con_sdm, "zone") |>
+    tbl_sr_cell <- zone_vals() |>
       filter(
         tbl == !!tbl_sr,
         fld == "subregion_key"
@@ -873,7 +904,7 @@ pra_geom <- function() zone_geom("programarea")
       select(sr_key, cell_id)
 
     # programarea cells
-    tbl_pra_cell <- tbl(con_sdm, "zone") |>
+    tbl_pra_cell <- zone_vals() |>
       filter(fld == "programarea_key") |>
       select(pra_key = value, zone_seq) |>
       inner_join(
@@ -935,7 +966,7 @@ pra_geom <- function() zone_geom("programarea")
     pra_sr <- d_sr_pra |>
       filter(subregion_key == !!sr_key) |>
       pull(programarea_key)
-    cells <- tbl(con_sdm, "zone") |>
+    cells <- zone_vals() |>
       filter(fld == "programarea_key", value %in% !!pra_sr) |>
       select(zone_seq) |>
       inner_join(tbl(con_sdm, "zone_cell") |> select(zone_seq, cell_id),
@@ -1142,10 +1173,10 @@ pra_geom <- function() zone_geom("programarea")
   flower_default_csv <- here("scores/cache/flower_default_subregions.csv")
   if (!file_exists(flower_default_csv)) {
     if (verbose) message("Building flower_default_subregions cache...")
-    d_flower_default <- tbl(con_sdm, "zone") |>
+    d_flower_default <- zone_vals() |>
       filter(tbl == !!tbl_sr, fld == "subregion_key") |>
       select(zone_seq, subregion_key = value) |>
-      inner_join(tbl(con_sdm, "zone_metric"), by = "zone_seq") |>
+      inner_join(zone_metric_vals(), by = "zone_seq") |>
       inner_join(
         tbl(con_sdm, "metric") |>
           filter(str_detect(metric_key, ".*_ecoregion_rescaled$")) |>
@@ -2198,10 +2229,10 @@ server_impl <- function(input, output, session) {
         n_cols <- 11
         cols_r <- get_pal_colors(input$sel_palette, n_cols)
 
-        d_zone <- tbl(con_sdm, "zone") |>
+        d_zone <- zone_vals() |>
           filter(fld == !!kcol, value %in% !!zone_keys) |>
           select(zone_key = value, zone_seq) |>
-          inner_join(tbl(con_sdm, "zone_metric"), by = join_by(zone_seq)) |>
+          inner_join(zone_metric_vals(), by = join_by(zone_seq)) |>
           inner_join(
             tbl(con_sdm, "metric") |> filter(metric_key == !!lyr),
             by = join_by(metric_seq)) |>
@@ -2385,7 +2416,7 @@ server_impl <- function(input, output, session) {
       d_fl <- tbl(con_sdm, "metric") |>
         filter(str_detect(metric_key, ".*_ecoregion_rescaled$")) |>
         left_join(
-          tbl(con_sdm, "cell_metric"),
+          cell_metric_vals(),
           by = "metric_seq"
         ) |>
         filter(cell_id == !!cell_id) |>
@@ -2455,7 +2486,7 @@ server_impl <- function(input, output, session) {
       # look up zone_seq by FIELD + key, not by table name: the table name is
       # version-suffixed on some releases and not others, which is what silently
       # emptied the subregion mapping on v2
-      z_seq <- tbl(con_sdm, "zone") |>
+      z_seq <- zone_vals() |>
         filter(fld == !!z_fld, value == !!pra_key) |>
         pull(zone_seq)
 
@@ -2463,7 +2494,7 @@ server_impl <- function(input, output, session) {
         d_fl <- tbl(con_sdm, "metric") |>
           filter(str_detect(metric_key, ".*_ecoregion_rescaled$")) |>
           left_join(
-            tbl(con_sdm, "zone_metric"),
+            zone_metric_vals(),
             by = "metric_seq") |>
           filter(zone_seq == !!z_seq) |>
           select(metric_key, score = value) |>
