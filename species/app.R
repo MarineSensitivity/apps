@@ -405,14 +405,22 @@ build_bundle <- function(ver) {
         xmin = NA_real_, ymin = NA_real_, xmax = NA_real_, ymax = NA_real_)
   } else {
     # ---- v8 -------------------------------------------------------------------
-    # base picker set = all valid marine taxa (is_valid_global if present, else is_valid_usa); each row
-    # carries is_valid_usa so the "Only species in US waters" checkbox can filter to US presence. A taxon
-    # is is_valid_usa iff it has >=1 merged cell in US waters (merge_taxon: n_usa>0) — so the ~750 AquaMaps
-    # over-predictions whose IUCN range is wholly outside the US (Sotalia etc.) are is_valid_usa=FALSE.
+    # base picker set = every taxon valid in EITHER merged surface. v8 merges two — a global one
+    # and a US-scoped scoring one — and NEITHER flag is a superset of the other: 4,473 taxa are
+    # global-only, and 46 are US-only (their whole distribution is US waters, so they are scored
+    # here yet absent from the global surface). Filtering on is_valid_global alone, as this did,
+    # hid those 46 scored species from the picker entirely.
+    #
+    # Each row still carries is_valid_usa so the "Only species in US waters" checkbox can filter
+    # to US presence. A taxon is is_valid_usa iff it has >=1 merged cell in US waters
+    # (merge_taxon: n_usa>0) — so the ~750 AquaMaps over-predictions whose IUCN range is wholly
+    # outside the US (Sotalia etc.) are is_valid_usa=FALSE.
     d_spp_tbl <- tbl(con_sdm, "taxon") |>
       filter(is_marine, !is.na(ms_merge_key), !sp_cat %in% c("reptile", "amphibian"))
-    d_spp_tbl <- if ("is_valid_global" %in% taxon_cols)
-      filter(d_spp_tbl, is_valid_global) else filter(d_spp_tbl, is_valid_usa)
+    d_spp_tbl <- if (all(c("is_valid_global", "is_valid_usa") %in% taxon_cols))
+      filter(d_spp_tbl, coalesce(is_valid_global, FALSE) | coalesce(is_valid_usa, FALSE))
+    else if ("is_valid_global" %in% taxon_cols) filter(d_spp_tbl, is_valid_global)
+    else filter(d_spp_tbl, is_valid_usa)
     d_spp <- d_spp_tbl |>
       select(
         taxon_id, taxon_authority, scientific_name, common_name, sp_cat,
@@ -455,11 +463,13 @@ build_bundle <- function(ver) {
     summarise(layer = list(setNames(mdl_key, label)), .groups = "drop") |>
     deframe()
   spp_choices_all <- .make_choices(d_spp)
-  spp_choices_us  <- .make_choices(d_spp |> filter(is_valid_usa))
+  spp_choices_us  <- .make_choices(d_spp |> filter(coalesce(is_valid_usa, FALSE)))
   spp_choices     <- spp_choices_us   # default view = "Only species in US waters" (checkbox TRUE)
 
-  sel_sp_default <- d_spp |> filter(scientific_name == "Dermochelys coriacea", is_valid_usa) |> pull(mdl_key)
-  if (length(sel_sp_default) == 0) sel_sp_default <- (d_spp |> filter(is_valid_usa) |> pull(mdl_key))[1]
+  sel_sp_default <- d_spp |> filter(scientific_name == "Dermochelys coriacea",
+                                    coalesce(is_valid_usa, FALSE)) |> pull(mdl_key)
+  if (length(sel_sp_default) == 0)
+    sel_sp_default <- (d_spp |> filter(coalesce(is_valid_usa, FALSE)) |> pull(mdl_key))[1]
 
   # * inputs = what a taxon is ACTUALLY built from, availability tracked separately ----
   #
@@ -827,7 +837,10 @@ server_impl <- function(input, output, session) {
   # echo the version into the URL so a shared link is explicit about what it shows
   observe({
     q <- parseQueryString(isolate(session$clientData$url_search))
-    if (is.null(q$mdl_key))                       # the ?mdl_key= observer owns the URL otherwise
+    # `mdl_seq` counts as owned too — it is the v1-v7 spelling of the same parameter. Left
+    # out, this observer rewrote the URL to a bare ?ver= before the deep-link observer had
+    # read it, so a published /mapsp/?mdl_seq= link raced against its own fix.
+    if (is.null(q$mdl_key) && is.null(q$mdl_seq))  # the ?mdl_key= observer owns the URL otherwise
       updateQueryString(glue("?ver={ver}"), mode = "replace", session = session)
   })
 
@@ -1036,8 +1049,12 @@ server_impl <- function(input, output, session) {
     if (rx_url_initialized()) return()
 
     query <- parseQueryString(session$clientData$url_search)
-    if (!is.null(query$mdl_key)) {
-      url_mdl_key <- query$mdl_key   # v8 mdl_key is a string (e.g. "ms_merge|WORMS:137209")
+    # `?mdl_seq=` is the SAME parameter under v1-v7's name for it, and it is the form every
+    # link published before v8 uses — the final report, the BOEM deliverables, issue #5. The
+    # bundle already normalises a v1-v7 mdl_seq into `mdl_key`, so accepting the alias here is
+    # all those links needed; without it they were silently answered with the default species.
+    url_mdl_key <- query$mdl_key %||% query$mdl_seq
+    if (!is.null(url_mdl_key)) {   # v8 mdl_key is a string (e.g. "ms_merge|WORMS:137209")
 
       # look up which species and layer this mdl_key belongs to
       lookup_row <- mdl_key_lookup |>
