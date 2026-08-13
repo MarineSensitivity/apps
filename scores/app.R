@@ -317,6 +317,74 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
   er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
 
+  # ---- zone units: every spatial unit THIS release actually scores ----------
+  #
+  # The app used to hardcode one polygon unit, Program Areas. That is wrong in
+  # both directions: v1 has none (it scores 36 Planning Areas and 12 Ecoregions),
+  # and v8 scores Ecoregions and Subregions alongside Program Areas but offered
+  # neither. Worse, "Planning areas" was briefly offered on the strength of the
+  # release capability alone while no render path existed, so choosing it silently
+  # did nothing.
+  #
+  # So the unit list is DERIVED: a unit appears iff this release has zone rows for
+  # it, PMTiles to draw it, and at least one composite score attached to it. All
+  # three are required — geometry without scores paints an empty choropleth, and
+  # scores without geometry cannot be drawn at all. Zone types will keep changing,
+  # so nothing below names a specific one.
+  zone_units <- local({
+    z <- zone_tbl
+    # requires the manifest's per-vintage tile URLs; the unversioned fallback
+    # cannot say WHICH units a release has, so no unit list is offered from it
+    if (is.null(z) || !nrow(z) || !"pmtiles" %in% names(z)) return(NULL)
+    # Count the zones that actually carry a composite score, NOT the zones the
+    # manifest declares. v7 defines 5 subregions and scores exactly one of them
+    # (the study-area rollup), so declaring it a choropleth unit would paint 1 of
+    # 5 and leave the rest grey. A unit needs >= 2 scored zones to be a map.
+    scored <- tryCatch(
+      dbGetQuery(con_sdm, "
+        SELECT z.fld, count(DISTINCT z.zone_seq) AS n_scored
+          FROM zone z JOIN zone_metric zm USING (zone_seq)
+          JOIN metric m USING (metric_seq)
+         WHERE m.metric_key LIKE 'score!_%' ESCAPE '!'
+         GROUP BY 1 HAVING count(DISTINCT z.zone_seq) > 1"),
+      error = function(e) data.frame(fld = character(), n_scored = integer()))
+    lab <- c(programarea = "Program areas", planarea  = "Planning areas",
+             ecoregion   = "Ecoregions",    subregion = "Subregions")
+    out <- lapply(seq_len(nrow(z)), function(i) {
+      fld  <- z$fld[i]
+      type <- sub("_key$", "", fld)
+      j    <- which(scored$fld == fld)
+      if (!length(j) || is.na(z$pmtiles[i])) return(NULL)
+      data.frame(
+        fld = fld, type = type,
+        label = unname(if (type %in% names(lab)) lab[[type]] else
+                       paste0(toupper(substring(type, 1, 1)), substring(type, 2), "s")),
+        url = z$pmtiles[i], source_layer = type,
+        zone_set_key = if ("zone_set_key" %in% names(z)) z$zone_set_key[i] else NA_character_,
+        n = as.integer(scored$n_scored[j[1]]), stringsAsFactors = FALSE)
+    })
+    out <- do.call(rbind, Filter(Negate(is.null), out))
+    if (is.null(out) || !nrow(out)) return(NULL)
+    # Program Areas first where present -- the current programme's reporting unit
+    # -- then finest first, so the default is the most detailed view available.
+    out <- out[order(out$type != "programarea", -out$n), , drop = FALSE]
+    rownames(out) <- NULL
+    out
+  })
+  message("scored zone units: ",
+          if (is.null(zone_units)) "none" else
+            paste(sprintf("%s(%d)", zone_units$type, zone_units$n), collapse = " "))
+
+  # The release's PRIMARY reporting unit: what the map outlines as context in
+  # raster-cell mode, and the default polygon unit. Program Areas where they
+  # exist, otherwise the finest scored unit (v1 -> Planning Areas).
+  primary_unit <- if (is.null(zone_units)) NULL else zone_units$type[1]
+  zone_unit_row <- function(type) {
+    if (is.null(zone_units) || is.null(type)) return(NULL)
+    i <- which(zone_units$type == type)
+    if (length(i)) zone_units[i[1], ] else NULL
+  }
+
   # Which zone outline layers this release actually draws, and therefore what a
   # later layer may sit BEFORE.
   #
