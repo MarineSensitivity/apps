@@ -317,73 +317,6 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   pra_src_layer <- ztile("programarea", tbl_pra_pm)$source_layer %||% tbl_pra_pm
   er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
 
-  # ---- zone units: every spatial unit THIS release actually scores ----------
-  #
-  # The app used to hardcode one polygon unit, Program Areas. That is wrong in
-  # both directions: v1 has none (it scores 36 Planning Areas and 12 Ecoregions),
-  # and v8 scores Ecoregions and Subregions alongside Program Areas but offered
-  # neither. Worse, "Planning areas" was briefly offered on the strength of the
-  # release capability alone while no render path existed, so choosing it silently
-  # did nothing.
-  #
-  # So the unit list is DERIVED: a unit appears iff this release has zone rows for
-  # it, PMTiles to draw it, and at least one composite score attached to it. All
-  # three are required — geometry without scores paints an empty choropleth, and
-  # scores without geometry cannot be drawn at all. Zone types will keep changing,
-  # so nothing below names a specific one.
-  zone_units <- local({
-    z <- zone_tbl
-    # requires the manifest's per-vintage tile URLs; the unversioned fallback
-    # cannot say WHICH units a release has, so no unit list is offered from it
-    if (is.null(z) || !nrow(z) || !"pmtiles" %in% names(z)) return(NULL)
-    # Count the zones that actually carry a composite score, NOT the zones the
-    # manifest declares. v7 defines 5 subregions and scores exactly one of them
-    # (the study-area rollup), so declaring it a choropleth unit would paint 1 of
-    # 5 and leave the rest grey. A unit needs >= 2 scored zones to be a map.
-    scored <- tryCatch(
-      dbGetQuery(con_sdm, "
-        SELECT z.fld, count(DISTINCT z.zone_seq) AS n_scored
-          FROM zone z JOIN zone_metric zm USING (zone_seq)
-          JOIN metric m USING (metric_seq)
-         WHERE m.metric_key LIKE 'score!_%' ESCAPE '!'
-         GROUP BY 1 HAVING count(DISTINCT z.zone_seq) > 1"),
-      error = function(e) data.frame(fld = character(), n_scored = integer()))
-    lab <- c(programarea = "Program areas", planarea  = "Planning areas",
-             ecoregion   = "Ecoregions",    subregion = "Subregions")
-    out <- lapply(seq_len(nrow(z)), function(i) {
-      fld  <- z$fld[i]
-      type <- sub("_key$", "", fld)
-      j    <- which(scored$fld == fld)
-      if (!length(j) || is.na(z$pmtiles[i])) return(NULL)
-      data.frame(
-        fld = fld, type = type,
-        label = unname(if (type %in% names(lab)) lab[[type]] else
-                       paste0(toupper(substring(type, 1, 1)), substring(type, 2), "s")),
-        url = z$pmtiles[i], source_layer = type,
-        zone_set_key = if ("zone_set_key" %in% names(z)) z$zone_set_key[i] else NA_character_,
-        n = as.integer(scored$n_scored[j[1]]), stringsAsFactors = FALSE)
-    })
-    out <- do.call(rbind, Filter(Negate(is.null), out))
-    if (is.null(out) || !nrow(out)) return(NULL)
-    # Program Areas first where present -- the current programme's reporting unit
-    # -- then finest first, so the default is the most detailed view available.
-    out <- out[order(out$type != "programarea", -out$n), , drop = FALSE]
-    rownames(out) <- NULL
-    out
-  })
-  message("scored zone units: ",
-          if (is.null(zone_units)) "none" else
-            paste(sprintf("%s(%d)", zone_units$type, zone_units$n), collapse = " "))
-
-  # The release's PRIMARY reporting unit: what the map outlines as context in
-  # raster-cell mode, and the default polygon unit. Program Areas where they
-  # exist, otherwise the finest scored unit (v1 -> Planning Areas).
-  primary_unit <- if (is.null(zone_units)) NULL else zone_units$type[1]
-  zone_unit_row <- function(type) {
-    if (is.null(zone_units) || is.null(type)) return(NULL)
-    i <- which(zone_units$type == type)
-    if (length(i)) zone_units[i[1], ] else NULL
-  }
 
   # Which zone outline layers this release actually draws, and therefore what a
   # later layer may sit BEFORE.
@@ -534,68 +467,195 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
 # Read from the VINTAGE's published geometry, not a per-version gpkg -- geometry
 # depends on the vintage, so one file serves every release that uses it. Local
 # gpkg stays as the fallback (and is faster when present).
-.pra_geom <- NULL
-pra_geom <- function() {
-  if (!is.null(.pra_geom)) return(.pra_geom)
+.zone_geom_cache <- new.env(parent = emptyenv())
+
+# Polygon geometry for ANY zone type of this release, from the published
+# per-vintage FlatGeobuf (`zones/{zone_set_key}/zones.fgb`), falling back to a
+# local gpkg for program areas where one is checked in. Returns NULL when the
+# release has no such unit, which callers must handle: reading the gpkg path
+# directly is what made v1 and v2 -- which ship no program-area file -- die at
+# startup with "The file doesn't seem to exist", i.e. HTTP 500 for the entire
+# release rather than a map without labels.
+zone_geom <- function(type) {
+  if (is.null(type) || is.na(type)) return(NULL)
+  if (!is.null(.zone_geom_cache[[type]])) return(.zone_geom_cache[[type]])
+  kcol <- paste0(type, "_key"); ncol <- paste0(type, "_name")
   g <- NULL
-  if (file.exists(pra_gpkg))
-    g <- tryCatch(read_sf(pra_gpkg) |> select(programarea_key, programarea_name),
+  # local gpkg, where this release ships one for that unit
+  loc <- switch(type,
+    programarea = pra_gpkg,
+    planarea    = glue("{dir_v}/ply_planareas_2025_{ver}.gpkg"),
+    ecoregion   = glue("{dir_v}/ply_ecoregions_2025.gpkg"),
+    NULL)
+  if (!is.null(loc) && file.exists(loc))
+    g <- tryCatch(read_sf(loc) |> select(any_of(c(kcol, ncol))),
                   error = function(e) NULL)
-  if (is.null(g)) {
+  # published FlatGeobuf for the vintage the manifest names -- the general path,
+  # and the only one that works for a unit with no local file
+  if (is.null(g) || !nrow(g)) {
     zk <- if (!is.null(zone_tbl) && "zone_set_key" %in% names(zone_tbl)) {
-      i <- which(zone_tbl$fld == "programarea_key")
+      i <- which(zone_tbl$fld == paste0(type, "_key"))
       if (length(i)) zone_tbl$zone_set_key[i[1]] else NA_character_
     } else NA_character_
     if (!is.na(zk)) {
-      u <- glue("/vsicurl/{msens::atlas_base_url()}/zones/{zk}/zones.fgb")
-      g <- tryCatch(read_sf(u), error = function(e) {
-        message("zone fgb unavailable (", conditionMessage(e), ")"); NULL })
-      if (!is.null(g) && "programarea_key" %in% names(g))
-        g <- g |> select(any_of(c("programarea_key", "programarea_name")))
+      src <- glue("/vsicurl/{msens::atlas_base_url()}/zones/{zk}/zones.fgb")
+      g <- tryCatch(read_sf(src), error = function(e) {
+        message("zone fgb unavailable for ", type, " (", conditionMessage(e), ")"); NULL })
+      if (!is.null(g)) g <- g |> select(any_of(c(kcol, ncol)))
     }
   }
-  if (is.null(g)) message("no program-area geometry for ", ver, " - Report tab area picker limited")
-  .pra_geom <<- g
+  if (is.null(g) || !nrow(g)) {
+    message("no ", type, " geometry for ", ver)
+    g <- NULL
+  } else if (!ncol %in% names(g)) {
+    # a name column is optional; label/tooltip fall back to the key
+    g[[ncol]] <- g[[kcol]]
+  }
+  .zone_geom_cache[[type]] <- g
   g
 }
 
-  # * pra_pts: program area label points (cached) ----
-  # per VERSION: this cache is program-area geometry, and a release without
-  # Program Areas (v1) was drawing v7's labels over an empty map
-  pra_pts_csv <- glue("{dir_cache}/pra_label_pts.csv")
-  if (file.exists(pra_pts_csv)) {
-    pra_pts <- read_csv(pra_pts_csv, show_col_types = FALSE)
-  } else {
-    # pra_geom() resolves the release's OWN program areas (published FlatGeobuf,
-    # or the local gpkg) and returns NULL when it has none. Reading pra_gpkg
-    # directly here meant v1/v2 -- which predate Program Areas and ship no such
-    # file -- died at startup with "The file doesn't seem to exist", i.e. HTTP 500
-    # for the whole release rather than a map without labels.
-    g <- pra_geom()
-    pra_pts <- if (is.null(g) || !nrow(g)) {
-      tibble(programarea_key = character(), programarea_name = character(),
-             lng = numeric(), lat = numeric())
-    } else {
-      # st_coordinates() on the SF OBJECT, not on a named geometry column: the
-      # column is `geom` from a GeoPackage and `geometry` from FlatGeobuf, so
-      # naming it broke bundle construction outright the moment the source
-      # changed -- and that took the whole app down, not just the labels.
-      suppressWarnings({
-        pts <- g |> st_shift_longitude() |> st_point_on_surface()
-        crd <- st_coordinates(pts)
-        pts |> st_drop_geometry() |>
-          transmute(programarea_key, programarea_name,
-                    lng = crd[, 1], lat = crd[, 2])
-      })
-    }
-    tryCatch(write_csv(pra_pts, pra_pts_csv), error = function(e)
-      message("could not cache program-area labels: ", conditionMessage(e)))
+# kept for the Report tab, which asks specifically for the programme's areas
+pra_geom <- function() zone_geom("programarea")
+
+  # ---- zone units: every spatial unit THIS release actually scores ----------
+  #
+  # The app used to hardcode one polygon unit, Program Areas. That is wrong in
+  # both directions: v1 has none (it scores 36 Planning Areas and 12 Ecoregions),
+  # and v8 scores Ecoregions and Subregions alongside Program Areas but offered
+  # neither. Worse, "Planning areas" was briefly offered on the strength of the
+  # release capability alone while no render path existed, so choosing it silently
+  # did nothing.
+  #
+  # So the unit list is DERIVED: a unit appears iff this release has zone rows for
+  # it, PMTiles to draw it, and at least one composite score attached to it. All
+  # three are required — geometry without scores paints an empty choropleth, and
+  # scores without geometry cannot be drawn at all. Zone types will keep changing,
+  # so nothing below names a specific one.
+  zone_units <- local({
+    z <- zone_tbl
+    # requires the manifest's per-vintage tile URLs; the unversioned fallback
+    # cannot say WHICH units a release has, so no unit list is offered from it
+    if (is.null(z) || !nrow(z) || !"pmtiles" %in% names(z)) return(NULL)
+    # Count the zones that actually carry a composite score, NOT the zones the
+    # manifest declares. v7 defines 5 subregions and scores exactly one of them
+    # (the study-area rollup), so declaring it a choropleth unit would paint 1 of
+    # 5 and leave the rest grey. A unit needs >= 2 scored zones to be a map.
+    # `value` exists on every release's serve view: v1-v7 store it, v8 stores
+    # `val` and the view aliases `val AS value` for exactly this reason.
+    scored <- tryCatch(
+      dbGetQuery(con_sdm, "
+        SELECT DISTINCT z.fld, z.value AS zkey
+          FROM zone z JOIN zone_metric zm USING (zone_seq)
+          JOIN metric m USING (metric_seq)
+         WHERE m.metric_key LIKE 'score!_%' ESCAPE '!'"),
+      error = function(e) data.frame(fld = character(), zkey = character()))
+    scored <- split(as.character(scored$zkey), scored$fld)   # fld -> scored keys
+    lab <- c(programarea = "Program areas", planarea  = "Planning areas",
+             ecoregion   = "Ecoregions",    subregion = "Subregions")
+    out <- lapply(seq_len(nrow(z)), function(i) {
+      fld  <- z$fld[i]
+      type <- sub("_key$", "", fld)
+      ks   <- scored[[fld]]
+      if (is.null(ks) || length(ks) < 2 || is.na(z$pmtiles[i])) return(NULL)
+      r <- data.frame(
+        fld = fld, type = type,
+        label = unname(if (type %in% names(lab)) lab[[type]] else
+                       paste0(toupper(substring(type, 1, 1)), substring(type, 2), "s")),
+        url = z$pmtiles[i], source_layer = type,
+        zone_set_key = if ("zone_set_key" %in% names(z)) z$zone_set_key[i] else NA_character_,
+        n = length(ks), stringsAsFactors = FALSE)
+      r$keys <- list(ks)
+      r
+    })
+    out <- do.call(rbind, Filter(Negate(is.null), out))
+    if (is.null(out) || !nrow(out)) return(NULL)
+    # Program Areas first where present -- the current programme's reporting unit
+    # -- then finest first, so the default is the most detailed view available.
+    out <- out[order(out$type != "programarea", -out$n), , drop = FALSE]
+    rownames(out) <- NULL
+    out
+  })
+  # A zone must be DRAWABLE as well as scored. v8 scores 5 subregions but the
+  # published geometry has 4: `USA` is the whole-study-area rollup, a total rather
+  # than a mappable subregion, and v7's lone scored subregion is the same thing
+  # under the name `FULL`. Intersecting scored keys with the geometry's keys
+  # excludes them WITHOUT hardcoding either name -- which matters, because these
+  # rollup keys have already changed once and the zone sets will change again.
+  zone_units <- local({
+    if (is.null(zone_units)) return(NULL)
+    keep <- lapply(seq_len(nrow(zone_units)), function(i) {
+      type <- zone_units$type[i]
+      g <- zone_geom(type)
+      if (is.null(g) || !nrow(g)) return(NULL)
+      kcol <- paste0(type, "_key")
+      drawable <- intersect(zone_units$keys[[i]], as.character(g[[kcol]]))
+      if (length(drawable) < 2) return(NULL)
+      r <- zone_units[i, , drop = FALSE]
+      r$n <- length(drawable)
+      r$keys <- list(drawable)
+      r
+    })
+    keep <- do.call(rbind, Filter(Negate(is.null), keep))
+    if (is.null(keep) || !nrow(keep)) return(NULL)
+    rownames(keep) <- NULL
+    keep
+  })
+  message("scored zone units: ",
+          if (is.null(zone_units)) "none" else
+            paste(sprintf("%s(%d)", zone_units$type, zone_units$n), collapse = " "))
+
+  # The release's PRIMARY reporting unit: what the map outlines as context in
+  # raster-cell mode, and the default polygon unit. Program Areas where they
+  # exist, otherwise the finest scored unit (v1 -> Planning Areas).
+  primary_unit <- if (is.null(zone_units)) NULL else zone_units$type[1]
+  zone_unit_row <- function(type) {
+    if (is.null(zone_units) || is.null(type)) return(NULL)
+    i <- which(zone_units$type == type)
+    if (length(i)) zone_units[i[1], ] else NULL
   }
 
-  # * pra_full_sf: full program-area polygons, used to render areas added
-  # on the Report tab (so the user can see what they're submitting) ----
-  
-  pra_pts <- st_as_sf(pra_pts, coords = c("lng", "lat"), crs = 4326)
+  # * zone label points, cached per unit ----
+  # Cached per VERSION and per TYPE: this is geometry, and a release without a
+  # given unit was previously drawing another release's labels over an empty map.
+  zone_pts <- local({
+    cache <- new.env(parent = emptyenv())
+    function(type) {
+      if (is.null(type) || is.na(type)) return(NULL)
+      if (!is.null(cache[[type]])) return(cache[[type]])
+      kcol <- paste0(type, "_key"); ncol <- paste0(type, "_name")
+      f <- glue("{dir_cache}/{type}_label_pts.csv")
+      d <- if (file.exists(f)) tryCatch(read_csv(f, show_col_types = FALSE),
+                                        error = function(e) NULL) else NULL
+      if (is.null(d)) {
+        g <- zone_geom(type)
+        d <- if (is.null(g) || !nrow(g)) {
+          setNames(tibble(character(), character(), numeric(), numeric()),
+                   c(kcol, ncol, "lng", "lat"))
+        } else {
+          # st_coordinates() on the SF OBJECT, not on a named geometry column:
+          # the column is `geom` from a GeoPackage and `geometry` from
+          # FlatGeobuf, so naming it broke outright when the source changed --
+          # and that took the whole app down, not just the labels.
+          suppressWarnings({
+            pts <- g |> st_shift_longitude() |> st_point_on_surface()
+            crd <- st_coordinates(pts)
+            out <- pts |> st_drop_geometry()
+            out$lng <- crd[, 1]; out$lat <- crd[, 2]
+            out[, c(kcol, ncol, "lng", "lat")]
+          })
+        }
+        tryCatch(write_csv(d, f), error = function(e)
+          message("could not cache ", type, " labels: ", conditionMessage(e)))
+      }
+      out <- st_as_sf(d, coords = c("lng", "lat"), crs = 4326)
+      cache[[type]] <- out
+      out
+    }
+  })
+
+  # the primary unit's labels, used by the base map
+  pra_pts <- zone_pts(primary_unit %||% "programarea")
 
   # * sr_choices ----
   # sr_choices <- c(
