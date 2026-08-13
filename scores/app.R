@@ -318,18 +318,6 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   er_src_layer  <- ztile("ecoregion",  tbl_er)$source_layer      %||% tbl_er
 
 
-  # Which zone outline layers this release actually draws, and therefore what a
-  # later layer may sit BEFORE.
-  #
-  # MapLibre rejects an add with a before_id naming a layer that does not exist,
-  # and the failure cascades: v1 has no Program Areas, so `pra_ln` was never
-  # added, the ecoregion layer asking for before_id="pra_ln" failed, and then the
-  # score raster asking for before_id="er_ln" failed too. The map came up with
-  # nothing but the labels on it.
-  has_pra_ln <- !is.null(ztile("programarea", tbl_pra_pm))
-  has_er_ln  <- !is.null(ztile("ecoregion",  tbl_er))
-  before_er  <- if (has_pra_ln) "pra_ln" else NULL
-  before_r   <- if (has_er_ln) "er_ln" else if (has_pra_ln) "pra_ln" else NULL
 
   cog_of <- function(metric_key, subregion_key = "FULL") {
     if (is.null(cog_tbl)) return(NULL)
@@ -609,6 +597,23 @@ pra_geom <- function() zone_geom("programarea")
   # raster-cell mode, and the default polygon unit. Program Areas where they
   # exist, otherwise the finest scored unit (v1 -> Planning Areas).
   primary_unit <- if (is.null(zone_units)) NULL else zone_units$type[1]
+
+  # Which outline layers exist, and therefore what a later layer may sit BEFORE.
+  #
+  # MapLibre rejects an add whose before_id names a layer that does not exist,
+  # and the failure CASCADES: v1 has no Program Areas, so `pra_ln` was never
+  # added, the ecoregion layer asking for before_id="pra_ln" failed, and the score
+  # raster asking for before_id="er_ln" failed after it -- the map came up with
+  # nothing but labels. These must therefore be derived from the units actually
+  # created, which is why they live here and not beside the tile helpers: the
+  # outline ids are now `{type}_ln`, so a stale "pra_ln" would resurrect that bug.
+  primary_ln <- if (is.null(primary_unit)) NULL else paste0(primary_unit, "_ln")
+  # a standalone ecoregion outline only exists when ecoregion is NOT itself a
+  # scored unit (otherwise it already has a `{type}_ln` of its own)
+  has_er_ln  <- !is.null(ztile("ecoregion", tbl_er)) &&
+                !("ecoregion" %in% (zone_units$type %||% character()))
+  before_er  <- primary_ln
+  before_r   <- if (has_er_ln) "er_ln" else primary_ln
   zone_unit_row <- function(type) {
     if (is.null(zone_units) || is.null(type)) return(NULL)
     i <- which(zone_units$type == type)
@@ -1321,28 +1326,35 @@ ui_impl <- function(req) page_sidebar(
       // program area tooltip lookup (updated from server)
       var praTooltips = {};
       var praPopup = null;
-      var praHandlersAdded = false;
+      var praHandlersAdded = {};   // layer id -> handlers bound
+      // Tooltips for whichever zone unit is being drawn. The layer id and the
+      // key/name property names arrive WITH the data: they were hardcoded to
+      // 'pra_lyr' + programarea_*, so any other unit hovered silently to nothing.
       Shiny.addCustomMessageHandler('setPraTooltips', function(data) {
-        praTooltips = data;
-        // add hover handlers once map is ready
-        if (praHandlersAdded) return;
+        praTooltips = data.tips || data;
+        var layer = data.layer || 'programarea_fill';
+        var kProp = data.keyProp || 'programarea_key';
+        var nProp = data.nameProp || 'programarea_name';
         var widget = HTMLWidgets.find('#map');
         if (!widget) return;
         var map = widget.getMap();
         if (!map) return;
-        praHandlersAdded = true;
-        praPopup = new maplibregl.Popup({
+        if (!praPopup) praPopup = new maplibregl.Popup({
           closeButton: false, closeOnClick: false
         });
-        map.on('mousemove', 'pra_lyr', function(e) {
+        // bind once PER LAYER: switching units adds a new layer id, and the old
+        // handler must keep working if the user switches back
+        praHandlersAdded = praHandlersAdded || {};
+        if (praHandlersAdded[layer]) return;
+        praHandlersAdded[layer] = true;
+        map.on('mousemove', layer, function(e) {
           if (!e.features || !e.features.length) return;
-          var key = e.features[0].properties.programarea_key;
-          var tip = praTooltips[key] ||
-            e.features[0].properties.programarea_name || key;
+          var key = e.features[0].properties[kProp];
+          var tip = praTooltips[key] || e.features[0].properties[nProp] || key;
           map.getCanvas().style.cursor = 'pointer';
           praPopup.setLngLat(e.lngLat).setHTML(tip).addTo(map);
         });
-        map.on('mouseleave', 'pra_lyr', function() {
+        map.on('mouseleave', layer, function() {
           map.getCanvas().style.cursor = '';
           praPopup.remove();
         });
@@ -1381,32 +1393,23 @@ ui_impl <- function(req) page_sidebar(
       selectInput(
         "sel_unit",
         "Spatial units",
-        # Driven by the RELEASE, not hardcoded. v1 predates Program Areas and has
-        # none, so a fixed "Program areas" choice drew an empty map with an
-        # Inf/-Inf legend and no explanation.
-        #
-        # "Planning areas" is deliberately NOT offered even though v1 and v2 score
-        # them and their PMTiles are published: this app has no planning-area
-        # render path. The `pa` branch of the map observer is commented-out dead
-        # code, and the base map never creates a `pa_src` source, so selecting it
-        # silently left the raster cells on screen. Offering a control that does
-        # nothing is worse than not offering it. Adding it back means implementing
-        # the source + outline/label layers, click handling, tooltips, the Report
-        # map and the flower plot -- a feature, not a flag.
+        # Every spatial unit this release actually scores AND can draw, from
+        # `zone_units`. Nothing is hardcoded: v1 offers Planning Areas and
+        # Ecoregions (it has no Program Areas at all), v8 adds Ecoregions and
+        # Subregions beside them, and a zone type nobody has invented yet will
+        # appear on its own once a release scores it.
         choices = c(
-          "Raster cells (0.05°)" = "cell",
-          if (isTRUE(manifest$capabilities$programareas) && !is.na(tbl_pra))
-            c("Program areas" = "pra")
-        )
+          setNames("cell", "Raster cells (0.05°)"),
+          if (!is.null(zone_units)) setNames(zone_units$type, zone_units$label))
       )
     ),
-    # A release whose scored polygon unit this app cannot draw should SAY so,
-    # rather than presenting a shorter dropdown with no explanation.
-    if (!isTRUE(manifest$capabilities$programareas))
+    # A release scoring a DIFFERENT primary unit than the current programme's
+    # should say so, so a reader does not assume Program Areas are merely missing.
+    if (!is.null(primary_unit) && primary_unit != "programarea")
       tags$div(
         style = "font-size:0.85em; opacity:0.75; margin:-0.5em 0 1em 0;",
-        sprintf(paste("%s scored Planning Areas, which this map cannot draw yet.",
-                      "Raster cells show the same scores at full resolution."), ver)),
+        sprintf("%s predates the BOEM Program Areas — it reports on %s.",
+                ver, tolower(zone_units$label[1]))),
     tags$div(
       id = "tour_lyr",
       selectInput(
@@ -1789,9 +1792,21 @@ server_impl <- function(input, output, session) {
     bindEvent(input$btn_tour)
 
   # reactive values ----
+  # A clicked zone carries its unit, so the key/name columns follow from it
+  # rather than being assumed to be programarea_*.
+  zone_unit_of  <- function(z) if (is.null(z)) NULL else z$unit %||% primary_unit
+  zone_key_of   <- function(z) {
+    u <- zone_unit_of(z); if (is.null(u) || is.null(z)) return(NULL)
+    z$properties[[paste0(u, "_key")]]
+  }
+  zone_label_of <- function(z) {
+    u <- zone_unit_of(z); if (is.null(u) || is.null(z)) return("")
+    z$properties[[paste0(u, "_name")]] %||% z$properties[[paste0(u, "_key")]] %||% ""
+  }
+
   rx <- reactiveValues(
     clicked_pa       = NULL,
-    clicked_pra      = NULL,
+    clicked_pra      = NULL,   # a clicked ZONE of any unit: list(properties, unit)
     clicked_cell     = NULL,
     rpt_areas        = list(),  # Report tab: list of {label, kind, value}
     spp_tbl          = NULL,
@@ -1804,7 +1819,7 @@ server_impl <- function(input, output, session) {
     if (!is.null(rx$clicked_cell)) {
       glue("Cell {rx$clicked_cell$cell_id}")
     } else if (!is.null(rx$clicked_pra)) {
-      glue("{rx$clicked_pra$properties$programarea_name}")
+      zone_label_of(rx$clicked_pra)
     } else {
       sr_key <- input$sel_subregion %||% "FULL"
       sr_lbl <- if (sr_key == "FULL") "Full study area" else
@@ -1820,7 +1835,7 @@ server_impl <- function(input, output, session) {
   get_rast_rx <- reactive({
     req(input$sel_subregion, input$sel_unit, input$sel_lyr, input$sel_palette)
 
-    if (input$sel_unit %in% c("pa", "pra")) {
+    if (input$sel_unit != "cell") {
       return(NULL)
     }
 
@@ -1884,17 +1899,33 @@ server_impl <- function(input, output, session) {
       # see sr_view(): a centre+zoom cannot invert across the antimeridian the
       # way fit_bounds(bbox) did
       set_view(center = initial_view$center, zoom = initial_view$zoom) |>
-      msens::add_pmline(Filter(Negate(is.null), list(
-        if (!is.null(pa <- ztile("programarea", tbl_pra_pm)))
-          c(pa, list(id = "pra_ln", source_id = "pra_src",
-                     line_color = "white", line_width = 1)),
-        if (!is.null(er <- ztile("ecoregion", tbl_er)))
-          c(er, list(id = "er_ln", source_id = "er_src",
-                     line_color = "black", line_width = 3, before_id = before_er))))) |>
-      msens::add_pmlabel(list(
-        list(source     = pra_pts,
-             text_field = "programarea_key",
-             id         = "pra_lbl"))) |>
+      # A PMTiles source + outline per SCORED unit, so the choropleth can target
+      # any of them later: a fill layer can only name a source that already
+      # exists, and mapgl has no set_layer_visibility, so they are all created up
+      # front. PMTiles are lazy -- an unused source fetches nothing.
+      msens::add_pmline(Filter(Negate(is.null), c(
+        if (!is.null(zone_units)) lapply(seq_len(nrow(zone_units)), function(i) list(
+          url          = zone_units$url[i],
+          source_layer = zone_units$source_layer[i],
+          id           = paste0(zone_units$type[i], "_ln"),
+          source_id    = paste0(zone_units$type[i], "_src"),
+          line_color   = "white",
+          # the primary unit reads as the frame; the others as context
+          line_width   = if (i == 1) 1 else 0.5,
+          line_opacity = if (i == 1) 1 else 0.45)),
+        list(
+          if (!is.null(er <- ztile("ecoregion", tbl_er)) &&
+              !("ecoregion" %in% (zone_units$type %||% character())))
+            c(er, list(id = "er_ln", source_id = "er_src",
+                       line_color = "black", line_width = 3, before_id = before_er)))))) |>
+      msens::add_pmlabel(Filter(Negate(is.null),
+        if (is.null(zone_units)) list() else lapply(seq_len(nrow(zone_units)), function(i) {
+          pts <- zone_pts(zone_units$type[i])
+          if (is.null(pts) || !nrow(pts)) return(NULL)
+          list(source     = pts,
+               text_field = paste0(zone_units$type[i], "_key"),
+               id         = paste0(zone_units$type[i], "_lbl"))
+        }))) |>
       msens::add_cell_tiles(
         initial_tile_url, raster_opacity = 0.6, before_id = before_r) |>
       msens::add_cell_tiles(
@@ -1913,12 +1944,14 @@ server_impl <- function(input, output, session) {
       add_navigation_control() |>
       add_scale_control() |>
       add_layers_control(
-        layers = list(
-          "Program Area outlines"       = "pra_ln",
-          "Program Area labels"         = "pra_lbl",
-          "Ecoregions outlines"         = "er_ln",
-          "Raster cell values"          = "r_lyr",
-          "Cells outside Program Areas" = "outside_pra_lyr")) |>
+        layers = c(
+          if (!is.null(zone_units)) c(
+            setNames(as.list(paste0(zone_units$type, "_ln")),
+                     paste(zone_units$label, "outlines")),
+            setNames(as.list(paste0(zone_units$type, "_lbl")),
+                     paste(zone_units$label, "labels"))),
+          list("Raster cell values"          = "r_lyr",
+               "Cells outside Program Areas" = "outside_pra_lyr"))) |>
       add_geocoder_control(placeholder = "Go to location")
   }
 
@@ -2119,97 +2152,111 @@ server_impl <- function(input, output, session) {
         #   if (verbose) {
         #     message(glue("update map pa - end"))
         #   }
-      } else if (unit == "pra") {
-        # * programarea ----
+      } else {
+        # * zone choropleth -- ANY scored spatial unit -------------------------
+        #
+        # One code path for Program Areas, Planning Areas, Ecoregions and
+        # whatever a later release scores. `unit` is the zone TYPE, so the key
+        # column, the tile layer and the label field all derive from it; nothing
+        # here names a particular unit.
+        zu <- zone_unit_row(unit)
+        req(!is.null(zu))
+        kcol <- paste0(unit, "_key")
+        ncol <- paste0(unit, "_name")
 
-        if (verbose) {
-          message(glue("update map pra - beg"))
-        }
+        if (verbose) message(glue("update map {unit} - beg"))
 
         rx$clicked_cell <- NULL
-        # rx$clicked_pa <- NULL
 
         # sr_bbox()/sr_view() rather than reading d_sr_bb raw: the stored frame is
         # 0-360 and must be shifted before it reaches MapLibre (see sr_view)
         sr_bb <- sr_bbox(sr_key)
         sr_v  <- sr_view(sr_key)
-        if (verbose) {
-          message(glue("sr_bb: {paste(round(sr_bb,2), collapse = ', ')}"))
-        }
 
-        # full study area = all program areas; otherwise filter by subregion
-        pra_keys <- if (sr_key == "FULL") {
-          unique(d_sr_pra$programarea_key)
-        } else {
-          d_sr_pra |>
-            filter(subregion_key == !!sr_key) |>
-            pull(programarea_key)
+        # Which zones the selected study area contains. The subregion ->
+        # programarea mapping only describes Program Areas, so it is used ONLY
+        # for that unit; every other unit shows all of its scored zones, which is
+        # right for Ecoregions (the rescaling baseline) and Planning Areas.
+        zone_keys <- zu$keys[[1]]
+        if (unit == "programarea" && sr_key != "FULL" && !is.null(d_sr_pra) && nrow(d_sr_pra)) {
+          in_sr <- d_sr_pra |> filter(subregion_key == !!sr_key) |> pull(programarea_key)
+          if (length(in_sr)) zone_keys <- intersect(zone_keys, in_sr)
         }
-        pra_filter <- c("in", "programarea_key", pra_keys)
+        zone_filter <- c("in", kcol, zone_keys)
 
-        # query program area values from db
         n_cols <- 11
         cols_r <- get_pal_colors(input$sel_palette, n_cols)
 
-        d_pra <- tbl(con_sdm, "zone") |>
-          filter(
-            fld == "programarea_key",
-            value %in% pra_keys) |>
-          select(programarea_key = value, zone_seq) |>
+        d_zone <- tbl(con_sdm, "zone") |>
+          filter(fld == !!kcol, value %in% !!zone_keys) |>
+          select(zone_key = value, zone_seq) |>
           inner_join(tbl(con_sdm, "zone_metric"), by = join_by(zone_seq)) |>
           inner_join(
-            tbl(con_sdm, "metric") |>
-              filter(metric_key == !!lyr),
+            tbl(con_sdm, "metric") |> filter(metric_key == !!lyr),
             by = join_by(metric_seq)) |>
-          select(programarea_key, value) |>
+          select(zone_key, value) |>
           collect()
 
-        rng_pra <- range(d_pra$value)
-        cols_pra <- colorRampPalette(cols_r, space = "Lab")(n_cols)
+        # An empty result is a real state, not an error: a release can carry a
+        # unit that this particular LAYER was never computed for. Draw nothing and
+        # say so, rather than calling range() on nothing -- which returns
+        # c(Inf, -Inf) and renders an `InfM/-InfM` legend over a blank map, the
+        # exact symptom that made the v1/v2 bug so hard to read.
+        if (!nrow(d_zone)) {
+          message(glue("no {lyr} values for {unit} in {ver} - nothing to draw"))
+          showNotification(
+            sprintf("%s has no %s values for %s.", ver, get_lyr_name(lyr), tolower(zu$label)),
+            type = "warning", duration = 8)
+          return()
+        }
 
-        # assign color per program area by scaling value to color index
-        d_pra <- d_pra |>
+        rng_zone  <- range(d_zone$value, na.rm = TRUE)
+        cols_zone <- colorRampPalette(cols_r, space = "Lab")(n_cols)
+        d_zone <- d_zone |>
           mutate(
-            val_scaled = (value - rng_pra[1]) / max(rng_pra[2] - rng_pra[1], 1e-6),
+            val_scaled = (value - rng_zone[1]) / max(rng_zone[2] - rng_zone[1], 1e-6),
             col_idx    = pmin(pmax(round(val_scaled * (n_cols - 1)) + 1, 1), n_cols),
-            fill_color = cols_pra[col_idx])
+            fill_color = cols_zone[col_idx])
 
-        # build tooltip lookup and send to client
-        pra_tooltip <- d_pra |>
-          left_join(
-            pra_pts |> st_drop_geometry() |> select(programarea_key, programarea_name),
-            by = "programarea_key") |>
-          mutate(tip = glue("{programarea_name}: {round(value)}")) |>
-          select(programarea_key, tip) |>
-          deframe() |>
-          as.list()
-        session$sendCustomMessage("setPraTooltips", pra_tooltip)
+        # tooltips: name where the geometry has one, else the key
+        pts  <- zone_pts(unit)
+        look <- if (!is.null(pts) && nrow(pts)) {
+          d <- st_drop_geometry(pts)
+          setNames(as.character(d[[ncol]]), as.character(d[[kcol]]))
+        } else character()
+        zone_tooltip <- d_zone |>
+          mutate(nm  = ifelse(zone_key %in% names(look), unname(look[zone_key]), zone_key),
+                 tip = glue("{nm}: {round(value)}")) |>
+          select(zone_key, tip) |> deframe() |> as.list()
+        session$sendCustomMessage("setPraTooltips", list(
+          tips = zone_tooltip, layer = paste0(unit, "_fill"),
+          keyProp = kcol, nameProp = ncol))
 
-        # applied to both the Map tab's proxy and the Report tab's
-        # embedded map proxy so the Report map shows Program Areas too.
-        apply_pra_update <- function(map_proxy) {
-          map_proxy |>
+        # applied to both the Map tab's proxy and the Report tab's embedded map
+        apply_zone_update <- function(map_proxy) {
+          m <- map_proxy |>
             clear_layer("r_lyr") |>
             clear_layer("r_src") |>
-            clear_layer("pra_lyr") |>
-            clear_layer("outside_pra_lyr") |>
+            clear_layer("outside_pra_lyr")
+          # clear EVERY unit's fill, not just this one, so switching units cannot
+          # leave the previous choropleth painted underneath
+          for (t in zone_units$type) m <- m |> clear_layer(paste0(t, "_fill"))
+          m <- m |>
             clear_legend() |>
             add_fill_layer(
-              id           = "pra_lyr",
-              source       = "pra_src",
-              source_layer = pra_src_layer,
+              id           = paste0(unit, "_fill"),
+              source       = paste0(unit, "_src"),
+              source_layer = zu$source_layer,
               fill_color   = match_expr(
-                column  = "programarea_key",
-                values  = d_pra$programarea_key,
-                stops   = d_pra$fill_color,
+                column  = kcol,
+                values  = d_zone$zone_key,
+                stops   = d_zone$fill_color,
                 default = "lightgrey"),
               fill_opacity       = 0.7,
               fill_outline_color = "white",
-              hover_options      = list(
-                fill_color   = "purple",
-                fill_opacity = 1),
-              before_id = "pra_ln",
-              filter    = pra_filter) |>
+              hover_options      = list(fill_color = "purple", fill_opacity = 1),
+              before_id = paste0(unit, "_ln"),
+              filter    = zone_filter) |>
             msens::add_cell_tiles(
               outside_pra_tile_url,
               id             = "outside_pra_lyr",
@@ -2219,25 +2266,24 @@ server_impl <- function(input, output, session) {
               before_id      = before_r) |>
             mapgl::add_legend(
               get_lyr_name(input$sel_lyr),
-              values   = round(rng_pra, 1),
-              colors   = cols_pra,
+              values   = round(rng_zone, 1),
+              colors   = cols_zone,
               position = "bottom-right") |>
             mapgl::fly_to(center = sr_v$center, zoom = sr_v$zoom) |>
-            clear_controls("layers") |>
-            add_layers_control(
-              layers = list(
-                "Program Area outlines"       = "pra_ln",
-                "Program Area labels"         = "pra_lbl",
-                "Ecoregion outlines"          = "er_ln",
-                "Program Area values"         = "pra_lyr",
-                "Cells outside Program Areas" = "outside_pra_lyr"))
+            clear_controls("layers")
+          ctl <- c(
+            setNames(as.list(paste0(zone_units$type, "_ln")),
+                     paste(zone_units$label, "outlines")),
+            setNames(as.list(paste0(zone_units$type, "_lbl")),
+                     paste(zone_units$label, "labels")),
+            setNames(list(paste0(unit, "_fill")), paste(zu$label, "values")),
+            list("Cells outside Program Areas" = "outside_pra_lyr"))
+          m |> add_layers_control(layers = ctl)
         }
-        apply_pra_update(maplibre_proxy("map"))
-        apply_pra_update(maplibre_proxy("map_rpt"))
+        apply_zone_update(maplibre_proxy("map"))
+        apply_zone_update(maplibre_proxy("map_rpt"))
 
-        if (verbose) {
-          message(glue("update map pra - end"))
-        }
+        if (verbose) message(glue("update map {unit} - end"))
       }
     },
     ignoreInit = FALSE
@@ -2292,18 +2338,7 @@ server_impl <- function(input, output, session) {
           lyr = input$sel_lyr
         )
       }
-    } else if (input$sel_unit == "pa") {
-      # handle planning area click
-      rx$clicked_cell <- NULL
-      rx$clicked_pra <- NULL
-
-      if (!is.null(input$map_feature_click)) {
-        rx$clicked_pa <- list(
-          id = input$map_feature_click$id,
-          properties = input$map_feature_click$properties
-        )
-      }
-    } else if (input$sel_unit == "pra") {
+    } else {
       # handle program area click
       rx$clicked_cell <- NULL
       rx$clicked_pa <- NULL
@@ -2311,7 +2346,8 @@ server_impl <- function(input, output, session) {
       if (!is.null(input$map_feature_click)) {
         rx$clicked_pra <- list(
           id = input$map_feature_click$id,
-          properties = input$map_feature_click$properties
+          properties = input$map_feature_click$properties,
+          unit = input$sel_unit
         )
       }
     }
@@ -2395,18 +2431,21 @@ server_impl <- function(input, output, session) {
       #         title = pa_name
       #       )
       #   }
-    } else if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
-      # get data for program area from database
-      pra_name <- rx$clicked_pra$properties$programarea_name
-      pra_key  <- rx$clicked_pra$properties$programarea_key
+    } else if (input$sel_unit != "cell" && !is.null(rx$clicked_pra)) {
+      # get data for the clicked zone, whatever unit it belongs to
+      pra_name <- zone_label_of(rx$clicked_pra)
+      pra_key  <- zone_key_of(rx$clicked_pra)
+      z_fld    <- paste0(zone_unit_of(rx$clicked_pra), "_key")
 
       if (verbose) {
-        message(glue("Rendering flower plot for Program Area: {pra_name} ({pra_key})"))
+        message(glue("Rendering flower plot for {z_fld}: {pra_name} ({pra_key})"))
       }
 
-      # look up zone_seq for this program area
+      # look up zone_seq by FIELD + key, not by table name: the table name is
+      # version-suffixed on some releases and not others, which is what silently
+      # emptied the subregion mapping on v2
       z_seq <- tbl(con_sdm, "zone") |>
-        filter(tbl == !!tbl_pra, value == !!pra_key) |>
+        filter(fld == !!z_fld, value == !!pra_key) |>
         pull(zone_seq)
 
       if (length(z_seq) > 0) {
@@ -2473,10 +2512,11 @@ server_impl <- function(input, output, session) {
         ",",
         round(rx$clicked_cell$lat, 4)
       )
-    } else if (input$sel_unit == "pa" && !is.null(rx$clicked_pa)) {
+    } else if (FALSE) {
       cat("Planning Area:", rx$clicked_pa$feature$properties$planarea_name)
-    } else if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
-      cat("Program Area:", rx$clicked_pra$feature$properties$programarea_name)
+    } else if (input$sel_unit != "cell" && !is.null(rx$clicked_pra)) {
+      cat(paste0(zone_unit_row(zone_unit_of(rx$clicked_pra))$label %||% "Zone", ": "),
+          zone_label_of(rx$clicked_pra))
     }
   })
 
@@ -2557,15 +2597,18 @@ server_impl <- function(input, output, session) {
     }
 
     # ** pra ----
-    if (input$sel_unit == "pra" && !is.null(rx$clicked_pra)) {
-      pra_key  <- rx$clicked_pra$properties$programarea_key
-      pra_name <- rx$clicked_pra$properties$programarea_name
+    if (input$sel_unit != "cell" && !is.null(rx$clicked_pra)) {
+      pra_key  <- zone_key_of(rx$clicked_pra)
+      pra_name <- zone_label_of(rx$clicked_pra)
       if (verbose)
         message(glue("Getting species table for Program Area: {pra_name}"))
       rx$spp_tbl_hdr      <- glue("Species for Program Area: {pra_name}")
       rx$spp_tbl_filename <- glue(
         "species_programarea-{str_replace(pra_name, ' ', '-') |> str_to_lower()}")
-      return(msens::species_for_zone(con_sdm, "programarea_key", pra_key))
+      # species_for_zone() already takes the field, so the clicked unit's own
+      # field is passed rather than assuming Program Areas
+      return(msens::species_for_zone(
+        con_sdm, paste0(zone_unit_of(rx$clicked_pra), "_key"), pra_key))
     }
 
     # ** subregion default ----
@@ -2866,7 +2909,7 @@ server_impl <- function(input, output, session) {
   # clicking a Program Area on either map.
   observeEvent(input$map_rpt_click, {
     req(input$map_rpt_click)
-    if (input$sel_unit != "pra") return()
+    if (input$sel_unit == "cell") return()
     if (is.null(input$map_rpt_feature_click)) return()
     rx$clicked_cell <- NULL
     rx$clicked_pa   <- NULL
@@ -2880,7 +2923,7 @@ server_impl <- function(input, output, session) {
   observeEvent(rx$clicked_pra, {
     props <- rx$clicked_pra$properties
     req(props)
-    nm <- props$programarea_name %||% props$programarea_key
+    nm <- zone_label_of(rx$clicked_pra)
     if (!is.null(nm) && nzchar(nm))
       updateTextInput(session, "rpt_area_label", value = nm)
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
@@ -2891,19 +2934,20 @@ server_impl <- function(input, output, session) {
   # embedded map; clears the highlight when rx$clicked_pra is NULL.
   observe({
     clicked <- rx$clicked_pra
-    key <- if (!is.null(clicked))
-      clicked$properties$programarea_key %||% clicked$properties$planarea_key
+    u_hl <- zone_unit_of(clicked)
+    zu_hl <- zone_unit_row(u_hl)
+    key <- zone_key_of(clicked)
     for (mid in c("map", "map_rpt")) {
       proxy <- maplibre_proxy(mid)
       proxy |> clear_layer("pra_highlight_ln")
-      if (!is.null(key) && nzchar(key)) {
+      if (!is.null(key) && nzchar(key) && !is.null(zu_hl)) {
         proxy |> add_line_layer(
           id           = "pra_highlight_ln",
-          source       = "pra_src",
-          source_layer = pra_src_layer,
+          source       = paste0(u_hl, "_src"),
+          source_layer = zu_hl$source_layer,
           line_color   = "#ff00aa",
           line_width   = 4,
-          filter       = list("==", "programarea_key", key))
+          filter       = list("==", paste0(u_hl, "_key"), key))
       }
     }
   })
