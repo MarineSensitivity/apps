@@ -229,6 +229,17 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   tbl_pa  <- zone_tbl_for("planarea_key",    glue("ply_planareas_2025_{ver}"))
   message(glue("zone tables resolved: ecoregion={tbl_er} subregion={tbl_sr} ",
                "programarea={tbl_pra} planarea={tbl_pa}"))
+
+  # NOTE (deliberately NOT fixed here): this app reads `zone.value`,
+  # `zone_metric.value` and friends by their v1-v7 names. v8's SOURCE sdm.duckdb
+  # renamed them to `val` (away from DuckDB's reserved word), and the RELEASE adds
+  # `value` aliases back -- verified identical across all 37 v8 zones -- so
+  # production, which reads serve.duckdb, is unaffected. Pointing the app at a
+  # source sdm.duckdb instead (local dev) fails during bundle construction with
+  # `cannot coerce type 'closure'`: a bare `value` with no such column resolves to
+  # a FUNCTION in scope. Adapting per connection is the right fix, but it spans
+  # every table this app touches and wants its own change -- a partial one reads
+  # as source-schema-safe without being it.
   # dbListTables(con_sdm)
   # duckdb_shutdown(duckdb()); rm(con_sdm)
 
@@ -2635,15 +2646,23 @@ server_impl <- function(input, output, session) {
     # v1-v7 on `mdl_seq`, which is what the manifest's id_field records. Linking
     # unconditionally on mdl_key made the Table of Species error out on every
     # older release, because the column simply is not there.
+    # msens::species_for_zone() now normalises every release to `mdl_key`, so this
+    # resolves for all of them — kept adaptive so a raw v1-v7 frame still links.
     id_col <- if ("mdl_key" %in% names(d_spp)) "mdl_key" else
               if ("mdl_seq" %in% names(d_spp)) "mdl_seq" else NA_character_
     # rename columns
     d_spp |>
       mutate(
-        # from /scores_v8/ this must point at the v8 species app; the old
-        # "../species/?mdl_seq=" resolved to the *v7* app and used the v7 key.
+        # `../species/`, NOT `../species_v8/`: since the 2026-08-12 cutover there is
+        # one app per app, and /species_v8 is a RETIRED path that Caddy 301s to
+        # /species/?ver=v8 -- a redirect whose target carries its own query string,
+        # so the model id was dropped in flight and the species app opened on its
+        # default taxon (the leatherback turtle) whatever row was clicked (#6).
+        # URL-encoded because a v8 mdl_key contains `|` and `:`.
+        model_id  = if (is.na(id_col)) NA_character_ else as.character(.data[[id_col]]),
         model_url = if (is.na(id_col)) NA_character_ else
-          glue("../species_v8/?ver={ver}&{id_col}={.data[[id_col]]}"),
+          glue("../species/?ver={ver}&mdl_key=",
+               "{vapply(model_id, utils::URLencode, '', reserved = TRUE)}"),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(
           taxon_authority == "botw",
@@ -2675,7 +2694,7 @@ server_impl <- function(input, output, session) {
         er_score,
         is_mmpa,
         is_mbta,
-        model_id = mdl_key,
+        model_id,
         model_url,
         area_km2,
         avg_suit,
