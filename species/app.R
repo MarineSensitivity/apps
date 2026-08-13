@@ -320,13 +320,50 @@ native_asset <- tryCatch(
 # older releases had no `representation` column (all rows were the single per-model asset)
 if (!"representation" %in% names(native_asset)) native_asset$representation <- "native"
 
+# * taxon_model: what a taxon is ACTUALLY built from ----
+#
+# The input list used to be derived from `native_asset` — the registry of published
+# ASSETS — which silently conflated two different questions: "what fed this taxon" and
+# "what can we draw". When the v8 registry lost its vector-range PMTiles rows, every
+# range input simply vanished from the bar, which went on reporting a count taken from
+# `taxon.n_datasets`: the leatherback advertised 5 inputs (really 6) and offered 1.
+#
+# `taxon_model` IS the taxon->model relation the merge consumed, so inputs are listed from
+# it and availability becomes a separate, VISIBLE property (an input with no published
+# surface renders as a disabled pill, not as an absence). Releases predating the published
+# taxon_model fall back to the old native_asset-derived list.
+d_edges <- tryCatch(
+  tbl(con_sdm, "taxon_model") |> collect() |>
+    transmute(ms_merge_key, mdl_key, ds_key = str_extract(mdl_key, "^[^|]+")),
+  error = function(e) {
+    message("taxon_model unavailable (", conditionMessage(e), ") — inputs from native_asset")
+    tibble(ms_merge_key = character(), mdl_key = character(), ds_key = character()) })
+if (!nrow(d_edges))
+  d_edges <- native_asset |> filter(ds_key != "ms_merge") |> distinct(ms_merge_key, mdl_key, ds_key)
+# taxon_model spans every merged taxon; the picker lists only the valid marine ones
+d_edges <- d_edges |> filter(ms_merge_key %in% d_spp$mdl_key)
+
+# published-asset lookup: does this raw input have a surface we can actually render?
+asset_keys <- unique(native_asset$mdl_key)
+has_asset  <- function(mk) !is.na(mk) & mk %in% asset_keys
+
 # wide per-taxon input columns: one column per ds_key holding that input's raw mdl_key (or NA),
 # so `sp_row[[ds_key]]` gives the input to render for the selected taxon (v7 mapsp pattern).
-d_inputs <- native_asset |>
+d_inputs <- d_edges |>
   distinct(ms_merge_key, ds_key, mdl_key) |>
   pivot_wider(names_from = ds_key, values_from = mdl_key, values_fn = dplyr::first)
 d_spp <- d_spp |> left_join(d_inputs, by = c("mdl_key" = "ms_merge_key"))
 input_ds_keys <- intersect(ds_keys, names(d_inputs))   # ds_keys offered as input layers
+
+# how much of the true input list this release can draw — logged at startup so a registry
+# that loses an asset class is visible in the app log instead of only in the UI
+local({
+  n_edge <- nrow(d_edges); n_ok <- sum(has_asset(d_edges$mdl_key))
+  if (n_edge && n_ok < n_edge)
+    message(glue("native_asset covers {n_ok}/{n_edge} taxon-model inputs ",
+                 "({n_edge - n_ok} shown as unavailable): ",
+                 paste(sort(unique(d_edges$ds_key[!has_asset(d_edges$mdl_key)])), collapse = ", ")))
+})
 
 # render lookup: raw input mdl_key -> how to draw it (asset_type/url/rescale/colormap/bbox).
 # native_asset carries BOTH representations per mdl_key: the ORIGINAL source surface
@@ -349,7 +386,7 @@ pick_asset <- function(mk, rep = "native") {
 # (merged model, ds_layer) so the picker opens on that layer.
 mdl_key_lookup <- bind_rows(
   d_spp   |> transmute(merged_mdl_key = mdl_key, ds_layer = "mdl_key", input_mdl_key = mdl_key),
-  native_asset |> distinct(ms_merge_key, ds_key, mdl_key) |>
+  d_edges |> distinct(ms_merge_key, ds_key, mdl_key) |>
     transmute(merged_mdl_key = ms_merge_key, ds_layer = ds_key, input_mdl_key = mdl_key))
 
 # ui ----
@@ -404,6 +441,14 @@ ui <- function(req) page_sidebar(
       }
       .layer-bar .layer-pill.active {
         background: rgba(255,255,255,0.35); border-color: white; font-weight: 700;
+      }
+      /* fed the merge, but this release publishes no surface for it */
+      .layer-bar .layer-pill.unavailable {
+        cursor: not-allowed; opacity: 0.5; text-decoration: line-through;
+        border-style: dashed; background: transparent;
+      }
+      .layer-bar .layer-pill.unavailable:hover {
+        background: transparent; border-color: rgba(255,255,255,0.5);
       }
       .layer-bar .merged-link {
         text-decoration: underline; cursor: pointer; color: inherit; font-weight: 600;
@@ -940,10 +985,18 @@ server <- function(input, output, session) {
 
     is_merged <- (current_layer == "mdl_key")
 
-    # build pill buttons for each available layer
+    # build pill buttons for each available layer. An input that fed the merge but has no
+    # published surface in this release is shown DISABLED rather than omitted — dropping it
+    # made a registry gap look like a taxon with fewer inputs (see the d_edges note above).
     pills <- lapply(seq_along(available), function(i) {
       ds_val   <- available[[i]]
       ds_label <- names(available)[[i]]
+      if (ds_val != "mdl_key" && !has_asset(sp_row[[ds_val]]))
+        return(tags$span(
+          class = "layer-pill unavailable",
+          title = glue("{ds_label} feeds the merged model, but {ver} publishes no surface ",
+                       "for it — nothing to draw"),
+          ds_label))
       active   <- ifelse(ds_val == current_layer, " active", "")
       onclick_js <- sprintf(
         "var r=document.querySelector('#ds_layer_container input[value=\"%s\"]'); if(r) r.click();",
@@ -960,9 +1013,13 @@ server <- function(input, output, session) {
       left_content <- tagList(
         span(class = "layer-icon", "\u2713"),
         span(class = "layer-label", "Merged Model"),
+        # `n_ds` is taxon.n_datasets = n_distinct(ds_key) over taxon_model
+        # (merge_models_prep.qmd), which counts the SOURCE datasets only — the merged model is
+        # never an edge in that table. Subtracting one for it under-reported every taxon by one
+        # (the leatherback's 6 inputs read as 5). Same quantity as the input pills beside it.
         if (n_ds > 1) span(
           style = "opacity: 0.85;",
-          glue(" (maximum of {n_ds - 1} inputs)"))) # assume 1 merged model + n_ds-1 inputs
+          glue(" (maximum of {n_ds} inputs)")))
     } else {
       bar_class <- "layer-bar is-input"
       in_key  <- sp_row[[current_layer]]                 # this input's raw mdl_key
@@ -1020,6 +1077,10 @@ server <- function(input, output, session) {
       if (!ds_key %in% names(d_sp)) return(NULL)
       ds_mdl_key <- d_sp[[ds_key]]
       if (is.na(ds_mdl_key)) return(NULL)
+      # an input the merge used but this release publishes no surface for: still listed (it
+      # contributed to the value shown), but not a link to a layer that cannot be drawn
+      if (!has_asset(ds_mdl_key))
+        return(HTML(glue("{mdl_names[ds_key]} <em class='text-muted'>(no published surface)</em>")))
       str_info <- ifelse(
         type == "value" && !is.na(mdl_info[ds_key]),
         glue("<br><em>({mdl_info[ds_key]})</em>"),
