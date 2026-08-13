@@ -1253,19 +1253,32 @@ ui_impl <- function(req) page_sidebar(
       selectInput(
         "sel_unit",
         "Spatial units",
-        # Driven by the RELEASE, not hardcoded. v1 predates Program Areas and
-        # scored Planning Areas, so a fixed "Program areas" choice offered the one
-        # unit v1 does not have and hid the one it does -- an empty map with an
+        # Driven by the RELEASE, not hardcoded. v1 predates Program Areas and has
+        # none, so a fixed "Program areas" choice drew an empty map with an
         # Inf/-Inf legend and no explanation.
+        #
+        # "Planning areas" is deliberately NOT offered even though v1 and v2 score
+        # them and their PMTiles are published: this app has no planning-area
+        # render path. The `pa` branch of the map observer is commented-out dead
+        # code, and the base map never creates a `pa_src` source, so selecting it
+        # silently left the raster cells on screen. Offering a control that does
+        # nothing is worse than not offering it. Adding it back means implementing
+        # the source + outline/label layers, click handling, tooltips, the Report
+        # map and the flower plot -- a feature, not a flag.
         choices = c(
           "Raster cells (0.05°)" = "cell",
-          if (isTRUE(manifest$capabilities$planareas) && !is.na(tbl_pa))
-            c("Planning areas" = "pa"),
           if (isTRUE(manifest$capabilities$programareas) && !is.na(tbl_pra))
             c("Program areas" = "pra")
         )
       )
     ),
+    # A release whose scored polygon unit this app cannot draw should SAY so,
+    # rather than presenting a shorter dropdown with no explanation.
+    if (!isTRUE(manifest$capabilities$programareas))
+      tags$div(
+        style = "font-size:0.85em; opacity:0.75; margin:-0.5em 0 1em 0;",
+        sprintf(paste("%s scored Planning Areas, which this map cannot draw yet.",
+                      "Raster cells show the same scores at full resolution."), ver)),
     tags$div(
       id = "tour_lyr",
       selectInput(
