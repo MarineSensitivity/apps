@@ -168,9 +168,6 @@ build_bundle <- function(ver) {
 sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   taxonomy_csv <- here(
     "scores/data/taxonomic_hierarchy_worms_2025-10-30.csv")
-  tbl_er <- "ply_ecoregions_2025"
-  tbl_sr <- glue("ply_subregions_2026_{ver}")
-  tbl_pra <- glue("ply_programareas_2026_{ver}")
   tbl_pra_pm <- "ply_programareas_2026"
 
   # Only what every published version genuinely has. A file that exists for one
@@ -203,6 +200,35 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
 
   # database ----
   con_sdm <- dbConnect(duckdb(), dbdir = sdm_db, read_only = T)
+
+  # Resolve zone table names from the DATABASE, never from a version-derived
+  # guess. v1/v2 name their zone tables WITHOUT the version suffix
+  # (`ply_subregions_2026`, `ply_programareas_2026`) while v3+ carry it
+  # (`ply_subregions_2026_v3`). So `glue("ply_subregions_2026_{ver}")` matched
+  # NOTHING on v2 — every `filter(tbl == tbl_sr)` returned zero rows, the
+  # subregion<->programarea cache was written empty, and because the cache is
+  # only computed when the file is absent it stayed empty forever. The visible
+  # symptom was a Program Areas choropleth with no fill and an `InfM/-InfM`
+  # legend, which is `range(numeric(0))`.
+  #
+  # Prefer the suffixed name when it exists (v3+), else the highest-sorting
+  # candidate for that field, which picks the 2026 vintage over the 2025 one
+  # where a release carries both. Returns NA when the release has no such zone.
+  zone_tbl_for <- function(fld_name, prefer = NULL) {
+    cand <- tryCatch(
+      dbGetQuery(con_sdm, glue(
+        "SELECT DISTINCT tbl FROM zone WHERE fld = '{fld_name}' ORDER BY tbl"))$tbl,
+      error = function(e) character())
+    if (!length(cand)) return(NA_character_)
+    if (!is.null(prefer) && prefer %in% cand) return(prefer)
+    tail(sort(cand), 1)
+  }
+  tbl_er  <- zone_tbl_for("ecoregion_key",   "ply_ecoregions_2025")
+  tbl_sr  <- zone_tbl_for("subregion_key",   glue("ply_subregions_2026_{ver}"))
+  tbl_pra <- zone_tbl_for("programarea_key", glue("ply_programareas_2026_{ver}"))
+  tbl_pa  <- zone_tbl_for("planarea_key",    glue("ply_planareas_2025_{ver}"))
+  message(glue("zone tables resolved: ecoregion={tbl_er} subregion={tbl_sr} ",
+               "programarea={tbl_pra} planarea={tbl_pa}"))
   # dbListTables(con_sdm)
   # duckdb_shutdown(duckdb()); rm(con_sdm)
 
@@ -728,10 +754,22 @@ pra_geom <- function() {
       ) |>
       collect()
 
-    # write to csv
-    write_csv(d_sr_pra, sr_pra_csv)
+    # NEVER cache an empty mapping for a release that HAS Program Areas. This
+    # file is computed only when absent, so one bad write is permanent: v2's was
+    # written empty (the tbl filter above used to match nothing) and the app
+    # served a blank choropleth from it indefinitely. An empty result is only
+    # legitimate where the release genuinely has no Program Areas -- v1.
+    if (!nrow(d_sr_pra) && isTRUE(manifest$capabilities$programareas)) {
+      warning(glue(
+        "{ver}: subregion<->programarea mapping came back EMPTY while the manifest ",
+        "declares Program Areas -- not caching. The choropleth will be blank until ",
+        "this is fixed; check the zone `tbl` names for this release."))
+    } else {
+      write_csv(d_sr_pra, sr_pra_csv)
+    }
   }
-  d_sr_pra <- read_csv(sr_pra_csv)
+  d_sr_pra <- if (file.exists(sr_pra_csv)) read_csv(sr_pra_csv) else
+    tibble(subregion_key = character(), programarea_key = character())
 
   # NOTE: the old `r_init` terra raster was a ~4 GiB cached default-layer
   # raster (see `scores/cache/r_init_full.tif`) used to seed the initial
@@ -1215,10 +1253,16 @@ ui_impl <- function(req) page_sidebar(
       selectInput(
         "sel_unit",
         "Spatial units",
+        # Driven by the RELEASE, not hardcoded. v1 predates Program Areas and
+        # scored Planning Areas, so a fixed "Program areas" choice offered the one
+        # unit v1 does not have and hid the one it does -- an empty map with an
+        # Inf/-Inf legend and no explanation.
         choices = c(
           "Raster cells (0.05°)" = "cell",
-          # "Planning areas"       = "pa",
-          "Program areas" = "pra"
+          if (isTRUE(manifest$capabilities$planareas) && !is.na(tbl_pa))
+            c("Planning areas" = "pa"),
+          if (isTRUE(manifest$capabilities$programareas) && !is.na(tbl_pra))
+            c("Program areas" = "pra")
         )
       )
     ),
