@@ -486,9 +486,14 @@ build_bundle <- function(ver) {
   # column. `n_ds`/`n_datasets` cannot be trusted across releases: v1-v7 count the ms_merge
   # edge (so the app subtracted one) and v8 does not (so subtracting one under-reported every
   # taxon by one — the leatherback's 6 inputs read as 5). Counting what we list cannot drift.
+  # match(), not `[[`: `[[` on a table ERRORS with "subscript out of bounds" for an absent
+  # key rather than returning NULL, so the is.null() guard never ran. Every v1 taxon whose
+  # only model IS its merged model has no input edges, so the layer bar died on the first
+  # such species — visible only in the browser, since a bundle-level check never renders it.
   n_inputs_of <- local({
     tb <- table(d_edges$ms_merge_key)
-    function(mk) { n <- tb[[as.character(mk)]]; if (is.null(n)) 0L else as.integer(n) }
+    nm <- names(tb); vals <- as.integer(tb)
+    function(mk) { i <- match(as.character(mk)[1], nm); if (is.na(i)) 0L else vals[i] }
   })
 
   # wide per-taxon input columns: one column per ds_key holding that input's raw mdl_key (or NA),
