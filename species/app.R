@@ -563,12 +563,32 @@ bundle <- function(v) {
 # ?ver= from a request/session, resolved against the published registry. An unknown or absent
 # value falls back to the PROMOTED release (latest.txt) rather than erroring -- this app used
 # to default to a hardcoded v8, so /species/ served the pre-release while /scores/ served v7.
+#
+# `allow_access` is the pre-release review gate: this process may resolve only
+# the `access` values msens::atlas_allow_access() returns -- "public" on the
+# public Shiny Server instance, everything on the PREVIEW instance (a second
+# Shiny Server block whose wrapper app.R sets MS_PREVIEW=1, reachable only via
+# the signed-in preview.marinesensitivity.org vhost). Policy is an env var of the
+# PROCESS, never a request header: shiny-server opens its own websocket to this
+# worker, so no proxy header reaches session$request. See scores/app.R.
 ver_of <- function(qs) {
   v <- tryCatch({
     q <- shiny::parseQueryString(qs %||% "")
-    msens::atlas_resolve_ver(q$ver)
+    msens::atlas_resolve_ver(q$ver, allow_access = msens::atlas_allow_access())
   }, error = function(e) NULL)
-  if (is.null(v)) tryCatch(msens::atlas_resolve_ver(NULL), error = function(e) VER_FALLBACK) else v
+  if (is.null(v)) tryCatch(msens::atlas_resolve_ver(NULL, allow_access = msens::atlas_allow_access()),
+                           error = function(e) VER_FALLBACK) else v
+}
+
+# preview instance chrome: the signed-in reviewer, from Caddy's X-MS-User header
+# (set from the verified Cloudflare Access JWT; present only on the page GET,
+# stripped on the public vhost). Display only -- policy is MS_PREVIEW, above.
+preview_badge <- function(req) {
+  if (!msens::atlas_is_preview()) return(NULL)
+  who <- tryCatch(req[["HTTP_X_MS_USER"]], error = function(e) NULL)
+  span(class = "badge bg-warning text-dark ms-2",
+       title = "restricted pre-release under review \u2014 sign-in required",
+       "PREVIEW", if (!is.null(who) && nzchar(who)) glue(" \u00b7 {who}"))
 }
 
 # ui ----
@@ -581,11 +601,17 @@ ver_of <- function(qs) {
 ui_impl <- function(req) page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
+    # curl-checkable sentinels (see scores/app.R): which release this page
+    # renders, and whether this is the preview instance
+    tags$meta(name = "ms-ver",     content = ver),
+    tags$meta(name = "ms-preview", content = if (msens::atlas_is_preview()) "1" else "0"),
     # usage tracking: GA4 (aggregate) + a batched beacon to the usage-log Sheet
     # (detail). Both legs are driven from the browser, so no reactive ever
     # performs network I/O — see msens::ga_js(). The Sheet leg is a silent no-op
-    # unless MSENS_LOG_URL is set, so local dev writes nothing.
-    msens::ga_head("species", app_version = APP_VERSION,
+    # unless MSENS_LOG_URL is set, so local dev writes nothing. Reviewer sessions
+    # on the preview instance are tagged apart from public counts.
+    msens::ga_head(if (msens::atlas_is_preview()) "species-preview" else "species",
+                   app_version = APP_VERSION,
                    ip = msens::ms_client_ip(req)),
     tags$style(HTML("
       .maplibregl-popup-content{color:black;}
@@ -715,7 +741,8 @@ ui_impl <- function(req) page_sidebar(
     span("BOEM Marine Sensitivity ",
          actionLink("show_versions", glue("({ver})"),
                     title = "data version - click to switch"),
-         " species distribution"),
+         " species distribution",
+         preview_badge(req)),
     div(
       class = "header-right",
       actionLink("btn_about", "About"),
@@ -823,8 +850,19 @@ server_impl <- function(input, output, session) {
     q   <- parseQueryString(session$clientData$url_search)
     req <- q$ver
     if (is.null(req) || !nzchar(req)) return(invisible())
-    resolved <- tryCatch(msens::atlas_resolve_ver(req), error = function(e) NULL)
-    if (is.null(resolved))
+    resolved <- tryCatch(
+      msens::atlas_resolve_ver(req, allow_access = msens::atlas_allow_access()),
+      msens_restricted = function(e) e, error = function(e) NULL)
+    if (inherits(resolved, "msens_restricted")) {
+      # a pre-release under review: say so, and point at the door (ver_of()
+      # already refused it, so `ver` is the promoted release)
+      pv <- sprintf("%s/species/?ver=%s", msens::atlas_preview_url(), htmltools::htmlEscape(req))
+      showModal(modalDialog(
+        title = glue("Version {htmltools::htmlEscape(req)} is under review"), easyClose = TRUE,
+        p(HTML(glue("<code>?ver={htmltools::htmlEscape(req)}</code> is a pre-release restricted ",
+                    "to reviewers. Showing <b>{ver}</b>."))),
+        p("Reviewers sign in at ", a(href = pv, target = "_blank", pv), ".")))
+    } else if (is.null(resolved))
       showModal(modalDialog(
         title = "Unknown data version", easyClose = TRUE,
         p(HTML(glue("<code>?ver={htmltools::htmlEscape(req)}</code> is not a published ",
@@ -849,7 +887,10 @@ server_impl <- function(input, output, session) {
       title = "Data version", easyClose = TRUE, size = "l",
       p("This app renders one published release of the Marine Sensitivity Toolkit."),
       tryCatch(
-        msens::version_picker_html(ver),
+        # public instance: restricted releases link OUT to the signed-in preview host
+        msens::version_picker_html(
+          ver, href_restricted = if (!msens::atlas_is_preview())
+            function(v) sprintf("%s/species/?ver=%s", msens::atlas_preview_url(), v)),
         error = function(e)
           p(class = "text-muted", "Version list unavailable: ", conditionMessage(e)))))
   })
