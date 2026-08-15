@@ -1248,6 +1248,24 @@ ver_of <- function(qs) {
                            error = function(e) ver_fallback) else v
 }
 
+# The version a SESSION renders: the token ui(req) embedded for the page, never
+# the client-reported URL. session$clientData$url_search / url_pathname are
+# whatever the browser's JavaScript sends over the websocket -- forgeable -- and
+# on the signed-in preview host the version is the URL PATH (/v9/scores/, gated
+# per version by Cloudflare Access; Caddy rewrites it to ?ver=v9 for the page
+# GET), so a reviewer allowed on v9 must not be able to steer this process to
+# v10. The token is HMAC-signed by the server; a client can drop or edit it but
+# cannot mint one. Its version is re-resolved through the instance policy, so a
+# token minted elsewhere never widens what this process shows. A missing or
+# stale token (a page older than 24 h, or one straddling a process restart
+# without MS_TOKEN_SECRET) falls back to the promoted release -- reload the page.
+ver_of_session <- function(input, session) {
+  vt <- msens::ver_token_verify(isolate(input$ms_ver_token))
+  if (is.null(vt)) return(ver_of(NULL))
+  tryCatch(msens::atlas_resolve_ver(vt, allow_access = msens::atlas_allow_access()),
+           error = function(e) ver_of(NULL))
+}
+
 # preview instance chrome: a badge naming the signed-in reviewer. The identity
 # comes from Caddy's X-MS-User header, set from the VERIFIED Cloudflare Access
 # JWT and only ever present on the page GET (the one request whose headers
@@ -1437,6 +1455,12 @@ ui_impl <- function(req) page_sidebar(
     "))
   ),
   useConductor(),
+  # the version this PAGE was resolved for, signed (msens::ver_token_sign): the
+  # server function renders the version in this token, not whatever the client's
+  # JavaScript reports as url_search/url_pathname -- see ver_of_session() below.
+  # A hidden bound text input, so its value arrives in Shiny's init message.
+  div(style = "display:none",
+      tags$input(id = "ms_ver_token", type = "text", value = msens::ver_token_sign(ver))),
   title = div(
     style = "display: flex; align-items: center; width: 100%;",
     span("BOEM Marine Sensitivity ",
@@ -1642,9 +1666,14 @@ server_impl <- function(input, output, session) {
       tryCatch(
         # on the public instance a restricted (under-review) release links OUT to
         # the signed-in preview host; on the preview instance it renders in place
-        msens::version_picker_html(
-          ver, href_restricted = if (!msens::atlas_is_preview())
-            function(v) sprintf("%s/scores/?ver=%s", msens::atlas_preview_url(), v)),
+        # preview instance: the version is the PATH there (/v9/scores/), so every
+        # row links by path; public instance: restricted rows link OUT to the
+        # signed-in preview host, public rows stay in-app (?ver=)
+        if (msens::atlas_is_preview())
+          msens::version_picker_html(ver, href = function(v) sprintf("/%s/scores/", v))
+        else
+          msens::version_picker_html(
+            ver, href_restricted = function(v) msens::preview_app_url("scores", v)),
         error = function(e)
           p(class = "text-muted", "Version list unavailable: ", conditionMessage(e)))))
   })
@@ -1672,7 +1701,7 @@ server_impl <- function(input, output, session) {
     if (inherits(resolved, "msens_restricted")) {
       # a pre-release under review: say so, and point at the door (the version
       # itself was already refused by ver_of(), so `ver` is the promoted release)
-      pv <- sprintf("%s/scores/?ver=%s", msens::atlas_preview_url(), htmltools::htmlEscape(req))
+      pv <- tryCatch(msens::preview_app_url("scores", req), error = function(e) msens::atlas_preview_url())
       showModal(modalDialog(
         title = glue("Version {htmltools::htmlEscape(req)} is under review"), easyClose = TRUE,
         p(HTML(glue("<code>?ver={htmltools::htmlEscape(req)}</code> is a pre-release restricted ",
@@ -1697,9 +1726,11 @@ server_impl <- function(input, output, session) {
   })
 
   # echo the version into the URL so a shared link is explicit about what it shows
-  # (and keeps working once other versions render here)
+  # (and keeps working once other versions render here). Not on the preview
+  # instance: there the version is the PATH (/v9/scores/) and Caddy forces ?ver=.
   observe({
-    updateQueryString(glue("?ver={ver}"), mode = "replace", session = session)
+    if (!msens::atlas_is_preview())
+      updateQueryString(glue("?ver={ver}"), mode = "replace", session = session)
   })
 
   # observe(session$setCurrentTheme(
@@ -3289,7 +3320,7 @@ ui <- function(req) {
 }
 
 server <- function(input, output, session) {
-  v <- ver_of(isolate(session$clientData$url_search))
+  v <- ver_of_session(input, session)
   b <- bundle(v)
   f <- server_impl; environment(f) <- b
   f(input, output, session)
