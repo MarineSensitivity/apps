@@ -1,2 +1,16 @@
 restart.txt
 app_cache
+
+# per-version derived caches, cache/{ver}/ (subregion_bboxes_v2.csv,
+# subregion_programareas.csv, *_label_pts.csv): app.R WRITES these itself when
+# absent, from that release's own zone tables + manifest, so they are output,
+# not input. Committing them would ship one machine's derived geometry to every
+# other -- and because a cache is recomputed ONLY when the file is absent, a bad
+# one never heals (an empty subregion_programareas.csv from the v1/v2 zone-table
+# mismatch left the Program Areas choropleth unfilled with an `InfM/-InfM`
+# legend until the file was deleted).
+#
+# The unversioned seeds beside them (r_init*.tif, r_cells_outside_pra.tif,
+# pra_label_pts.csv, flower_default_subregions.csv, subregion_bboxes.csv) stay
+# TRACKED: those are inputs the app only reads.
+cache/*/
