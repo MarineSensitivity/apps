@@ -865,6 +865,16 @@ ui_impl <- function(req) page_sidebar(
       input_dark_mode(id = "tgl_dark", mode = "dark")
     )
   ),
+  # Same fix scores/app.R already carries. Without it bslib derives the browser
+  # and bookmark title by FLATTENING the `title` argument, and ours is a div of
+  # controls -- the tab read "BOEM Marine Sensitivity (v8) species distribution
+  # Scores · Species · Docs · Home About bslib-component-js 0.12.0
+  # components/dist components.min.js ...". The server replaces this with the
+  # taxon once one renders (the `updateTitle` message), so it was only ever the
+  # INITIAL title -- which is exactly what a bookmark keeps. Adding the nav made
+  # a latent mess visible; carrying the version means a bookmark says which
+  # release it points at.
+  window_title = glue("BOEM Marine Sensitivity ({ver}) species distribution"),
 
   sidebar = sidebar(
     open = F,
@@ -1345,8 +1355,10 @@ server_impl <- function(input, output, session) {
       `aria-label` = glue("copy {what} name"),
       icon("copy"))
 
+    # no id here: uiOutput("sp_title") already puts that id on the wrapper this
+    # renders into, and repeating it put TWO #sp_title in the document
     div(
-      class = "sp-title", id = "sp_title",
+      class = "sp-title",
       span(class = "sci", sci), copy_btn(sci, "scientific"),
       # a taxon with no common name gets the scientific name alone, not a dangling separator
       if (has_cmn) tagList(
