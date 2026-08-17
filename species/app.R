@@ -1437,17 +1437,53 @@ server_impl <- function(input, output, session) {
   })
 
   # geographic bbox (lon/lat) of a model's cells, for fit_bounds
+  #
+  # ANTIMERIDIAN (apps#9): min(lon)/max(lon) describes a North Pacific range as the whole globe —
+  # Least Auklet has cells at 160-180 E and 180-150 W, so the naive box is -179.975..179.975 and
+  # fitBounds centres it at longitude 0, off Iceland. Both branches below therefore hand their
+  # longitudes to msens::lon_span*(), which measures the span in the -180..180 AND 0..360 frames
+  # and keeps the narrower. The xmax it returns may exceed 180; pass it through UNWRAPPED —
+  # MapLibre reads [160, 48, 210, 66] as crossing the dateline (verified in-browser), while
+  # wrapping 210 back to -150 would put west east of east and fit the complement.
+  #
+  # v1-v7 and v8 answer this from different tables, and the v1-v7 half used to answer it not at
+  # all: the v8 SQL names `c.lon` and `model_cell`, and a v1-v7 release has neither (its `cell`
+  # carries no lon/lat, and the table is `cell_model` keyed by mdl_seq). The tryCatch swallowed
+  # that, so EVERY species on the default release fitted the same whole-study-area extent.
   mdl_bbox <- function(mdl_key) {
-    # model_cell is an S3-GLOB view that needs LIST credentials the app container lacks — if the
-    # read fails, return NULL so callers fall back to the US study-area extent (er_bbox) rather
-    # than crashing the session. (The merged tiles themselves render via titiler, which resolves
-    # mdl_key->mdl_id and reads the exact partition server-side.)
-    b <- tryCatch(dbGetQuery(con_sdm, glue(
-      "SELECT min(c.lon) x0, min(c.lat) y0, max(c.lon) x1, max(c.lat) y1
-       FROM model_cell mc JOIN cell c USING (cell_id)
-       WHERE mc.mdl_id = (SELECT mdl_id FROM model WHERE mdl_key = '{mdl_key}')")),
+    # a read can still fail (model_cell is a view over Parquet the app container may not be able
+    # to glob) — return NULL so callers fall back to the US study-area extent rather than crashing.
+    b <- tryCatch(
+      if (is_mdl_seq) {
+        # cell_id -> row/col is pure arithmetic on the grid, so the extent needs no lon/lat
+        # column: usa05's own frame runs 141.10 E EASTWARD across the dateline, which is already
+        # the contiguous frame an Aleutian extent wants (cell_lonlat(wrap = FALSE)).
+        rc <- dbGetQuery(con_sdm, glue(
+          "SELECT min(((cell_id - 1) %  {grid$nc}) + 1) c0,
+                  max(((cell_id - 1) %  {grid$nc}) + 1) c1,
+                  min(((cell_id - 1) // {grid$nc}) + 1) r0,
+                  max(((cell_id - 1) // {grid$nc}) + 1) r1
+             FROM cell_model WHERE mdl_seq = {as.integer(mdl_key)}"))
+        if (is.na(rc$c0)) NULL else data.frame(
+          x0 = grid$xmin + (rc$c0 - 1) * grid$resx,   # cell EDGES, not centres
+          x1 = grid$xmin +  rc$c1      * grid$resx,
+          y0 = grid$ymax -  rc$r1      * grid$resy,
+          y1 = grid$ymax - (rc$r0 - 1) * grid$resy)
+      } else {
+        dbGetQuery(con_sdm, glue(
+          "SELECT min(c.lon) x0, min(c.lat) y0, max(c.lon) x1, max(c.lat) y1,
+                  min(CASE WHEN c.lon < 0 THEN c.lon + 360 ELSE c.lon END) w0,
+                  max(CASE WHEN c.lon < 0 THEN c.lon + 360 ELSE c.lon END) w1
+             FROM model_cell mc JOIN cell c USING (cell_id)
+            WHERE mc.mdl_id = (SELECT mdl_id FROM model WHERE mdl_key = '{mdl_key}')"))
+      },
       error = function(e) NULL)
-    if (is.null(b) || is.na(b$x0)) NULL else c(b$x0, b$y0, b$x1, b$y1)
+    if (is.null(b) || is.na(b$x0)) return(NULL)
+    # on usa05 the frame is already contiguous, so the 0-360 pair IS the -180..180 pair and
+    # lon_span_agg is a no-op; on global05 it is what moves the box off the prime meridian
+    lon <- if (is.null(b$w0)) msens::lon_span_agg(b$x0, b$x1, b$x0, b$x1) else
+                              msens::lon_span_agg(b$x0, b$x1, b$w0, b$w1)
+    c(lon[1], b$y0, lon[2], b$y1)
   }
 
   # * get_name ----
@@ -1636,13 +1672,21 @@ server_impl <- function(input, output, session) {
     # interpolated view, so no rep applies there.
     asset     <- if (!is_merged) pick_asset(layer_mdl_key, input$representation %||% "native") else NULL
 
-    # fit target: merged -> US model extent; input -> its own (often global) bbox from
-    # native_asset; a pmtiles input without a per-model bbox falls back to the taxon's
-    # merged US extent (never the whole world, which lands on the antipode of a globe).
+    # fit target: merged -> the model's own data extent; input -> its bbox from native_asset,
+    # falling back to the taxon's merged extent, and to the study area only if both are unusable.
+    #
+    # An asset bbox is taken only if it FRAMES something (apps#9). native_asset records the
+    # asset's extent, and for a range that crosses the antimeridian that extent is honestly
+    # -180..180 — the COG really is a global raster with data at both edges. True of the asset,
+    # useless as a camera target: obeying it put every Bering Sea species off Iceland. A
+    # whole-world box is therefore treated exactly like a missing one, and the fallback is the
+    # merged model's DATA extent, which mdl_bbox() now measures the short way round.
+    asset_bbox <- if (!is.null(asset) && !is.na(asset$xmin))
+      c(asset$xmin, asset$ymin, asset$xmax, asset$ymax) else NULL
     fit_bbox <- if (is_merged) {
       bb <- mdl_bbox(layer_mdl_key); if (is.null(bb)) er_bbox else bb
-    } else if (!is.null(asset) && !is.na(asset$xmin)) {
-      c(asset$xmin, asset$ymin, asset$xmax, asset$ymax)
+    } else if (!msens::bbox_spans_globe(asset_bbox)) {
+      asset_bbox
     } else { bb <- mdl_bbox(sp_row$mdl_key); if (is.null(bb)) er_bbox else bb }
     rx_fit_bbox(fit_bbox)   # remember this layer's extent for the "Zoom to layer extent" button
 
