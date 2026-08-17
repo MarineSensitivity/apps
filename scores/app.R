@@ -1279,6 +1279,30 @@ preview_badge <- function(req) {
        "PREVIEW", if (!is.null(who) && nzchar(who)) glue(" \u00b7 {who}"))
 }
 
+# cross-product nav (apps#11) — the scores table links OUT to a species map and
+# nothing led back, so a shared deep link was a one-way trip and the browser Back
+# button the only exit. Destinations come from msens::product_urls(), the one
+# definition the docs nav reads too, so the two cannot drift.
+#
+# Access is read from the INSTANCE, not from the registry: this app already knows
+# which one it is running as, and on the preview instance a reviewer must stay on
+# the signed-in host (where the version is the URL PATH) rather than be handed a
+# public ?ver= link to a release the public host will not serve them. It also
+# keeps this off the network, and this renders on every page request.
+product_nav <- function(ver, current) {
+  u   <- msens::product_urls(
+    ver, access = if (msens::atlas_is_preview()) "restricted" else "public")
+  lnk <- function(key, label, ...) if (identical(key, current))
+    span(class = "nav-here", title = "you are here", label) else
+    tags$a(class = "nav-link-ms", href = u[[key]], title = u[[key]], label, ...)
+  div(
+    class = "header-nav",
+    lnk("scores",  "Scores"),  span(class = "nav-sep", "\u00b7"),
+    lnk("species", "Species"), span(class = "nav-sep", "\u00b7"),
+    lnk("docs",    "Docs", target = "_blank"), span(class = "nav-sep", "\u00b7"),
+    lnk("home",    "Home"))
+}
+
 ui_impl <- function(req) page_sidebar(
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
@@ -1315,6 +1339,12 @@ ui_impl <- function(req) page_sidebar(
         height: 300px;
       }
       .header-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+      /* cross-product nav (apps#11) */
+      .header-nav { display: flex; align-items: center; gap: 6px; margin-left: 18px; font-size: 0.9em; }
+      .header-nav a.nav-link-ms { color: inherit; text-decoration: underline; text-underline-offset: 3px; }
+      .header-nav a.nav-link-ms:hover { text-decoration-thickness: 2px; }
+      .header-nav .nav-here { font-weight: 700; opacity: 0.8; }
+      .header-nav .nav-sep  { opacity: 0.35; }
       .header-right .action-button { background: none; border: none; color: inherit; cursor: pointer; text-decoration: underline; font-size: 0.9em; padding: 0; }
       .modal-footer { flex-wrap: wrap; justify-content: center; }
       .modal-footer .form-group { width: 100%; margin-bottom: 0.5rem; }
@@ -1467,6 +1497,7 @@ ui_impl <- function(req) page_sidebar(
          actionLink("show_versions", glue("({ver})"),
                     title = "data version - click to switch"),
          preview_badge(req)),
+    product_nav(ver, "scores"),
     div(
       class = "header-right",
       actionLink("btn_about", "About"),
