@@ -679,6 +679,24 @@ ui_impl <- function(req) page_sidebar(
       .layer-bar .merged-link {
         text-decoration: underline; cursor: pointer; color: inherit; font-weight: 600;
       }
+
+      /* selected taxon, as SELECTABLE text (apps#10). selectize renders its item in a
+         div that swallows clicks to open the dropdown, so the names in the picker cannot
+         be dragged over or right-clicked -> Copy. This line is ordinary DOM. */
+      .sp-title {
+        display: flex; align-items: baseline; flex-wrap: wrap; gap: 2px;
+        margin: -6px 0 8px 2px; font-size: 1.05em;
+        -webkit-user-select: text; user-select: text; cursor: text;
+      }
+      .sp-title .sci { font-style: italic; }
+      .sp-title .sep { opacity: 0.45; margin: 0 6px; }
+      .sp-copy {
+        border: none; background: none; color: inherit; cursor: pointer;
+        opacity: 0.45; padding: 0 3px; font-size: 0.85em; line-height: 1;
+      }
+      .sp-copy:hover, .sp-copy:focus { opacity: 1; }
+      .sp-copy.copied      { opacity: 1; color: #198754; }
+      .sp-copy.copy-failed { opacity: 1; color: #dc3545; }
     ")),
     tags$script(HTML("
       Shiny.addCustomMessageHandler('updateTitle', function(title) {
@@ -705,6 +723,49 @@ ui_impl <- function(req) page_sidebar(
       });
       Shiny.addCustomMessageHandler('saveSplashPref', function(val) {
         localStorage.setItem('msens_mapsp_show_splash', val);
+      });
+
+      // ---- copy a species name to the clipboard (apps#10) -------------------
+      // Delegated from document, because #sp_title is re-rendered on every
+      // selection and a handler bound to the button would die with it.
+      document.addEventListener('click', function(e) {
+        var b = e.target.closest ? e.target.closest('.sp-copy') : null;
+        if (!b) return;
+        var txt  = b.getAttribute('data-copy') || '';
+        // restore innerHTML, not textContent: the button holds an <i> icon
+        var prev  = b.innerHTML;
+        var flash = function(ok) {
+          b.innerHTML = ok ? '\\u2713' : '\\u2717';
+          b.classList.add(ok ? 'copied' : 'copy-failed');
+          setTimeout(function() {
+            b.innerHTML = prev;
+            b.classList.remove('copied', 'copy-failed');
+          }, 1200);
+        };
+        // execCommand on a throwaway textarea. Both the pre-secure-context
+        // fallback AND the recovery path: navigator.clipboard.writeText REJECTS
+        // with NotAllowedError whenever the document is not focused, and an
+        // empty rejection handler turns that into a button that does nothing
+        // and says nothing. Verified in-browser — that is exactly what the
+        // first version of this did.
+        var legacy = function() {
+          var ta = document.createElement('textarea');
+          ta.value = txt;
+          ta.setAttribute('readonly', '');
+          ta.style.position = 'fixed'; ta.style.top = '0'; ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          ta.setSelectionRange(0, txt.length);
+          var ok = false;
+          try { ok = document.execCommand('copy'); } catch (err) { ok = false; }
+          document.body.removeChild(ta);
+          flash(ok);
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+          navigator.clipboard.writeText(txt).then(function() { flash(true); }, legacy);
+        } else {
+          legacy();
+        }
       });
 
       // ---- species search terms (incl. the ones that find NOTHING) ----------
@@ -817,6 +878,10 @@ ui_impl <- function(req) page_sidebar(
           selected = "ecoregion_key",
           width    = "100%")))
   ),
+  # the selected taxon as plain, selectable text — the names ARE on the page (the browser
+  # tab title carries them) but nowhere a person can select them, since selectize's item is
+  # not selectable text. Below the selector, above the map, per apps#10.
+  uiOutput("sp_title"),
   uiOutput("layer_bar"),
   # hidden radioButtons to maintain ds_layer input
   div(
@@ -1228,6 +1293,34 @@ server_impl <- function(input, output, session) {
   observeEvent(input$btn_zoom_extent, {
     bb <- rx_fit_bbox()
     if (!is.null(bb)) maplibre_proxy("map") |> fit_bounds(bbox = bb, animate = TRUE)
+  })
+
+  # * sp_title ----
+  # The selected taxon, rendered as ordinary selectable text with a copy button beside each
+  # name (apps#10). Two buttons rather than one so the scientific and common names can be
+  # taken independently; dragging across both still gets them together.
+  output$sp_title <- renderUI({
+    req(input$sel_sp)
+    sp_row <- d_spp |> filter(mdl_key == input$sel_sp)
+    req(nrow(sp_row) == 1)
+
+    sci <- sp_row$scientific_name
+    cmn <- sp_row$common_name
+    has_cmn <- !is.na(cmn) && nzchar(cmn)
+
+    copy_btn <- function(txt, what) tags$button(
+      class = "sp-copy", type = "button",
+      `data-copy` = txt, title = glue("copy {what} name"),
+      `aria-label` = glue("copy {what} name"),
+      icon("copy"))
+
+    div(
+      class = "sp-title", id = "sp_title",
+      span(class = "sci", sci), copy_btn(sci, "scientific"),
+      # a taxon with no common name gets the scientific name alone, not a dangling separator
+      if (has_cmn) tagList(
+        span(class = "sep", "·"),
+        span(class = "cmn", cmn), copy_btn(cmn, "common")))
   })
 
   # * layer_bar ----
