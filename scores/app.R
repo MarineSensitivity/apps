@@ -367,13 +367,32 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   }
 
   # one place that answers "how do I draw this layer?", COG-first
+  #
+  # THE STUDY AREA IS A CAMERA, NOT A FILTER (apps#13). This used to ask for the
+  # per-subregion COG, which is clipped -- and on v4-v7 the `USA` subregion is
+  # EXACTLY the Program-Area union (349,139 of 662,075 scored cells), so the
+  # default view silently hid 47% of the scores. They were computed, they are
+  # published, and the FULL COG has them: sampling the v7 composite FULL COG at
+  # (-64.925, 18.275) in the US Virgin Islands returns 93, while the USA COG
+  # does not even cover that longitude.
+  #
+  # So the raster is always the FULL surface, on every release; `subregion_key`
+  # now only moves the camera (sr_view/sr_bbox). Every release v1-v8 publishes a
+  # FULL COG, so the per-subregion fallback below is defensive, not a path we
+  # expect to take.
+  #
+  # Consequence worth knowing: FULL's rescale spans the whole study area rather
+  # than the chosen subregion, so colours are comparable BETWEEN study areas at
+  # the cost of some contrast within a small one. That is the honest trade for
+  # "show all the data".
   layer_tiles <- function(metric_key, subregion_key = "FULL", palette = "spectral_r") {
-    cg <- cog_of(metric_key, subregion_key)
+    cg <- cog_of(metric_key, "FULL")
+    if (is.null(cg)) cg <- cog_of(metric_key, subregion_key)
     if (!is.null(cg))
       return(list(rescale = cg$rescale,
                   url = msens::cog_tile_url(cg$url, colormap = palette,
                                             rescale = cg$rescale, base = tile_base_url)))
-    sql <- cell_sql(metric_key, subregion_key)
+    sql <- cell_sql(metric_key)
     st  <- msens::cell_stats(sql, mtime = db_mtime, base = tile_base_url)
     rs  <- c(st$min, st$max)
     list(rescale = rs,
@@ -384,6 +403,11 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   # build the (cell_id, value) SELECT for a given metric + subregion; passed to
   # msens::cell_tile_url() / cell_stats(). strict allowlist on the identifiers
   # to keep the string string-interpolation-safe before it ever hits DuckDB.
+  # `subregion_key` is accepted and DELIBERATELY IGNORED: the study area moves the
+  # camera and never filters the surface (apps#13). It used to add a zone_cell
+  # join that dropped every cell outside the chosen subregion -- the SQL-tile
+  # twin of the clipped-COG masking above. Kept in the signature so existing
+  # call sites read unchanged.
   cell_sql <- function(metric_key, subregion_key = "FULL") {
     stopifnot(
       is.character(metric_key),   length(metric_key) == 1,
@@ -394,24 +418,11 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
     # `cm.{val_cm}` / `z.{val_zone}`, not a hardcoded `val`: this SELECT is handed to
     # titiler, so on v1-v7 (where the column is `value`) it produced a tile request that
     # could only fail server-side, where the error is a blank layer rather than a message.
-    if (subregion_key == "FULL") {
-      glue(
-        "SELECT cm.cell_id, cm.{val_cm} AS value ",
-        "FROM cell_metric cm ",
-        "JOIN metric m ON cm.metric_seq = m.metric_seq ",
-        "WHERE m.metric_key = '{metric_key}'")
-    } else {
-      glue(
-        "SELECT cm.cell_id, cm.{val_cm} AS value ",
-        "FROM cell_metric cm ",
-        "JOIN metric     m  ON cm.metric_seq = m.metric_seq ",
-        "JOIN zone_cell  zc ON cm.cell_id    = zc.cell_id ",
-        "JOIN zone       z  ON zc.zone_seq   = z.zone_seq ",
-        "WHERE m.metric_key = '{metric_key}' ",
-        "AND   z.tbl       = '{tbl_sr}' ",
-        "AND   z.fld       = 'subregion_key' ",
-        "AND   z.{val_zone} = '{subregion_key}'")
-    }
+    glue(
+      "SELECT cm.cell_id, cm.{val_cm} AS value ",
+      "FROM cell_metric cm ",
+      "JOIN metric m ON cm.metric_seq = m.metric_seq ",
+      "WHERE m.metric_key = '{metric_key}'")
   }
 
   # helper functions ----
@@ -1020,12 +1031,46 @@ pra_geom <- function() zone_geom("programarea")
                                        xmax = col_double(), ymax = col_double(),
                                        clon = col_double(), clat = col_double()))
 
-  # append FULL bbox = union of subregion bboxes (in-memory only).
-  # Previously derived from st_bbox(r_init); with tiles we no longer
-  # materialize a full-extent raster, so take the min/max of the cached
-  # subregion bboxes instead — same extent in the 0-360° longitude
-  # convention the bboxes share with r_cell / r_metrics.
-  if (!"FULL" %in% d_sr_bb$subregion_key) {
+  # FULL = the extent of everything this release SCORED.
+  #
+  # It used to be the union of the subregion bboxes, and every subregion bbox is
+  # built from d_sr_pra -- Program Areas. So on v4-v7 "the full study area" was
+  # the Program-Area union and nothing else, which is how the camera came to
+  # agree with the clipped raster that 47% of the scores did not exist. Derived
+  # from the scored cells instead, it needs no Program Areas at all and is right
+  # on every release, including v1 which has none.
+  #
+  # Same arithmetic as msens::cell_lonlat(wrap = FALSE): row/col straight off
+  # cell_id, kept in the grid's own frame (usa05 runs 141.10 E eastward across
+  # the dateline) so an Alaska-spanning extent stays contiguous. Median rather
+  # than bbox centre for the camera, for the reason get_sr_bbox() gives.
+  full_bb_scored <- local({
+    g <- msens::grid_spec_for(msens::grid_for_ver(ver))
+    r <- tryCatch(dbGetQuery(con_sdm, glue(
+      "SELECT min(((cell_id - 1) %  {g$nc}) + 1) c0,
+              max(((cell_id - 1) %  {g$nc}) + 1) c1,
+              min(((cell_id - 1) // {g$nc}) + 1) r0,
+              max(((cell_id - 1) // {g$nc}) + 1) r1,
+              median(((cell_id - 1) %  {g$nc}) + 1) cm,
+              median(((cell_id - 1) // {g$nc}) + 1) rm
+         FROM (SELECT DISTINCT cell_id FROM cell_metric)")),
+      error = function(e) NULL)
+    if (is.null(r) || !nrow(r) || is.na(r$c0[1])) NULL else
+      c(g$xmin + (r$c0[1] - 1) * g$resx, g$ymax -  r$r1[1]      * g$resy,
+        g$xmin +  r$c1[1]      * g$resx, g$ymax - (r$r0[1] - 1) * g$resy,
+        g$xmin + (r$cm[1] - 0.5) * g$resx, g$ymax - (r$rm[1] - 0.5) * g$resy)
+  })
+  if (!is.null(full_bb_scored)) {
+    d_sr_bb <- bind_rows(
+      tibble(subregion_key = "FULL",
+             xmin = full_bb_scored[1], ymin = full_bb_scored[2],
+             xmax = full_bb_scored[3], ymax = full_bb_scored[4],
+             clon = full_bb_scored[5], clat = full_bb_scored[6]),
+      d_sr_bb |> filter(subregion_key != "FULL"))
+    message(glue("FULL extent from scored cells: ",
+                 "[{round(full_bb_scored[1],2)}, {round(full_bb_scored[2],2)}, ",
+                 "{round(full_bb_scored[3],2)}, {round(full_bb_scored[4],2)}]"))
+  } else if (!"FULL" %in% d_sr_bb$subregion_key) {
     # With no subregion rows (a release without Program Areas, e.g. v1) min() of
     # an empty vector is +Inf, which yields an inverted bbox and a map that
     # cannot fit_bounds. Fall back to the release's own grid extent.
@@ -1095,22 +1140,39 @@ pra_geom <- function() zone_geom("programarea")
   # GA/PA, v8 adds AT (Atlantic) -- which a fixed list silently hid, even though
   # the whole point of the canonical subregions is to span all US waters.
   #
-  # "Full study area" (FULL) and "All USA" (USA) were also two labels for one
-  # extent (FULL is the union of the subregion bboxes, i.e. the USA extent), so
-  # the picker offered the same view twice. USA wins where both exist; FULL is
-  # kept only as the fallback when a release has no USA surface.
-  sr_labels <- c(USA = "All US waters", FULL = "Full study area",
+  # FULL and USA were treated as two labels for one extent, on the stated
+  # assumption that "FULL is the union of the subregion bboxes, i.e. the USA
+  # extent" -- so the picker dropped FULL and kept USA. That assumption is false
+  # on v4-v7, where the USA *zone* is the Program-Area union: 349,139 cells
+  # against 662,075 scored. Preferring USA is therefore how "All US waters" came
+  # to mean "all Program Areas". FULL now wins, and carries that label.
+  #
+  # USA is still offered where it differs, named for what it actually is, because
+  # its zone_metric aggregate is a real published number that the flower plots
+  # report -- it is a study area, just not the whole of one.
+  sr_labels <- c(FULL = "All US waters", USA = "All US waters",
                  AK = "Alaska", AT = "Atlantic", GA = "Gulf of America",
                  PA = "Pacific", L48 = "Mainland USA",
                  AKL48 = "Mainland USA & Alaska")
   sr_choices <- local({
-    have_cog <- if (!is.null(cog_tbl)) unique(cog_tbl$subregion_key) else character()
-    # a study area needs BOTH a surface to draw and an extent to zoom to
-    have_bb  <- d_sr_bb$subregion_key
-    k <- intersect(have_cog, have_bb)
-    if ("USA" %in% k) k <- setdiff(k, "FULL")
+    # The study area is a CAMERA now, so a surface is no longer a requirement --
+    # only an extent to point at. That is what lets a release offer a study area
+    # it never scored (v7 has no Atlantic subregion) without drawing a blank map:
+    # the FULL surface is what renders, wherever the camera happens to be.
+    k <- unique(d_sr_bb$subregion_key)
     if (!length(k)) k <- "FULL"
-    ord <- c("USA", "FULL", "AKL48", "L48", "AK", "AT", "GA", "PA")
+    # name USA honestly wherever it is NOT the full scored extent
+    if (all(c("FULL", "USA") %in% k)) {
+      bbf <- d_sr_bb |> filter(subregion_key == "FULL")
+      bbu <- d_sr_bb |> filter(subregion_key == "USA")
+      same <- nrow(bbf) && nrow(bbu) &&
+        isTRUE(all.equal(as.numeric(bbf[1, c("xmin","ymin","xmax","ymax")]),
+                         as.numeric(bbu[1, c("xmin","ymin","xmax","ymax")]),
+                         tolerance = 1e-6))
+      if (same) k <- setdiff(k, "USA")            # genuinely the same view
+      else sr_labels[["USA"]] <- "Program Areas combined"
+    }
+    ord <- c("FULL", "USA", "AKL48", "L48", "AK", "AT", "GA", "PA")
     k <- c(intersect(ord, k), sort(setdiff(k, ord)))
     setNames(k, ifelse(is.na(sr_labels[k]), k, sr_labels[k]))
   })
@@ -1881,7 +1943,7 @@ server_impl <- function(input, output, session) {
       position = "right")$
     step(
       title    = "Layer Selection",
-      text     = "Choose which sensitivity metric to display \u2014 composite score, individual species categories (bird, fish, mammal, etc.), or primary productivity. Note that some cells (Atlantic, Gulf of America, Hawaii, Puerto Rico, Pacific Islands) have scores but lie outside any v6 BOEM Program Area; they appear dimmed under a 'Cells outside Program Areas' overlay.",
+      text     = "Choose which sensitivity metric to display \u2014 composite score, individual species categories (bird, fish, mammal, etc.), or primary productivity. Cells in the Atlantic, Gulf of America, Hawaii, Puerto Rico and the Pacific Islands are scored and drawn even though they lie outside every BOEM Program Area \u2014 the Study area selector only moves the camera, it never hides data. Turn on the 'Cells outside Program Areas' layer to see which those are.",
       el       = "#tour_lyr",
       position = "right")$
     step(
