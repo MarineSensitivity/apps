@@ -161,11 +161,6 @@ build_bundle <- function(ver) {
   dir_cache <- here(glue("scores/cache/{ver}")); dir.create(dir_cache, showWarnings = FALSE, recursive = TRUE)
   lyrs_csv <- glue("{dir_v}/layers_{ver}.csv")            # superseded by manifest metrics (see d_lyrs)
   pra_gpkg <- glue("{dir_v}/ply_programareas_2026_{ver}.gpkg")
-  sr_pra_csv <- glue("{dir_cache}/subregion_programareas.csv")
-  # filename carries a schema tag: the cache gained clon/clat (the median cell,
-# used to centre the map), so a cache written before that would be read with
-# missing columns. Bump the tag whenever the columns change.
-sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   taxonomy_csv <- here(
     "scores/data/taxonomic_hierarchy_worms_2025-10-30.csv")
   tbl_pra_pm <- "ply_programareas_2026"
@@ -377,7 +372,7 @@ sr_bb_csv <- glue("{dir_cache}/subregion_bboxes_v2.csv")
   # does not even cover that longitude.
   #
   # So the raster is always the FULL surface, on every release; `subregion_key`
-  # now only moves the camera (sr_view/sr_bbox). Every release v1-v8 publishes a
+  # now only moves the camera (sr_view). Every release v1-v8 publishes a
   # FULL COG, so the per-subregion fallback below is defensive, not a path we
   # expect to take.
   #
@@ -894,289 +889,50 @@ pra_geom <- function() zone_geom("programarea")
   # }
   # sr <- read_sf(sr_gpkg)
 
-  # * programareas by subregion ----
+  # (the subregion -> programarea mapping that used to live here is gone with
+  # the Program-Area-derived study areas; see below)
 
-  if (!file.exists(sr_pra_csv)) {
-    # calculate subregion - programarea cells
-    message(glue("Calculating subregion - programarea cells..."))
-
-    # subregion cells
-    tbl_sr_cell <- zone_vals() |>
-      filter(
-        tbl == !!tbl_sr,
-        fld == "subregion_key"
-      ) |>
-      select(sr_key = value, zone_seq) |>
-      inner_join(
-        tbl(con_sdm, "zone_cell") |>
-          select(zone_seq, cell_id),
-        by = join_by(zone_seq)
-      ) |>
-      select(sr_key, cell_id)
-
-    # programarea cells
-    tbl_pra_cell <- zone_vals() |>
-      filter(fld == "programarea_key") |>
-      select(pra_key = value, zone_seq) |>
-      inner_join(
-        tbl(con_sdm, "zone_cell") |>
-          select(zone_seq, cell_id),
-        by = join_by(zone_seq)
-      ) |>
-      select(pra_key, cell_id)
-
-    # programareas per subregion
-    d_sr_pra <- tbl_sr_cell |>
-      inner_join(
-        tbl_pra_cell,
-        by = join_by(cell_id)
-      ) |>
-      group_by(sr_key, pra_key) |>
-      summarise(n_cells = n(), .groups = "drop") |>
-      arrange(sr_key, pra_key) |>
-      select(
-        subregion_key = sr_key,
-        programarea_key = pra_key
-      ) |>
-      collect()
-
-    # NEVER cache an empty mapping for a release that HAS Program Areas. This
-    # file is computed only when absent, so one bad write is permanent: v2's was
-    # written empty (the tbl filter above used to match nothing) and the app
-    # served a blank choropleth from it indefinitely. An empty result is only
-    # legitimate where the release genuinely has no Program Areas -- v1.
-    if (!nrow(d_sr_pra) && isTRUE(manifest$capabilities$programareas)) {
-      warning(glue(
-        "{ver}: subregion<->programarea mapping came back EMPTY while the manifest ",
-        "declares Program Areas -- not caching. The choropleth will be blank until ",
-        "this is fixed; check the zone `tbl` names for this release."))
-    } else {
-      write_csv(d_sr_pra, sr_pra_csv)
-    }
-  }
-  d_sr_pra <- if (file.exists(sr_pra_csv)) read_csv(sr_pra_csv) else
-    tibble(subregion_key = character(), programarea_key = character())
-
-  # NOTE: the old `r_init` terra raster was a ~4 GiB cached default-layer
-  # raster (see `scores/cache/r_init_full.tif`) used to seed the initial
-  # map's image source via msens::add_cells(). With tiles it's no longer
-  # needed — the browser fetches only the viewport's tiles on startup
-  # (~4-16 PNGs @ ~5-20 KB each), served cached from Varnish after the
-  # first hit. The cache file can be deleted whenever.
-
-  # * d_sr_bb (cached) ----
-  # Was derived from r_metrics_{ver}.tif, a per-version raster stack that existed
-  # only for v3-v8 and so made older releases unopenable. A subregion's extent is
-  # just the extent of its cells, and the cells are in zone_cell -- so ask the view
-  # DB and convert cell ids to lon/lat with the grid registry. No raster, and it
-  # works for every published version.
+  # * study areas — one canonical set, every release ----
   #
-  # Longitude stays in the grid's own frame (usa05 is 0-360) so an Alaska bbox
-  # remains contiguous instead of splitting at the antimeridian.
-  get_sr_bbox <- function(sr_key) {
-    pra_sr <- d_sr_pra |>
-      filter(subregion_key == !!sr_key) |>
-      pull(programarea_key)
-    cells <- zone_vals() |>
-      filter(fld == "programarea_key", value %in% !!pra_sr) |>
-      select(zone_seq) |>
-      inner_join(tbl(con_sdm, "zone_cell") |> select(zone_seq, cell_id),
-                 by = join_by(zone_seq)) |>
-      pull(cell_id)
-    if (!length(cells)) return(rep(NA_real_, 4))
-    g  <- msens::grid_spec_for(msens::grid_for_ver(ver))
-    ll <- msens::cell_lonlat(cells, g, wrap = FALSE)
-    # cell_lonlat returns CENTRES; an extent must cover the cells, so grow by half
-    # a cell. Without this the bbox is inset by 0.025 deg on every side and differs
-    # from the raster-derived values the cached csv holds.
-    #
-    # Also carry the MEDIAN cell position. A bbox centre is a poor place to point
-    # a globe: "all US waters" spans 24-82 N, so its bbox centre is 53 N -- up in
-    # the Chukchi, with the Gulf and Caribbean below the horizon. The median cell
-    # sits where the data actually is.
-    c(min(ll$lon) - g$resx / 2, min(ll$lat) - g$resy / 2,
-      max(ll$lon) + g$resx / 2, max(ll$lat) + g$resy / 2,
-      stats::median(ll$lon), stats::median(ll$lat))
-  }
-  if (!file_exists(sr_bb_csv)) {
-    d_sr_bb <- NULL
-    for (sr_key in unique(d_sr_pra$subregion_key)) {
-      # sr_key = "GA"
-      bbox <- get_sr_bbox(sr_key)
-      d_bb_sr <- tibble(
-        subregion_key = sr_key,
-        xmin = bbox[1], ymin = bbox[2], xmax = bbox[3], ymax = bbox[4],
-        clon = bbox[5], clat = bbox[6]
-      )
-      d_sr_bb <- if (is.null(d_sr_bb)) d_bb_sr else bind_rows(d_sr_bb, d_bb_sr)
-    }
-    # A release with no Program Areas (v1) has no subregion->programarea rows, so
-    # the loop above never runs. `exists("d_sr_bb")` used to paper over that by
-    # finding some other frame's copy; inside a per-version bundle it simply
-    # errored and took the whole app down for that version. Write the empty
-    # frame instead, so the extent falls back to the full map rather than failing.
-    if (is.null(d_sr_bb))
-      d_sr_bb <- tibble(subregion_key = character(), xmin = numeric(),
-                        ymin = numeric(), xmax = numeric(), ymax = numeric(),
-                        clon = numeric(), clat = numeric())
-    write_csv(d_sr_bb, sr_bb_csv)
-  }
-  # Explicit types: a release with no subregions writes a HEADER-ONLY csv, and
-  # read_csv then guesses `character` for the empty numeric columns, so binding
-  # the FULL row on failed with "Can't combine <double> and <character>" and took
-  # v1/v2 down. The schema is known; state it rather than let it be inferred.
-  d_sr_bb <- read_csv(sr_bb_csv, show_col_types = FALSE,
-                      col_types = cols(subregion_key = col_character(),
-                                       xmin = col_double(), ymin = col_double(),
-                                       xmax = col_double(), ymax = col_double(),
-                                       clon = col_double(), clat = col_double()))
+  # These are CAMERA PRESETS and nothing else (apps#13, apps#14). Everything
+  # that used to live here -- a subregion->programarea mapping, a per-version
+  # cached bbox csv, a FULL row synthesised from their union, a picker built by
+  # intersecting "has a surface" with "has an extent" -- existed to answer
+  # "which subregions did THIS release publish?", and that question stopped
+  # mattering the moment the study area no longer filtered the map.
+  #
+  # msens::study_areas() is derived from the ecoregion `region_key` rollup,
+  # which is shared across v1-v8, so every release now offers the same five and
+  # a release can point at water it never scored: v7 has Atlantic scores and,
+  # until this, no Atlantic preset, because the old subregions were dissolved
+  # from a 2026 program that has no Atlantic areas.
+  #
+  # Centres and zooms are computed on the unit sphere -- East Bering Sea and the
+  # Pacific Island Territories both cross the antimeridian, where a bounding box
+  # reports a 67 deg span as 360 (apps#9).
+  d_sa <- msens::study_areas()
 
-  # FULL = the extent of everything this release SCORED.
-  #
-  # It used to be the union of the subregion bboxes, and every subregion bbox is
-  # built from d_sr_pra -- Program Areas. So on v4-v7 "the full study area" was
-  # the Program-Area union and nothing else, which is how the camera came to
-  # agree with the clipped raster that 47% of the scores did not exist. Derived
-  # from the scored cells instead, it needs no Program Areas at all and is right
-  # on every release, including v1 which has none.
-  #
-  # Same arithmetic as msens::cell_lonlat(wrap = FALSE): row/col straight off
-  # cell_id, kept in the grid's own frame (usa05 runs 141.10 E eastward across
-  # the dateline) so an Alaska-spanning extent stays contiguous. Median rather
-  # than bbox centre for the camera, for the reason get_sr_bbox() gives.
-  full_bb_scored <- local({
-    g <- msens::grid_spec_for(msens::grid_for_ver(ver))
-    r <- tryCatch(dbGetQuery(con_sdm, glue(
-      "SELECT min(((cell_id - 1) %  {g$nc}) + 1) c0,
-              max(((cell_id - 1) %  {g$nc}) + 1) c1,
-              min(((cell_id - 1) // {g$nc}) + 1) r0,
-              max(((cell_id - 1) // {g$nc}) + 1) r1,
-              median(((cell_id - 1) %  {g$nc}) + 1) cm,
-              median(((cell_id - 1) // {g$nc}) + 1) rm
-         FROM (SELECT DISTINCT cell_id FROM cell_metric)")),
-      error = function(e) NULL)
-    if (is.null(r) || !nrow(r) || is.na(r$c0[1])) NULL else
-      c(g$xmin + (r$c0[1] - 1) * g$resx, g$ymax -  r$r1[1]      * g$resy,
-        g$xmin +  r$c1[1]      * g$resx, g$ymax - (r$r0[1] - 1) * g$resy,
-        g$xmin + (r$cm[1] - 0.5) * g$resx, g$ymax - (r$rm[1] - 0.5) * g$resy)
-  })
-  if (!is.null(full_bb_scored)) {
-    d_sr_bb <- bind_rows(
-      tibble(subregion_key = "FULL",
-             xmin = full_bb_scored[1], ymin = full_bb_scored[2],
-             xmax = full_bb_scored[3], ymax = full_bb_scored[4],
-             clon = full_bb_scored[5], clat = full_bb_scored[6]),
-      d_sr_bb |> filter(subregion_key != "FULL"))
-    message(glue("FULL extent from scored cells: ",
-                 "[{round(full_bb_scored[1],2)}, {round(full_bb_scored[2],2)}, ",
-                 "{round(full_bb_scored[3],2)}, {round(full_bb_scored[4],2)}]"))
-  } else if (!"FULL" %in% d_sr_bb$subregion_key) {
-    # With no subregion rows (a release without Program Areas, e.g. v1) min() of
-    # an empty vector is +Inf, which yields an inverted bbox and a map that
-    # cannot fit_bounds. Fall back to the release's own grid extent.
-    full <- if (nrow(d_sr_bb)) {
-      c(min(d_sr_bb$xmin), min(d_sr_bb$ymin), max(d_sr_bb$xmax), max(d_sr_bb$ymax))
-    } else {
-      g <- msens::grid_spec_for(msens::grid_for_ver(ver))
-      c(g$xmin, g$ymax - g$nr * g$resy, g$xmin + g$nc * g$resx, g$ymax)
-    }
-    d_sr_bb <- bind_rows(
-      tibble(subregion_key = "FULL",
-             xmin = full[1], ymin = full[2], xmax = full[3], ymax = full[4],
-             clon = if (nrow(d_sr_bb)) stats::median(d_sr_bb$clon) else mean(full[c(1,3)]),
-             clat = if (nrow(d_sr_bb)) stats::median(d_sr_bb$clat) else mean(full[c(2,4)])),
-      d_sr_bb)
-  }
-
-  # helper: numeric length-4 bbox c(xmin, ymin, xmax, ymax) for a subregion key
-  #
-  # The stored bboxes are in the GRID's frame, which for usa05 is 0-360 so that
-  # Alaska stays contiguous across the antimeridian. MapLibre expects -180..180
-  # and normalises anything above it, so xmax = 275.4 became -84.6, west ended up
-  # EAST of east, and fitBounds fitted the COMPLEMENT -- the camera swung to the
-  # North Pole with Europe and Africa in view while the actual study area sat on
-  # the horizon. Shifting the whole span below 180 keeps west < east and keeps
-  # the antimeridian crossing continuous, which fitBounds handles correctly.
-  sr_bbox <- function(sr_key) {
-    b <- d_sr_bb |>
-      filter(subregion_key == !!sr_key) |>
-      select(xmin, ymin, xmax, ymax) |>
-      as.numeric()
-    if (length(b) == 4 && !anyNA(b) && b[3] > 180) { b[1] <- b[1] - 360; b[3] <- b[3] - 360 }
-    b
-  }
-
-  # CENTER + ZOOM rather than fitBounds.
-  #
-  # Fitting a bbox that crosses the antimeridian is fragile: the extent is stored
-  # in the grid's 0-360 frame, MapLibre normalises past 180, and the fit silently
-  # inverts (west ends up east of east) so the camera swings to the North Pole.
-  # A centre and a zoom cannot invert. The centre is computed in the CONTINUOUS
-  # frame and wrapped once at the end, so an Alaska spanning the dateline centres
-  # in the Bering Sea rather than halfway around the world.
-  #
-  # Zoom from the span: the globe shows ~360 deg at z0 and halves each level, so
-  # z = log2(360 / span). Latitude counts double because the viewport is wider
-  # than it is tall. Clamped to a sane range and pulled in slightly (-0.35) so the
-  # area sits inside the view rather than flush against the edges.
   sr_view <- function(sr_key) {
-    b <- sr_bbox(sr_key)
-    if (length(b) != 4 || anyNA(b)) return(list(center = c(-100, 40), zoom = 1.6))
-    ctr <- d_sr_bb |> filter(subregion_key == !!sr_key)
-    lon <- if (nrow(ctr) && !is.na(ctr$clon[1])) ctr$clon[1] else (b[1] + b[3]) / 2
-    lat <- if (nrow(ctr) && !is.na(ctr$clat[1])) ctr$clat[1] else (b[2] + b[4]) / 2
-    if (lon >  180) lon <- lon - 360
-    if (lon < -180) lon <- lon + 360
-    span <- max(b[3] - b[1], (b[4] - b[2]) * 2, 1)
-    # +0.55 rather than -0.35: at the theoretical fit the globe sat small in the
-    # middle of the viewport with empty space around it, because a sphere shows
-    # only its facing hemisphere. Nudged in so the study area fills the frame.
-    z    <- max(1.2, min(5, log2(360 / span) + 0.55))
-    list(center = c(lon, lat), zoom = z)
+    r <- d_sa[d_sa$key == sr_key, ]
+    if (!nrow(r)) r <- d_sa[d_sa$key == "FULL", ]
+    list(center = c(r$lon[1], r$lat[1]), zoom = r$zoom[1])
   }
-
-  # Study areas are DERIVED from what the release actually published, not
-  # hardcoded. The set genuinely differs: v1 has AK/AKL48/L48/USA, v2-v3 add
-  # GA/PA, v8 adds AT (Atlantic) -- which a fixed list silently hid, even though
-  # the whole point of the canonical subregions is to span all US waters.
-  #
-  # FULL and USA were treated as two labels for one extent, on the stated
-  # assumption that "FULL is the union of the subregion bboxes, i.e. the USA
-  # extent" -- so the picker dropped FULL and kept USA. That assumption is false
-  # on v4-v7, where the USA *zone* is the Program-Area union: 349,139 cells
-  # against 662,075 scored. Preferring USA is therefore how "All US waters" came
-  # to mean "all Program Areas". FULL now wins, and carries that label.
-  #
-  # USA is still offered where it differs, named for what it actually is, because
-  # its zone_metric aggregate is a real published number that the flower plots
-  # report -- it is a study area, just not the whole of one.
-  sr_labels <- c(FULL = "All US waters", USA = "All US waters",
-                 AK = "Alaska", AT = "Atlantic", GA = "Gulf of America",
-                 PA = "Pacific", L48 = "Mainland USA",
-                 AKL48 = "Mainland USA & Alaska")
-  sr_choices <- local({
-    # The study area is a CAMERA now, so a surface is no longer a requirement --
-    # only an extent to point at. That is what lets a release offer a study area
-    # it never scored (v7 has no Atlantic subregion) without drawing a blank map:
-    # the FULL surface is what renders, wherever the camera happens to be.
-    k <- unique(d_sr_bb$subregion_key)
-    if (!length(k)) k <- "FULL"
-    # name USA honestly wherever it is NOT the full scored extent
-    if (all(c("FULL", "USA") %in% k)) {
-      bbf <- d_sr_bb |> filter(subregion_key == "FULL")
-      bbu <- d_sr_bb |> filter(subregion_key == "USA")
-      same <- nrow(bbf) && nrow(bbu) &&
-        isTRUE(all.equal(as.numeric(bbf[1, c("xmin","ymin","xmax","ymax")]),
-                         as.numeric(bbu[1, c("xmin","ymin","xmax","ymax")]),
-                         tolerance = 1e-6))
-      if (same) k <- setdiff(k, "USA")            # genuinely the same view
-      else sr_labels[["USA"]] <- "Program Areas combined"
-    }
-    ord <- c("FULL", "USA", "AKL48", "L48", "AK", "AT", "GA", "PA")
-    k <- c(intersect(ord, k), sort(setdiff(k, ord)))
-    setNames(k, ifelse(is.na(sr_labels[k]), k, sr_labels[k]))
-  })
+  sr_choices <- stats::setNames(d_sa$key, d_sa$label)
   message("study areas: ", paste(names(sr_choices), collapse = ", "))
+
+  # The zone that means "everything this release scored". The study-area presets
+  # are geography and are the same everywhere; the ZONES are per release and
+  # differ (v7 publishes FULL/USA/AK/GA/PA, v8 publishes USA/AK/AT/GA/PA), so
+  # anything reading a published aggregate -- the flower plot, the species table
+  # -- resolves it here rather than assuming the camera's key names a zone. It
+  # would not: selecting Atlantic on v7 names a zone v7 does not have.
+  zone_all_key <- local({
+    have <- tryCatch(zone_vals() |> filter(fld == "subregion_key") |> pull(value),
+                     error = function(e) character())
+    for (k in c("FULL", "USA")) if (k %in% have) return(k)
+    if (length(have)) have[1] else "USA"
+  })
+  message("whole-study-area zone: ", zone_all_key)
 
   # Report version list: every published release, newest first, labelled with
   # status so a pre-release or retired one is not mistaken for the promoted one.
@@ -1196,7 +952,6 @@ pra_geom <- function() zone_geom("programarea")
   initial_lyr      <- layer_tiles(lyr_default, sr_choices[[1]])
   initial_rescale  <- initial_lyr$rescale
   initial_tile_url <- initial_lyr$url
-  initial_bbox     <- sr_bbox(sr_choices[[1]])
   initial_view     <- sr_view(sr_choices[[1]])
 
   # "Cells outside Program Areas" overlay: a binary mask served by the same
@@ -2036,10 +1791,9 @@ server_impl <- function(input, output, session) {
     } else if (!is.null(rx$clicked_pra)) {
       zone_label_of(rx$clicked_pra)
     } else {
-      sr_key <- input$sel_subregion %||% "FULL"
-      sr_lbl <- if (sr_key == "FULL") "Full study area" else
-        names(sr_choices)[sr_choices == sr_key]
-      glue("{sr_lbl} (default)")
+      # the plot is the whole study area regardless of where the camera is
+      # pointing, so the title must not claim otherwise (apps#14)
+      "Full study area (default)"
     }
   })
 
@@ -2082,7 +1836,6 @@ server_impl <- function(input, output, session) {
       sql      = cell_sql(m_key, sr_key),
       rescale  = lt$rescale,
       tile_url = lt$url,
-      bbox     = sr_bbox(sr_key),
       view     = sr_view(sr_key))
   })
 
@@ -2383,20 +2136,14 @@ server_impl <- function(input, output, session) {
 
         rx$clicked_cell <- NULL
 
-        # sr_bbox()/sr_view() rather than reading d_sr_bb raw: the stored frame is
-        # 0-360 and must be shifted before it reaches MapLibre (see sr_view)
-        sr_bb <- sr_bbox(sr_key)
-        sr_v  <- sr_view(sr_key)
+        sr_v <- sr_view(sr_key)
 
-        # Which zones the selected study area contains. The subregion ->
-        # programarea mapping only describes Program Areas, so it is used ONLY
-        # for that unit; every other unit shows all of its scored zones, which is
-        # right for Ecoregions (the rescaling baseline) and Planning Areas.
-        zone_keys <- zu$keys[[1]]
-        if (unit == "programarea" && sr_key != "FULL" && !is.null(d_sr_pra) && nrow(d_sr_pra)) {
-          in_sr <- d_sr_pra |> filter(subregion_key == !!sr_key) |> pull(programarea_key)
-          if (length(in_sr)) zone_keys <- intersect(zone_keys, in_sr)
-        }
+        # ALL of the unit's zones, always. The study area used to filter this
+        # too -- Program Areas were intersected with the subregion they belonged
+        # to -- which is the same masking-by-study-area that apps#13 removed from
+        # the raster, just applied to the outlines. It moves the camera; the map
+        # shows what the release scored.
+        zone_keys   <- zu$keys[[1]]
         zone_filter <- c("in", kcol, zone_keys)
 
         n_cols <- 11
@@ -2698,10 +2445,9 @@ server_impl <- function(input, output, session) {
     # zone (FULL falls back to USA). The cache is built at app startup from
     # zone_metric, populated by cell_metrics_to_zone_metrics in calc_scores.qmd.
     if (is.null(rx$clicked_cell) && is.null(rx$clicked_pra)) {
-      sr_key   <- input$sel_subregion %||% "FULL"
-      z_sr_key <- if (sr_key == "FULL") "FULL" else sr_key
-      sr_lbl   <- if (sr_key == "FULL") "Full study area" else
-        names(sr_choices)[sr_choices == sr_key]
+      # the whole study area, whatever the camera is pointing at (apps#14)
+      z_sr_key <- zone_all_key
+      sr_lbl   <- "Full study area"
       d_fl <- d_flower_default |>
         filter(subregion_key == !!z_sr_key) |>
         select(component, score, even)
@@ -2826,14 +2572,12 @@ server_impl <- function(input, output, session) {
         con_sdm, paste0(zone_unit_of(rx$clicked_pra), "_key"), pra_key))
     }
 
-    # ** subregion default ----
-    # "Full study area" is a UI-only choice with no zone row of its own; USA is
-    # the superset zone. (The old code mapped FULL -> "FULL", which matches
-    # nothing, so the default view returned no species at all.)
-    sr_key   <- input$sel_subregion %||% "FULL"
-    z_sr_key <- if (sr_key == "FULL") "USA" else sr_key
-    sr_lbl   <- if (sr_key == "FULL") "Full study area" else
-      names(sr_choices)[sr_choices == sr_key]
+    # ** whole study area ----
+    # Nothing clicked: the species of everything this release scored. NOT scoped
+    # by the study-area picker, which only moves the camera (apps#14) -- and
+    # which offers keys like AT that a given release may not publish as a zone.
+    z_sr_key <- zone_all_key
+    sr_lbl   <- "Full study area"
     if (verbose)
       message(glue("Getting species table for subregion: {sr_lbl} ({z_sr_key})"))
     rx$spp_tbl_hdr      <- glue("Species in {sr_lbl}")
