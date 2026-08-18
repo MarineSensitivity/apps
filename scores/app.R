@@ -1825,7 +1825,11 @@ server_impl <- function(input, output, session) {
         sql      = initial_sql,
         rescale  = initial_rescale,
         tile_url = initial_tile_url,
-        bbox     = initial_bbox))
+        # `view`, matching the slow path below. It returned `bbox` before, which
+        # nothing read -- so meta$view was NULL on the default selection and
+        # fly_to() got center = NULL. Latent until the bbox went away with the
+        # Program-Area-derived extents (apps#14) and made it a hard error.
+        view     = initial_view))
     }
 
     lt <- layer_tiles(m_key, sr_key, palette = pal)
