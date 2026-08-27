@@ -640,8 +640,11 @@ ver_of_req <- function(req) {
 # preview instance chrome: the signed-in reviewer, from Caddy's X-MS-User header
 # (set from the verified Cloudflare Access JWT; present only on the page GET,
 # stripped on the public vhost). Display only -- policy is MS_PREVIEW, above.
-preview_badge <- function(req) {
-  if (!msens::atlas_is_preview()) return(NULL)
+preview_badge <- function(req, ver) {
+  # only for a release that IS restricted: on the preview host a public release
+  # is just the app on another hostname, and labelling it PREVIEW says something
+  # untrue about the data
+  if (!msens::atlas_is_preview() || !identical(ver_access(ver), "restricted")) return(NULL)
   who <- tryCatch(req[["HTTP_X_MS_USER"]], error = function(e) NULL)
   span(class = "badge bg-warning text-dark ms-2",
        title = "restricted pre-release under review \u2014 sign-in required",
@@ -658,13 +661,20 @@ preview_badge <- function(req) {
 # the signed-in host (where the version is the URL PATH) rather than be handed a
 # public ?ver= link to a release the public host will not serve them. It also
 # keeps this off the network, and this renders on every page request.
+# Is the VERSION on screen restricted? Not "is this the preview instance" -- the
+# preview instance also serves PUBLIC releases (its catch-all Access application
+# covers any path without a version-specific one), and treating those as
+# restricted got two things wrong at once on /v7/scores/: it badged a public
+# release as PREVIEW, and it pointed that release's docs at the preview clone,
+# which holds only restricted books -- so the welcome modal's figure 404'd.
+# Access is a property of the release, and the registry is where it lives.
+ver_access <- function(ver) tryCatch(msens::atlas_ver_access(ver), error = function(e) "public")
+
 # the same source as product_nav(), for links OUTSIDE the nav (the welcome modal)
-product_url <- function(ver, key) msens::product_urls(
-  ver, access = if (msens::atlas_is_preview()) "restricted" else "public")[[key]]
+product_url <- function(ver, key) msens::product_urls(ver, access = ver_access(ver))[[key]]
 
 product_nav <- function(ver, current) {
-  u   <- msens::product_urls(
-    ver, access = if (msens::atlas_is_preview()) "restricted" else "public")
+  u   <- msens::product_urls(ver, access = ver_access(ver))
   lnk <- function(key, label, ...) if (identical(key, current))
     span(class = "nav-here", title = "you are here", label) else
     tags$a(class = "nav-link-ms", href = u[[key]], title = u[[key]], label, ...)
@@ -934,7 +944,7 @@ ui_impl <- function(req) page_sidebar(
          actionLink("show_versions", glue("({ver})"),
                     title = "data version - click to switch"),
          span(class = "ms-title-sub", " species distribution"),
-         preview_badge(req)),
+         preview_badge(req, ver)),
     product_nav(ver, "species"),
     div(
       class = "header-right",
@@ -1095,15 +1105,13 @@ server_impl <- function(input, output, session) {
       title = "Data version", easyClose = TRUE, size = "l",
       p("This app renders one published release of the Marine Sensitivity Toolkit."),
       tryCatch(
-        # public instance: restricted releases link OUT to the signed-in preview host
-        # preview instance: the version is the PATH there (/v9/species/), so every
-        # row links by path; public instance: restricted rows link OUT to the
-        # signed-in preview host, public rows stay in-app (?ver=)
-        if (msens::atlas_is_preview())
-          msens::version_picker_html(ver, href = function(v) sprintf("/%s/species/", v))
-        else
-          msens::version_picker_html(
-            ver, href_restricted = function(v) msens::preview_app_url("species", v)),
+        # every row goes where THAT release lives: a public one to the public
+        # host with ?ver=, a restricted one to the signed-in preview host by
+        # path. Linking by instance instead sent a reviewer on the preview host
+        # to /v7/species/ -- which works only for an admin, since the per-version
+        # Access applications do not cover a public release.
+        msens::version_picker_html(
+          ver, href = function(v) msens::product_urls(v, access = ver_access(v))[["species"]]),
         error = function(e)
           p(class = "text-muted", "Version list unavailable: ", conditionMessage(e)))))
   })

@@ -1099,8 +1099,11 @@ ver_of_req <- function(req) {
 # JWT and only ever present on the page GET (the one request whose headers
 # reach ui(req)); the public vhost strips it. Display only -- policy is
 # MS_PREVIEW, above.
-preview_badge <- function(req) {
-  if (!msens::atlas_is_preview()) return(NULL)
+preview_badge <- function(req, ver) {
+  # only for a release that IS restricted: on the preview host a public release
+  # is just the app on another hostname, and labelling it PREVIEW says something
+  # untrue about the data
+  if (!msens::atlas_is_preview() || !identical(ver_access(ver), "restricted")) return(NULL)
   who <- tryCatch(req[["HTTP_X_MS_USER"]], error = function(e) NULL)
   span(class = "badge bg-warning text-dark ms-2",
        title = "restricted pre-release under review \u2014 sign-in required",
@@ -1117,13 +1120,27 @@ preview_badge <- function(req) {
 # the signed-in host (where the version is the URL PATH) rather than be handed a
 # public ?ver= link to a release the public host will not serve them. It also
 # keeps this off the network, and this renders on every page request.
+# Is the VERSION on screen restricted? Not "is this the preview instance" -- the
+# preview instance also serves PUBLIC releases (its catch-all Access application
+# covers any path without a version-specific one), and treating those as
+# restricted got two things wrong at once on /v7/scores/: it badged a public
+# release as PREVIEW, and it pointed that release's docs at the preview clone,
+# which holds only restricted books -- so the welcome modal's figure 404'd.
+# Access is a property of the release, and the registry is where it lives.
+ver_access <- function(ver) tryCatch(msens::atlas_ver_access(ver), error = function(e) "public")
+
 # the same source as product_nav(), for links OUTSIDE the nav (the welcome modal)
-product_url <- function(ver, key) msens::product_urls(
-  ver, access = if (msens::atlas_is_preview()) "restricted" else "public")[[key]]
+product_url <- function(ver, key) msens::product_urls(ver, access = ver_access(ver))[[key]]
+
+# a tab title with a short form for phones: the four titles wrapped the card's
+# tab strip onto two rows at 400px. CSS swaps which span shows; `value` (what the
+# server keys on) is untouched.
+tab_title <- function(long, short) span(
+  span(class = "tab-long",  long),
+  span(class = "tab-short", short))
 
 product_nav <- function(ver, current) {
-  u   <- msens::product_urls(
-    ver, access = if (msens::atlas_is_preview()) "restricted" else "public")
+  u   <- msens::product_urls(ver, access = ver_access(ver))
   lnk <- function(key, label, ...) if (identical(key, current))
     span(class = "nav-here", title = "you are here", label) else
     tags$a(class = "nav-link-ms", href = u[[key]], title = u[[key]], label, ...)
@@ -1136,6 +1153,9 @@ product_nav <- function(ver, current) {
 }
 
 ui_impl <- function(req) page_sidebar(
+  # mobile: keep the page fillable so the map takes the viewport (the default,
+  # FALSE, is why the map had zero height on a phone -- see the mobile CSS below)
+  fillable_mobile = TRUE,
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     # curl-checkable sentinels: WHICH release this page renders and WHETHER this
@@ -1199,6 +1219,28 @@ ui_impl <- function(req) page_sidebar(
         animation: msens-spin 0.8s linear infinite;
       }
       @keyframes msens-spin { to { transform: rotate(360deg); } }
+      .tab-short { display: none; }
+      /* ---- mobile (bslib's own sidebar breakpoint) -----------------------------
+         The map used to be invisible on a phone: page_sidebar() is NOT fillable on
+         mobile by default (.bslib-flow-mobile makes every fill item flex:0 0 auto,
+         so the map card kept its intrinsic ~0 height) and sidebar(open = NULL)
+         resolves to mobile = 'always' (stacked below main, no toggle). Both are now
+         set in ui_impl (fillable_mobile = TRUE; open = list(mobile = 'closed')), so
+         bslib draws its toggle row and overlays the sidebar on the map. What is left
+         for CSS: fit the header and tab strip in ~400px and trim the page spacing. */
+      .ms-header { display: flex; align-items: center; width: 100%; }
+      @media (max-width: 575.98px) {
+        .bslib-page-sidebar { --bslib-spacer: 0.5rem; }
+        .bslib-sidebar-layout { --bslib-sidebar-padding: 0.5rem; }
+        .bslib-page-sidebar > .navbar { --bs-navbar-padding-y: 0.3rem; }
+        .ms-header { flex-wrap: wrap; row-gap: 2px; }
+        .ms-header .ms-title { flex: 1 1 auto; }
+        .ms-header .header-right { flex: 0 0 auto; margin-left: auto; padding-left: 8px; }
+        .ms-header .header-nav { order: 3; flex-basis: 100%; margin-left: 0; }
+        .tab-long  { display: none; }
+        .tab-short { display: inline; }
+        .nav-tabs .nav-link { padding: 0.35rem 0.6rem; }
+      }
     ")),
     tags$script(HTML("
       $(document).on('shiny:connected', function() {
@@ -1324,11 +1366,12 @@ ui_impl <- function(req) page_sidebar(
   div(style = "display:none",
       tags$input(id = "ms_ver_token", type = "text", value = msens::ver_token_sign(ver))),
   title = div(
-    style = "display: flex; align-items: center; width: 100%;",
-    span("BOEM Marine Sensitivity ",
+    class = "ms-header",
+    span(class = "ms-title",
+         "BOEM Marine Sensitivity ",
          actionLink("show_versions", glue("({ver})"),
                     title = "data version - click to switch"),
-         preview_badge(req)),
+         preview_badge(req, ver)),
     product_nav(ver, "scores"),
     div(
       class = "header-right",
@@ -1343,6 +1386,10 @@ ui_impl <- function(req) page_sidebar(
   # Carries the version, so a bookmark says which release it points at.
   window_title = glue("BOEM Marine Sensitivity ({ver})"),
   sidebar = sidebar(
+    # on a phone the sidebar collapses to bslib's toggle row and opens as an
+    # overlay on the map; the default (mobile = 'always') stacked it below a
+    # zero-height map with no way to close it
+    open = list(desktop = "open", mobile = "closed"),
     tags$div(
       id = "tour_subregion",
       selectInput(
@@ -1408,7 +1455,7 @@ ui_impl <- function(req) page_sidebar(
         map_output("map"))
     ),
     nav_panel(
-      title = "Plot of Scores",
+      title = tab_title("Plot of Scores", "Plot"),
       value = "Plot of Scores",
       card(
         full_screen = T,
@@ -1419,7 +1466,7 @@ ui_impl <- function(req) page_sidebar(
       )
     ),
     nav_panel(
-      title = "Table of Species",
+      title = tab_title("Table of Species", "Table"),
       value = "Table of Species",
       card(
         card_header(
@@ -1460,6 +1507,7 @@ ui_impl <- function(req) page_sidebar(
       layout_sidebar(
         sidebar = sidebar(
           width = 360,
+          open  = list(desktop = "open", mobile = "closed"),
           textInput(
             "rpt_title",
             "Report title",
@@ -1527,16 +1575,13 @@ server_impl <- function(input, output, session) {
       title = "Data version", easyClose = TRUE, size = "l",
       p("This app renders one published release of the Marine Sensitivity Toolkit."),
       tryCatch(
-        # on the public instance a restricted (under-review) release links OUT to
-        # the signed-in preview host; on the preview instance it renders in place
-        # preview instance: the version is the PATH there (/v9/scores/), so every
-        # row links by path; public instance: restricted rows link OUT to the
-        # signed-in preview host, public rows stay in-app (?ver=)
-        if (msens::atlas_is_preview())
-          msens::version_picker_html(ver, href = function(v) sprintf("/%s/scores/", v))
-        else
-          msens::version_picker_html(
-            ver, href_restricted = function(v) msens::preview_app_url("scores", v)),
+        # every row goes where THAT release lives: a public one to the public
+        # host with ?ver=, a restricted one to the signed-in preview host by
+        # path. Linking by instance instead sent a reviewer on the preview host
+        # to /v7/scores/ -- which works only for an admin, since the per-version
+        # Access applications do not cover a public release.
+        msens::version_picker_html(
+          ver, href = function(v) msens::product_urls(v, access = ver_access(v))[["scores"]]),
         error = function(e)
           p(class = "text-muted", "Version list unavailable: ", conditionMessage(e)))))
   })
