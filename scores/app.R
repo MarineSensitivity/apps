@@ -1117,6 +1117,10 @@ preview_badge <- function(req) {
 # the signed-in host (where the version is the URL PATH) rather than be handed a
 # public ?ver= link to a release the public host will not serve them. It also
 # keeps this off the network, and this renders on every page request.
+# the same source as product_nav(), for links OUTSIDE the nav (the welcome modal)
+product_url <- function(ver, key) msens::product_urls(
+  ver, access = if (msens::atlas_is_preview()) "restricted" else "public")[[key]]
+
 product_nav <- function(ver, current) {
   u   <- msens::product_urls(
     ver, access = if (msens::atlas_is_preview()) "restricted" else "public")
@@ -1651,7 +1655,10 @@ server_impl <- function(input, output, session) {
       tags$div(
         style = "text-align: left;",
         tags$img(
-          src   = "https://marinesensitivity.org/docs/figures/overview-methods.svg",
+          # the figure ships inside each release's book; the unversioned
+          # /docs/figures/... path stopped existing when the docs went
+          # per-version and the CI pruned the flat root
+          src   = paste0(product_url(ver, "docs"), "figures/overview-methods.svg"),
           style = "max-width: 80%; height: auto; max-height: 300px; margin-bottom: 10px;",
           alt   = "Marine Sensitivity Methods Overview"),
         tags$p(
@@ -1659,11 +1666,11 @@ server_impl <- function(input, output, session) {
           "component scores, and species found in cells or Program Areas. Also see:"),
         tags$ul(
           tags$li(tags$a(
-            href   = "../species/",
+            href   = product_url(ver, "species"),
             target = "_blank",
             "Species app"), " for mapping individual species distributions"),
           tags$li(tags$a(
-            href   = "https://marinesensitivity.org/docs/",
+            href   = product_url(ver, "docs"),
             target = "_blank",
             "Documentation"), " for methods and data sources"))),
       footer = tagList(
