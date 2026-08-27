@@ -539,11 +539,31 @@ build_bundle <- function(ver) {
   # representation; the layer bar offers an Original/Interpolated toggle per input and the
   # render picks the row. pick_asset falls back to native when a rep is absent (e.g. vector
   # inputs have no model COG).
-  native_by_key <- split(native_asset, native_asset$mdl_key)
-  reps_for   <- function(mk) if (is.null(native_by_key[[mk]])) character(0) else unique(native_by_key[[mk]]$representation)
+  # SORTED TABLE + INDEX, not split(). All three callers below want the same
+  # thing -- "the native_asset rows for this mdl_key" -- and `split()` answered it
+  # by materialising one tibble per key: 47,034 of them, 156 MB, to hold a table
+  # that is 21.7 MB. That single line was 70% of this app's bundle and most of
+  # the reason a species worker cost 222 MB against the scores app's 9.6 MB.
+  # Sorting once and remembering each key's row range costs ~5 MB and answers in
+  # O(1) through a hashed environment.
+  native_asset <- native_asset[order(native_asset$mdl_key), , drop = FALSE]
+  .na_runs  <- rle(native_asset$mdl_key)
+  .na_end   <- cumsum(.na_runs$lengths)
+  .na_start <- .na_end - .na_runs$lengths + 1L
+  .na_at    <- new.env(hash = TRUE, parent = emptyenv(), size = length(.na_runs$values))
+  for (.i in seq_along(.na_runs$values)) assign(.na_runs$values[.i], .i, envir = .na_at)
+  # the rows for one key (zero-row frame when the key has no asset), the shape
+  # every caller used to get from native_by_key[[mk]]
+  rows_for <- function(mk) {
+    if (is.null(mk) || is.na(mk) || !nzchar(mk)) return(native_asset[0, , drop = FALSE])
+    i <- .na_at[[mk]]
+    if (is.null(i)) return(native_asset[0, , drop = FALSE])
+    native_asset[.na_start[i]:.na_end[i], , drop = FALSE]
+  }
+  reps_for   <- function(mk) unique(rows_for(mk)$representation)
   pick_asset <- function(mk, rep = "native") {
-    a <- native_by_key[[mk]]
-    if (is.null(a) || !nrow(a)) return(NULL)
+    a <- rows_for(mk)
+    if (!nrow(a)) return(NULL)
     r <- a[a$representation == rep, , drop = FALSE]
     if (!nrow(r)) r <- a[order(a$representation != "native"), , drop = FALSE]   # fallback: native first
     r[1, ]
@@ -664,6 +684,9 @@ product_nav <- function(ver, current) {
 # lost at the shiny-server hop). This page request is the only one that still
 # carries the real address, so it is captured here and baked into the snippet.
 ui_impl <- function(req) page_sidebar(
+  # mobile: keep the page fillable so the map takes what the controls leave
+  # (the default, FALSE, is why the map was a sliver below them on a phone)
+  fillable_mobile = TRUE,
   tags$head(
     tags$link(rel = "icon", type = "image/x-icon", href = "favicon.ico"),
     # curl-checkable sentinels (see scores/app.R): which release this page
@@ -750,6 +773,36 @@ ui_impl <- function(req) page_sidebar(
       .sp-copy:hover, .sp-copy:focus { opacity: 1; }
       .sp-copy.copied      { opacity: 1; color: #198754; }
       .sp-copy.copy-failed { opacity: 1; color: #dc3545; }
+      .layer-bar .layer-toggle { display: none; }
+      .layer-bar .layer-toggle::after { content: ' \u25BE'; }
+      .layer-bar.expanded .layer-toggle::after { content: ' \u25B4'; }
+      /* ---- mobile (bslib's own sidebar breakpoint) -----------------------------
+         The map used to be invisible on a phone: page_sidebar() is NOT fillable on
+         mobile by default (.bslib-flow-mobile makes every fill item flex:0 0 auto,
+         so the map card kept its intrinsic ~0 height) and sidebar(open = NULL)
+         resolves to mobile = 'always' (stacked below main, no toggle). ui_impl now
+         sets fillable_mobile = TRUE, and this sidebar's open = F already means closed
+         on mobile, so bslib draws its toggle row and overlays the sidebar on the map.
+         What is left for CSS: fit the header, pickers and layer bar in ~400px. */
+      .ms-header { display: flex; align-items: center; width: 100%; }
+      @media (max-width: 575.98px) {
+        .bslib-page-sidebar { --bslib-spacer: 0.5rem; }
+        .bslib-sidebar-layout { --bslib-sidebar-padding: 0.5rem; }
+        .bslib-page-sidebar > .navbar { --bs-navbar-padding-y: 0.3rem; }
+        .ms-header { flex-wrap: wrap; row-gap: 2px; }
+        .ms-header .ms-title { flex: 1 1 auto; }
+        .ms-header .header-right { flex: 0 0 auto; margin-left: auto; padding-left: 8px; }
+        .ms-header .header-nav { order: 3; flex-basis: 100%; margin-left: 0; }
+        .ms-title-sub { display: none; }
+        /* the pickers speak for themselves; their labels cost a row each */
+        #tour_sp .control-label, #tour_mask .control-label { display: none; }
+        #tour_sp .form-group, #tour_mask .form-group { margin-bottom: 0.25rem; }
+        .sp-title { margin: 0 0 4px 2px; font-size: 0.95em; }
+        .layer-bar { flex-wrap: wrap; padding: 4px 8px; margin-top: 0; }
+        .layer-bar .layer-toggle { display: inline-block; margin-left: auto; }
+        .layer-bar .layer-links { display: none; flex-basis: 100%; margin-left: 0; padding-top: 4px; }
+        .layer-bar.expanded .layer-links { display: flex; }
+      }
     ")),
     tags$script(HTML("
       Shiny.addCustomMessageHandler('updateTitle', function(title) {
@@ -875,11 +928,12 @@ ui_impl <- function(req) page_sidebar(
   div(style = "display:none",
       tags$input(id = "ms_ver_token", type = "text", value = msens::ver_token_sign(ver))),
   title = div(
-    style = "display: flex; align-items: center; width: 100%;",
-    span("BOEM Marine Sensitivity ",
+    class = "ms-header",
+    span(class = "ms-title",
+         "BOEM Marine Sensitivity ",
          actionLink("show_versions", glue("({ver})"),
                     title = "data version - click to switch"),
-         " species distribution",
+         span(class = "ms-title-sub", " species distribution"),
          preview_badge(req)),
     product_nav(ver, "species"),
     div(
@@ -1489,6 +1543,13 @@ server_impl <- function(input, output, session) {
     div(
       class = bar_class,
       left_content,
+      # phones only (CSS): the pills stacked seven rows deep at 400px, so there they
+      # sit behind this toggle and the bar is one line until tapped. Client-side
+      # class flip, so no round trip; a re-render (layer change) collapses it again.
+      tags$a(
+        class   = "layer-pill layer-toggle",
+        onclick = "this.closest('.layer-bar').classList.toggle('expanded');",
+        glue("{length(pills)} layers")),
       div(class = "layer-links", pills))
   })
 
@@ -1882,8 +1943,8 @@ server_impl <- function(input, output, session) {
       # merged surface registered under ds_key "am", so keying on the label found nothing and
       # dropped through to the model_cell branch below -- which would have asked titiler for a
       # v8 partition while claiming to draw v1.
-      mc <- native_by_key[[layer_mdl_key]]
-      if (!is.null(mc) && nrow(mc)) merged_cog_url <- mc$asset_url[1]
+      mc <- rows_for(layer_mdl_key)
+      if (nrow(mc)) merged_cog_url <- mc$asset_url[1]
     }
     if (is_merged || (!is.null(asset) && asset$asset_type == "cog")) {
       tile_url <- if (is_merged && !is.na(merged_cog_url)) {
