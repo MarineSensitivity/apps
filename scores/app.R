@@ -3060,6 +3060,18 @@ server_impl <- function(input, output, session) {
       "MSENS_REPORT_URL",
       unset = "https://api.marinesensitivity.org/report")
 
+    # The API refuses to render a report of a RESTRICTED (under-review) release
+    # to the public -- a titled, citable PDF of unreviewed results is exactly
+    # what must not circulate. This instance proves it is the preview app with a
+    # shared secret (MSENS_PREVIEW_TOKEN, set on both containers); the public
+    # instance sends no header and never needs one, since it cannot resolve a
+    # restricted version in the first place.
+    # a plain character scalar, not a spliced list: this value is captured by the
+    # background worker below, and `!!!` splicing there would depend on future's
+    # globals detection seeing through rlang's dynamic dots -- a failure that
+    # would break reports for EVERYONE, public included
+    rpt_tok <- if (msens::atlas_is_preview()) Sys.getenv("MSENS_PREVIEW_TOKEN", "") else ""
+
     # the report is the highest-value "download" in the toolkit, and the file
     # itself is fetched from file.marinesensitivity.org (a different host, with
     # no JS) — so this is the ONLY place it can be counted. Logged at submit,
@@ -3099,11 +3111,12 @@ server_impl <- function(input, output, session) {
     # `session` and the notification stack.
     promises::future_promise(
       {
-        httr2::request(endpoint) |>
+        rq <- httr2::request(endpoint) |>
           httr2::req_body_json(body) |>
-          httr2::req_timeout(600) |>
-          httr2::req_perform() |>
-          httr2::resp_body_json()
+          httr2::req_timeout(600)
+        if (nzchar(rpt_tok))
+          rq <- httr2::req_headers(rq, `X-MS-Preview-Token` = rpt_tok)
+        rq |> httr2::req_perform() |> httr2::resp_body_json()
       },
       seed = TRUE) |>
       promises::then(
