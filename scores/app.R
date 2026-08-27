@@ -1228,6 +1228,29 @@ ui_impl <- function(req) page_sidebar(
          set in ui_impl (fillable_mobile = TRUE; open = list(mobile = 'closed')), so
          bslib draws its toggle row and overlays the sidebar on the map. What is left
          for CSS: fit the header and tab strip in ~400px and trim the page spacing. */
+      /* sidebar hint: a pill to the right of bslib's collapse chevron while the sidebar is
+         CLOSED, so a first-time visitor knows what the chevron opens. Pure CSS -- a ::after on
+         the toggle, which the browser hit-tests as part of the button, so tapping the pill
+         opens the sidebar too. No markup and no extra row: it lives in the toggle's own line
+         (the mobile toggle row, or beside the collapsed sidebar's edge on desktop). */
+      .bslib-page-sidebar > .bslib-sidebar-layout.sidebar-collapsed > .collapse-toggle::after {
+        content: 'Map options';
+        position: absolute; left: 100%; top: 50%; transform: translateY(-50%);
+        margin-left: 6px; padding: 1px 9px; border-radius: 999px;
+        font-size: 0.75rem; line-height: 1.4; white-space: nowrap;
+        border: 1px solid rgba(128,128,128,0.6); background: rgba(128,128,128,0.15);
+        color: inherit; opacity: 0.9; cursor: pointer;
+      }
+      .bslib-page-sidebar > .bslib-sidebar-layout.transitioning > .collapse-toggle::after { display: none; }
+      /* desktop: a collapsed sidebar leaves only a 48px gutter, and a pill to the right of the
+         chevron overlapped the first control (measured), so there it hangs BELOW the chevron as a
+         vertical tab in that gutter. Phones keep it beside the chevron in the empty toggle row. */
+      @media (min-width: 576px) {
+        .bslib-page-sidebar > .bslib-sidebar-layout.sidebar-collapsed > .collapse-toggle::after {
+          left: 50%; top: 100%; margin: 6px 0 0 0; transform: translateX(-50%);
+          writing-mode: vertical-rl; padding: 9px 1px;
+        }
+      }
       .ms-header { display: flex; align-items: center; width: 100%; }
       @media (max-width: 575.98px) {
         /* --bslib-spacer is the page padding; --bslib-mb-spacer is the 1.5rem gap

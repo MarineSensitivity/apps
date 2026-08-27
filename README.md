@@ -45,7 +45,13 @@ in each `ui_impl` under `@media (max-width: 575.98px)`:
   picks one, so the tab strip stays one row (`value` is untouched — the tour keys on it);
 - species: the pickers drop their labels, the layer bar's pills collapse behind a
   "N layers ▾" toggle (`.layer-bar.expanded`, a client-side class flip; a re-render collapses it
-  again), and "Zoom to layer" moves under the geocoder box, which goes full-width on narrow maps.
+  again), and "Zoom to layer" moves under the geocoder box, which goes full-width on narrow maps;
+- sidebar hint: while the sidebar is collapsed, a pill ("Map options" / "Species info") says what
+  bslib's chevron opens. It is a `::after` on the collapse toggle — no markup, and the browser
+  hit-tests it as part of the button, so tapping the pill opens the sidebar. On phones it sits
+  beside the chevron in the toggle row (no extra line); on desktop the collapsed sidebar leaves
+  only a 48px gutter and a pill to the right overlapped the first control (measured), so there it
+  hangs below the chevron as a vertical tab (`writing-mode: vertical-rl`).
 
 Verified locally at 400px and 360px in Chrome (both apps, sidebar overlay, Plot/Table tabs, layer
 toggle) and unchanged at desktop width. Local dev note: the app prefers
