@@ -25,9 +25,12 @@ options(
   shiny.minified = T,
   sass.cache = F,
   bslib.precompiled = T,
-  bslib.color_contrast_warnings = F,
-  shiny.autoreload = T,
-  shiny.autoreload.legacy_warning = F # Warning: Using legacy autoreload file watching. Please install watcher for a more performant autoreload file watcher.
+  bslib.color_contrast_warnings = F
+  # shiny.autoreload is a DEVELOPMENT option and was left on here: in production it
+  # runs a (legacy) file watcher over the app directory for every process and makes
+  # each page open a `wss://.../autoreload/` socket that nothing answers -- one
+  # failed WebSocket and a red console line per load, on both the public and the
+  # preview host. Set it in your own session while developing, not in the app.
 )
 
 # variables ----
