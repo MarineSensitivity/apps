@@ -326,8 +326,13 @@ build_bundle <- function(ver) {
   if (!"value_info" %in% names(d_datasets)) d_datasets$value_info <- NA_character_
   if (!"is_mask"    %in% names(d_datasets)) d_datasets$is_mask    <- FALSE
   if (!"sort_order" %in% names(d_datasets)) d_datasets$sort_order <- seq_len(nrow(d_datasets))
+  # on_grid (v9+): the native raster IS the analysis grid (AquaX), so its two representations are
+  # "as delivered" vs "as ingested" (scale, integer, the ingest threshold), not original vs
+  # interpolated -- the toggle is labelled accordingly. Absent before v9 -> FALSE.
+  if (!"on_grid"    %in% names(d_datasets)) d_datasets$on_grid    <- FALSE
   d_datasets <- d_datasets |>
-    select(ds_key, name_display, value_info, is_mask, sort_order) |>
+    mutate(on_grid = coalesce(as.logical(on_grid), FALSE)) |>
+    select(ds_key, name_display, value_info, is_mask, on_grid, sort_order) |>
     arrange(sort_order)
 
   # derive what was previously hardcoded
@@ -1448,18 +1453,27 @@ server_impl <- function(input, output, session) {
       cur_rep <- input$representation %||% "native"
       # Original (native source resolution) vs Interpolated (0.05\u00B0 scoring grid) \u2014 only when
       # the input publishes both (AquaMaps); vector ranges have just the native PMTiles.
+      # For a dataset delivered ON the grid (dataset.on_grid, AquaX from v9) nothing is
+      # interpolated: the pair is the band as DELIVERED vs the surface AS INGESTED (scaled to
+      # 1-100, integer, pixels below the ingest threshold dropped -- what the merge consumes).
+      on_grid  <- isTRUE(d_datasets$on_grid[match(current_layer, d_datasets$ds_key)])
+      rep_lbl  <- if (on_grid) c(native = "Delivered", model = "As ingested") else c(native = "Original", model = "Interpolated")
+      rep_ttl  <- if (on_grid) c(native = "the band exactly as delivered (already on the 0.05\u00B0 grid)",
+                                 model  = "as ingested: rescaled to 1\u2013100 with the ingest threshold applied \u2014 what the merge uses")
+                  else         c(native = "the source SDM at its native resolution",
+                                 model  = "resampled to the 0.05\u00B0 scoring grid")
       rep_toggle <- if (length(reps) > 1) tagList(
         span(" \u2014 "),
         tags$a(
           class   = paste0("layer-pill rep-pill", if (cur_rep == "native") " active" else ""),
-          title   = "the source SDM at its native resolution",
+          title   = rep_ttl[["native"]],
           onclick = "var r=document.querySelector('#representation_container input[value=\"native\"]'); if(r) r.click();",
-          "Original"),
+          rep_lbl[["native"]]),
         tags$a(
           class   = paste0("layer-pill rep-pill", if (cur_rep == "model") " active" else ""),
-          title   = "resampled to the 0.05\u00B0 scoring grid",
+          title   = rep_ttl[["model"]],
           onclick = "var r=document.querySelector('#representation_container input[value=\"model\"]'); if(r) r.click();",
-          "Interpolated")) else NULL
+          rep_lbl[["model"]])) else NULL
       left_content <- tagList(
         span(class = "layer-icon", "\u25B6"),
         span(class = "layer-label",
