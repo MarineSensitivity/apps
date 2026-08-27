@@ -1774,12 +1774,13 @@ server_impl <- function(input, output, session) {
     ) |>
       fit_bounds(er_bbox) |>
       msens::add_pmline(Filter(Negate(is.null), list(
+        # styled by msens::zone_style(), the one table the scores app draws from too
         if (!is.null(pa <- ztile("programarea", tbl_pra_pm)))
-          c(pa, list(id = "pra_ln", source_id = "pra_src",
-                     line_color = "white", line_width = 1)),
+          c(pa, list(id = "pra_ln", source_id = "pra_src"),
+            msens::zone_line_args("programarea")),
         if (!is.null(er <- ztile("ecoregion", tbl_er)))
-          c(er, list(id = "er_ln", source_id = "er_src",
-                     line_color = "black", line_width = 3, before_id = "pra_ln"))))) |>
+          c(er, list(id = "er_ln", source_id = "er_src", before_id = "pra_ln"),
+            msens::zone_line_args("ecoregion"))))) |>
       add_fill_layer(
         id           = "pra_hover",
         source       = "pra_src",
@@ -1789,9 +1790,10 @@ server_impl <- function(input, output, session) {
         tooltip      = get_column("programarea_name"),
         before_id    = "pra_ln") |>
       msens::add_pmlabel(list(
-        list(source     = pra_pts,
-             text_field = "programarea_key",
-             id         = "pra_lbl"))) |>
+        c(list(source     = pra_pts,
+               text_field = "programarea_key",
+               id         = "pra_lbl"),
+          msens::zone_label_args("programarea")))) |>
       add_fullscreen_control() |>
       add_navigation_control() |>
       add_scale_control() |>

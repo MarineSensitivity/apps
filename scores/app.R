@@ -667,6 +667,17 @@ pra_geom <- function() zone_geom("programarea")
     i <- which(zone_units$type == type)
     if (length(i)) zone_units[i[1], ] else NULL
   }
+  # the layers-control entries for the zone units: every outline, but a label entry
+  # only for a unit that HAS a label layer (msens::zone_style says which) -- an
+  # entry naming a layer that was never added is a dead switch
+  zone_ctrl_layers <- function() {
+    if (is.null(zone_units)) return(list())
+    has_lbl <- vapply(zone_units$type, function(t) !is.null(msens::zone_label_args(t)), logical(1))
+    c(setNames(as.list(paste0(zone_units$type, "_ln")),
+               paste(zone_units$label, "outlines")),
+      setNames(as.list(paste0(zone_units$type[has_lbl], "_lbl")),
+               paste(zone_units$label[has_lbl], "labels")))
+  }
 
   # * zone label points, cached per unit ----
   # Cached per VERSION and per TYPE: this is geometry, and a release without a
@@ -1967,27 +1978,30 @@ server_impl <- function(input, output, session) {
       # exists, and mapgl has no set_layer_visibility, so they are all created up
       # front. PMTiles are lazy -- an unused source fetches nothing.
       msens::add_pmline(Filter(Negate(is.null), c(
-        if (!is.null(zone_units)) lapply(seq_len(nrow(zone_units)), function(i) list(
+        # styled PER UNIT TYPE by msens::zone_style(), the one table the species app
+        # draws from too: white Program Areas, black 3px Ecoregions, dashed unlabelled
+        # Subregions. One white line for all three made them indistinguishable.
+        if (!is.null(zone_units)) lapply(seq_len(nrow(zone_units)), function(i) c(list(
           url          = zone_units$url[i],
           source_layer = zone_units$source_layer[i],
           id           = paste0(zone_units$type[i], "_ln"),
-          source_id    = paste0(zone_units$type[i], "_src"),
-          line_color   = "white",
-          # the primary unit reads as the frame; the others as context
-          line_width   = if (i == 1) 1 else 0.5,
-          line_opacity = if (i == 1) 1 else 0.45)),
+          source_id    = paste0(zone_units$type[i], "_src")),
+          msens::zone_line_args(zone_units$type[i]))),
         list(
           if (!is.null(er <- ztile("ecoregion", tbl_er)) &&
               !("ecoregion" %in% (zone_units$type %||% character())))
-            c(er, list(id = "er_ln", source_id = "er_src",
-                       line_color = "black", line_width = 3, before_id = before_er)))))) |>
+            c(er, list(id = "er_ln", source_id = "er_src", before_id = before_er),
+              msens::zone_line_args("ecoregion")))))) |>
       msens::add_pmlabel(Filter(Negate(is.null),
         if (is.null(zone_units)) list() else lapply(seq_len(nrow(zone_units)), function(i) {
+          la <- msens::zone_label_args(zone_units$type[i])
+          if (is.null(la)) return(NULL)   # drawn without labels (subregions)
           pts <- zone_pts(zone_units$type[i])
           if (is.null(pts) || !nrow(pts)) return(NULL)
-          list(source     = pts,
-               text_field = paste0(zone_units$type[i], "_key"),
-               id         = paste0(zone_units$type[i], "_lbl"))
+          c(list(source     = pts,
+                 text_field = paste0(zone_units$type[i], "_key"),
+                 id         = paste0(zone_units$type[i], "_lbl")),
+            la)
         }))) |>
       msens::add_cell_tiles(
         initial_tile_url, raster_opacity = 0.6, before_id = before_r) |>
@@ -2008,11 +2022,7 @@ server_impl <- function(input, output, session) {
       add_scale_control() |>
       add_layers_control(
         layers = c(
-          if (!is.null(zone_units)) c(
-            setNames(as.list(paste0(zone_units$type, "_ln")),
-                     paste(zone_units$label, "outlines")),
-            setNames(as.list(paste0(zone_units$type, "_lbl")),
-                     paste(zone_units$label, "labels"))),
+          zone_ctrl_layers(),
           list("Raster cell values"          = "r_lyr",
                "Cells outside Program Areas" = "outside_pra_lyr"))) |>
       add_geocoder_control(placeholder = "Go to location")
@@ -2329,10 +2339,7 @@ server_impl <- function(input, output, session) {
             mapgl::fly_to(center = sr_v$center, zoom = sr_v$zoom) |>
             clear_controls("layers")
           ctl <- c(
-            setNames(as.list(paste0(zone_units$type, "_ln")),
-                     paste(zone_units$label, "outlines")),
-            setNames(as.list(paste0(zone_units$type, "_lbl")),
-                     paste(zone_units$label, "labels")),
+            zone_ctrl_layers(),
             setNames(list(paste0(unit, "_fill")), paste(zu$label, "values")),
             list("Cells outside Program Areas" = "outside_pra_lyr"))
           m |> add_layers_control(layers = ctl)
