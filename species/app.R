@@ -783,6 +783,8 @@ ui_impl <- function(req) page_sidebar(
       .sp-copy:hover, .sp-copy:focus { opacity: 1; }
       .sp-copy.copied      { opacity: 1; color: #198754; }
       .sp-copy.copy-failed { opacity: 1; color: #dc3545; }
+      /* top-aligned + 10px right of the layers control (card pad 17 + ctrl margin 10 + icon 38) */
+      .zoom-extent-wrap { position: absolute; top: 27px; left: 75px; z-index: 2; }
       .layer-bar .layer-toggle { display: none; }
       .layer-bar .layer-toggle::after { content: ' \u25BE'; }
       .layer-bar.expanded .layer-toggle::after { content: ' \u25B4'; }
@@ -796,8 +798,11 @@ ui_impl <- function(req) page_sidebar(
          What is left for CSS: fit the header, pickers and layer bar in ~400px. */
       .ms-header { display: flex; align-items: center; width: 100%; }
       @media (max-width: 575.98px) {
-        .bslib-page-sidebar { --bslib-spacer: 0.5rem; }
+        /* --bslib-spacer is the page padding; --bslib-mb-spacer is the 1.5rem gap
+           .bslib-gap-spacing puts between the main column's children (measured) */
+        .bslib-page-sidebar { --bslib-spacer: 0.5rem; --bslib-mb-spacer: 0.5rem; }
         .bslib-sidebar-layout { --bslib-sidebar-padding: 0.5rem; }
+        .bslib-card > .card-body { padding: 0.5rem; }
         .bslib-page-sidebar > .navbar { --bs-navbar-padding-y: 0.3rem; }
         .ms-header { flex-wrap: wrap; row-gap: 2px; }
         .ms-header .ms-title { flex: 1 1 auto; }
@@ -810,8 +815,11 @@ ui_impl <- function(req) page_sidebar(
         .sp-title { margin: 0 0 4px 2px; font-size: 0.95em; }
         .layer-bar { flex-wrap: wrap; padding: 4px 8px; margin-top: 0; }
         .layer-bar .layer-toggle { display: inline-block; margin-left: auto; }
+        .layer-bar .layer-note { display: none; }
         .layer-bar .layer-links { display: none; flex-basis: 100%; margin-left: 0; padding-top: 4px; }
         .layer-bar.expanded .layer-links { display: flex; }
+        /* the geocoder box goes full-width on narrow maps, so the button sits under it */
+        .zoom-extent-wrap { top: 76px; left: 18px; }
       }
     ")),
     tags$script(HTML("
@@ -1040,7 +1048,7 @@ ui_impl <- function(req) page_sidebar(
     # "Zoom to layer" overlaid at the map's top-left, right of the layer selector. Auto-fit on layer
     # switch is off (so users can compare models at one view); this restores fit-to-extent on demand.
     tags$div(
-      style = "position: absolute; top: 27px; left: 75px; z-index: 2;",   # top-aligned + 10px right of the layers control (card pad 17 + ctrl margin 10 + icon 38)
+      class = "zoom-extent-wrap",   # positioned in CSS: beside the layers control, or under the geocoder on a phone
       actionButton(
         "btn_zoom_extent", "Zoom to layer",
         icon  = icon("expand"),
@@ -1095,9 +1103,8 @@ server_impl <- function(input, output, session) {
     # `mdl_seq` counts as owned too — it is the v1-v7 spelling of the same parameter. Left
     # out, this observer rewrote the URL to a bare ?ver= before the deep-link observer had
     # read it, so a published /mapsp/?mdl_seq= link raced against its own fix.
-    if (is.null(q$mdl_key) && is.null(q$mdl_seq) &&  # the ?mdl_key= observer owns the URL otherwise
-        !msens::atlas_is_preview())                  # preview: the version is the PATH; Caddy forces ?ver=
-      updateQueryString(glue("?ver={ver}"), mode = "replace", session = session)
+    if (is.null(q$mdl_key) && is.null(q$mdl_seq))   # the ?mdl_key= observer owns the URL otherwise
+      updateQueryString(sprintf("/%s/species/", ver), mode = "replace", session = session)
   })
 
   observeEvent(input$show_versions, {
@@ -1506,6 +1513,7 @@ server_impl <- function(input, output, session) {
         # count the ms_merge edge in n_ds and v8 does not, so any fixed offset is wrong on one
         # of them. This is the same quantity as the input pills beside it, by construction.
         if (n_inputs > 1) span(
+          class = "layer-note",   # hidden on phones: the "N layers" toggle carries the count
           style = "opacity: 0.85;",
           glue(" (maximum of {n_inputs} inputs)")))
     } else {
@@ -1900,12 +1908,9 @@ server_impl <- function(input, output, session) {
     browser_title <- glue(
       "{sp_name} distribution ({sp_cat_cmn}; mdl_key: {layer_mdl_key}) from {layer_name} | BOEM Marine Sensitivity")
     session$sendCustomMessage("updateTitle", browser_title)
-    # on the preview host the version is the PATH (/v9/species/), so repeating it
-    # as ?ver= would only make every shared deep link say it twice
-    updateQueryString(
-      if (msens::atlas_is_preview()) glue("?mdl_key={layer_mdl_key}")
-      else glue("?ver={ver}&mdl_key={layer_mdl_key}"),
-      mode = "replace", session = session)
+    # the version is the PATH on both hosts, so a deep link says it once
+    updateQueryString(sprintf("/%s/species/?mdl_key=%s", ver, layer_mdl_key),
+                      mode = "replace", session = session)
 
     # v8 Phase 4b: the merged model + AquaMaps inputs are raster surfaces (titiler XYZ tiles on
     # "r_lyr"); vector-range inputs are PMTiles polygons (client-filtered by mdl_key on "r_pm").

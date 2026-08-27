@@ -1230,8 +1230,11 @@ ui_impl <- function(req) page_sidebar(
          for CSS: fit the header and tab strip in ~400px and trim the page spacing. */
       .ms-header { display: flex; align-items: center; width: 100%; }
       @media (max-width: 575.98px) {
-        .bslib-page-sidebar { --bslib-spacer: 0.5rem; }
+        /* --bslib-spacer is the page padding; --bslib-mb-spacer is the 1.5rem gap
+           .bslib-gap-spacing puts between the main column's children (measured) */
+        .bslib-page-sidebar { --bslib-spacer: 0.5rem; --bslib-mb-spacer: 0.5rem; }
         .bslib-sidebar-layout { --bslib-sidebar-padding: 0.5rem; }
+        .bslib-card > .card-body { padding: 0.5rem; }
         .bslib-page-sidebar > .navbar { --bs-navbar-padding-y: 0.3rem; }
         .ms-header { flex-wrap: wrap; row-gap: 2px; }
         .ms-header .ms-title { flex: 1 1 auto; }
@@ -1633,12 +1636,14 @@ server_impl <- function(input, output, session) {
     }
   })
 
-  # echo the version into the URL so a shared link is explicit about what it shows
-  # (and keeps working once other versions render here). Not on the preview
-  # instance: there the version is the PATH (/v9/scores/) and Caddy forces ?ver=.
+  # canonicalise the URL to the path form, so a shared link says which release it
+  # shows. A bare /scores/ visit resolves the promoted release and then reads
+  # /v7/scores/; a versioned path is already canonical and this is a no-op. Same
+  # shape on both hosts, so no instance branch -- and RELATIVE, because an
+  # absolute URL would be cross-origin on the preview host and replaceState
+  # throws on those.
   observe({
-    if (!msens::atlas_is_preview())
-      updateQueryString(glue("?ver={ver}"), mode = "replace", session = session)
+    updateQueryString(sprintf("/%s/scores/", ver), mode = "replace", session = session)
   })
 
   # observe(session$setCurrentTheme(
@@ -2675,10 +2680,10 @@ server_impl <- function(input, output, session) {
         # default taxon (the leatherback turtle) whatever row was clicked (#6).
         # URL-encoded because a v8 mdl_key contains `|` and `:`.
         model_id  = if (is.na(id_col)) NA_character_ else as.character(.data[[id_col]]),
-        # relative, so on the preview host it stays inside /v{ver}/ and the
-        # version needs no repeating; on the public host ?ver= carries it
+        # relative, so it stays inside /v{ver}/ on either host and the version
+        # needs no repeating
         model_url = if (is.na(id_col)) NA_character_ else
-          glue("../species/?{if (msens::atlas_is_preview()) '' else paste0('ver=', ver, '&')}mdl_key=",
+          glue("../species/?mdl_key=",
                "{vapply(model_id, utils::URLencode, '', reserved = TRUE)}"),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(
