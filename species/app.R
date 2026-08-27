@@ -598,6 +598,17 @@ ver_of_session <- function(input, session) {
            error = function(e) ver_of(NULL))
 }
 
+# The version of the PAGE being served. On the preview host it is the URL PATH
+# (/v9/scores/), which Caddy strips before shiny-server sees it and hands over as
+# X-MS-Version -- a header the server SETS from the path, so a client can neither
+# forge it nor need to carry a redundant ?ver= in every shared link. The public
+# host has no prefix and keeps ?ver=. Either way the value goes through ver_of(),
+# so the instance's access policy still decides.
+ver_of_req <- function(req) {
+  v <- tryCatch(req[["HTTP_X_MS_VERSION"]], error = function(e) NULL)
+  if (!is.null(v) && nzchar(v)) ver_of(paste0("ver=", v)) else ver_of(req$QUERY_STRING)
+}
+
 # preview instance chrome: the signed-in reviewer, from Caddy's X-MS-User header
 # (set from the verified Cloudflare Access JWT; present only on the page GET,
 # stripped on the public vhost). Display only -- policy is MS_PREVIEW, above.
@@ -1796,7 +1807,12 @@ server_impl <- function(input, output, session) {
     browser_title <- glue(
       "{sp_name} distribution ({sp_cat_cmn}; mdl_key: {layer_mdl_key}) from {layer_name} | BOEM Marine Sensitivity")
     session$sendCustomMessage("updateTitle", browser_title)
-    updateQueryString(glue("?ver={ver}&mdl_key={layer_mdl_key}"), mode = "replace", session = session)
+    # on the preview host the version is the PATH (/v9/species/), so repeating it
+    # as ?ver= would only make every shared deep link say it twice
+    updateQueryString(
+      if (msens::atlas_is_preview()) glue("?mdl_key={layer_mdl_key}")
+      else glue("?ver={ver}&mdl_key={layer_mdl_key}"),
+      mode = "replace", session = session)
 
     # v8 Phase 4b: the merged model + AquaMaps inputs are raster surfaces (titiler XYZ tiles on
     # "r_lyr"); vector-range inputs are PMTiles polygons (client-filtered by mdl_key on "r_pm").
@@ -2074,7 +2090,7 @@ server_impl <- function(input, output, session) {
 # with their enclosing environment set to the requested version's bundle.
 
 ui <- function(req) {
-  b <- bundle(ver_of(req$QUERY_STRING))
+  b <- bundle(ver_of_req(req))
   f <- ui_impl; environment(f) <- b
   f(req)
 }

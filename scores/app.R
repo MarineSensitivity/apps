@@ -1083,6 +1083,17 @@ ver_of_session <- function(input, session) {
            error = function(e) ver_of(NULL))
 }
 
+# The version of the PAGE being served. On the preview host it is the URL PATH
+# (/v9/scores/), which Caddy strips before shiny-server sees it and hands over as
+# X-MS-Version -- a header the server SETS from the path, so a client can neither
+# forge it nor need to carry a redundant ?ver= in every shared link. The public
+# host has no prefix and keeps ?ver=. Either way the value goes through ver_of(),
+# so the instance's access policy still decides.
+ver_of_req <- function(req) {
+  v <- tryCatch(req[["HTTP_X_MS_VERSION"]], error = function(e) NULL)
+  if (!is.null(v) && nzchar(v)) ver_of(paste0("ver=", v)) else ver_of(req$QUERY_STRING)
+}
+
 # preview instance chrome: a badge naming the signed-in reviewer. The identity
 # comes from Caddy's X-MS-User header, set from the VERIFIED Cloudflare Access
 # JWT and only ever present on the page GET (the one request whose headers
@@ -2612,8 +2623,10 @@ server_impl <- function(input, output, session) {
         # default taxon (the leatherback turtle) whatever row was clicked (#6).
         # URL-encoded because a v8 mdl_key contains `|` and `:`.
         model_id  = if (is.na(id_col)) NA_character_ else as.character(.data[[id_col]]),
+        # relative, so on the preview host it stays inside /v{ver}/ and the
+        # version needs no repeating; on the public host ?ver= carries it
         model_url = if (is.na(id_col)) NA_character_ else
-          glue("../species/?ver={ver}&mdl_key=",
+          glue("../species/?{if (msens::atlas_is_preview()) '' else paste0('ver=', ver, '&')}mdl_key=",
                "{vapply(model_id, utils::URLencode, '', reserved = TRUE)}"),
         taxon_str = glue("{taxon_authority}:{taxon_id}"),
         taxon_url = ifelse(
@@ -3168,7 +3181,7 @@ server_impl <- function(input, output, session) {
 # through to the globals.
 
 ui <- function(req) {
-  b <- bundle(ver_of(req$QUERY_STRING))
+  b <- bundle(ver_of_req(req))
   f <- ui_impl; environment(f) <- b
   f(req)
 }
