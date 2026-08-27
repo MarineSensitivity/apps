@@ -5,10 +5,16 @@ Shiny applications
 
 `scores` and `species` each run **twice** on the server, from this one codebase:
 
-| instance | served at | version comes from | may render |
-|---|---|---|---|
-| public | `app.marinesensitivity.org/scores/` | `?ver=` | `access: public` releases only |
-| preview | `preview.marinesensitivity.org/v8/scores/` | the URL **path**, handed over by Caddy as `X-MS-Version` | everything, incl. `restricted` pre-releases |
+| instance | served at | may render |
+|---|---|---|
+| public | `app.marinesensitivity.org/v7/scores/` | `access: public` releases only |
+| preview | `preview.marinesensitivity.org/v8/scores/` | everything, incl. `restricted` pre-releases |
+
+**The version is the URL path on both hosts** (since 2026-08-27). Caddy strips the prefix and hands
+it to the app as `X-MS-Version` — a header the server sets, so a client cannot forge it and no
+`?ver=` need duplicate it in a shared link. The old spelling still resolves: `/scores/?ver=v7` 301s
+to `/v7/scores/`, as do the retired per-version instances (`/mapgl_v1`, `/mapsp`, …). A bare
+`/scores/` resolves the promoted release and then canonicalises its own URL.
 
 The preview instance is a second Shiny Server block whose 3-line wrapper sets `MS_PREVIEW=1`
 (`server/rstudio/shiny_apps_preview/`), and `msens::atlas_allow_access()` reads that env var — the
