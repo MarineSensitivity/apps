@@ -1160,7 +1160,16 @@ product_nav <- function(ver, current) {
     lnk("scores",  "Scores"),  span(class = "nav-sep", "\u00b7"),
     lnk("species", "Species"), span(class = "nav-sep", "\u00b7"),
     lnk("docs",    "Docs", target = "_blank"), span(class = "nav-sep", "\u00b7"),
-    lnk("home",    "Home"))
+    lnk("home",    "Home"),
+    # Signing out of the preview host is a Cloudflare Access thing, not ours:
+    # /cdn-cgi/access/logout is answered at the edge (it never reaches Caddy, so
+    # the gate does not block it) and clears the session for this hostname. There
+    # was no way to do it from the UI at all, which matters when someone signs in
+    # with the wrong address.
+    if (msens::atlas_is_preview()) tagList(
+      span(class = "nav-sep", "\u00b7"),
+      tags$a(class = "nav-link-ms", href = "/cdn-cgi/access/logout",
+             title = "end this Cloudflare Access session", "Sign out")))
 }
 
 ui_impl <- function(req) page_sidebar(
